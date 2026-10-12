@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-13 · revision 5. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-13 · revision 6. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -11,7 +11,6 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-002 | P0 | M1 | Portable parallel scan in `scan` (rayon, progress, cancellation, hardlinks, reparse points; errors do not abort the walk) | integration tests on fixtures; budget documented. M1.4 `scan::start` and M1.5 fixture test + measurement landed; open: cold-cache scan slowness (125 s for 1M), `xtask perf` |
 | G-005 | P1 | M1 | eframe/wgpu window: tree, extension list, status bar | screenshot in `log/devlog.md` |
 | G-006 | P1 | M1 | Treemap: layout rendering, highlight, click selection, selection sync | layout invariants + screenshot |
-| G-007 | P0 | M1 | Last-resort guard: `catch_unwind` around commands and scans | test: panic in a command gives `Err`, session intact |
 | G-008 | P1 | M2 | Command registry (`CommandSpec`), menu catalog, command palette | `engine.commands` lists everything |
 | G-009 | P0 | M2 | `hostile_params_never_panic` over the whole registry | test is green |
 | G-010 | P1 | M2 | Control channel (TCP/key), `ui.screenshot`, CLI, MCP | the protocol in `docs/control-protocol.md` works |
@@ -38,6 +37,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-001 | 2026-10-13 | M1.1: model with logical/allocated sizes (`SizeMode`), `NodeData`, file/dir/error counters, mtime, attributes |
 | G-004 | 2026-10-13 | M1.2: rayon, serde, serde_json, tracing, tempfile, proptest added; `cargo deny check` passes |
 | G-003 | 2026-10-13 | M1.3: `cargo xtask fixtures` (seeded splitmix64 plan, exact node count, hardlinks, symlink cycle, empty/unicode/long-path cases) |
+| G-007 | 2026-10-13 | M1.6: `engine::guard` (`catch_unwind`) around `Session::run` and `Session::finish_scan`; `CommandError::Panicked`; scan thread panic becomes `CommandError::Scan` |
 
 ## Revision history
 
@@ -46,3 +46,4 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-13 · r3: G-001 closed (M1.1).
 - 2026-10-13 · r4: G-004 closed (M1.2).
 - 2026-10-13 · r5: G-003 closed (M1.3).
+- 2026-10-13 · r6: G-007 closed (M1.6).

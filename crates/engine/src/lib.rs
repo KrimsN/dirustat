@@ -5,8 +5,10 @@
 //!
 //! Status: skeleton (milestone M1).
 
+mod guard;
+
 use dirustat_model::{SizeMode, Tree};
-use dirustat_scan::empty_tree;
+use dirustat_scan::{ScanHandle, empty_tree};
 use dirustat_treemap::{Rect, squarify};
 use std::fmt;
 
@@ -16,6 +18,13 @@ pub enum CommandError {
     UnknownCommand(String),
     InvalidParams(String),
     Unsupported(String),
+    /// A panic was caught by the last-resort guard; the session is intact.
+    Panicked {
+        what: String,
+        message: String,
+    },
+    /// The scan failed (root unreadable, thread pool, scan thread panic).
+    Scan(String),
 }
 
 impl fmt::Display for CommandError {
@@ -24,6 +33,8 @@ impl fmt::Display for CommandError {
             Self::UnknownCommand(id) => write!(f, "unknown command: {id}"),
             Self::InvalidParams(why) => write!(f, "invalid params: {why}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Self::Panicked { what, message } => write!(f, "internal error in {what}: {message}"),
+            Self::Scan(why) => write!(f, "scan failed: {why}"),
         }
     }
 }
@@ -56,9 +67,28 @@ impl Session {
         squarify(&weights, bounds)
     }
 
-    /// Runs a command by id. The command registry arrives in M1.
-    pub fn run(&mut self, id: &str, _params: &str) -> Result<(), CommandError> {
-        Err(CommandError::UnknownCommand(id.to_owned()))
+    /// Runs a command by id under the last-resort panic guard. The command registry arrives in M2.
+    pub fn run(&mut self, id: &str, params: &str) -> Result<(), CommandError> {
+        guard::guarded(id, || self.dispatch(id, params))
+    }
+
+    /// Waits for a scan and, unless it was cancelled, makes its tree current. A panic in the scan
+    /// thread is reported as an error and the previous tree is kept.
+    pub fn finish_scan(&mut self, handle: ScanHandle) -> Result<bool, CommandError> {
+        let outcome = guard::guarded("scan", || handle.join().map_err(|err| CommandError::Scan(err.to_string())))?;
+        if outcome.cancelled {
+            return Ok(false);
+        }
+        self.tree = outcome.tree;
+        Ok(true)
+    }
+
+    fn dispatch(&mut self, id: &str, _params: &str) -> Result<(), CommandError> {
+        match id {
+            #[cfg(test)]
+            "test.panic" => panic!("deliberate test panic"),
+            _ => Err(CommandError::UnknownCommand(id.to_owned())),
+        }
     }
 }
 
@@ -76,6 +106,25 @@ mod tests {
     fn unknown_command_is_an_error_not_a_panic() {
         let mut s = Session::new();
         assert_eq!(s.run("nope", "{}"), Err(CommandError::UnknownCommand("nope".into())));
+    }
+
+    #[test]
+    fn panicking_command_is_an_error_and_session_survives() {
+        let mut s = Session::new();
+        let err = s.run("test.panic", "{}").unwrap_err();
+        assert!(matches!(&err, CommandError::Panicked { what, .. } if what == "test.panic"));
+        assert_eq!(s.run("nope", "{}"), Err(CommandError::UnknownCommand("nope".into())));
+        assert_eq!(s.tree().len(), 1);
+    }
+
+    #[test]
+    fn finish_scan_replaces_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let handle = dirustat_scan::start(dir.path(), dirustat_scan::ScanOptions::default()).unwrap();
+        let mut s = Session::new();
+        assert_eq!(s.finish_scan(handle), Ok(true));
+        assert!(s.tree().len() >= 2);
     }
 
     #[test]

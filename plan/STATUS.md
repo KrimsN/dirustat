@@ -3,9 +3,9 @@
 > A snapshot for hand-off between agent sessions. Overwrite at the end of every session (it is not a journal; the journal is `log/devlog.md`).
 
 - **Updated:** 2026-10-13
-- **Milestone:** M1 "Core and first window" in progress (M1.1-M1.5 done)
+- **Milestone:** M1 "Core and first window" in progress (M1.1-M1.6 done)
 - **Tree:** green (`cargo xtask ci` passes: fmt, clippy `-D warnings`, tests, layers; wasm-core is skipped when the target is not installed)
-- **Next task:** M1.6 (G-007): last-resort guard (`catch_unwind`) around scans and commands; open side item: cold-cache scan slowness (see devlog M1.5)
+- **Next task:** M1.7 (G-024): ADR on storing names with invalid UTF-16 (lossy + flag); then M1.8 (G-005) eframe window. Open side item: cold-cache scan slowness and `xtask perf` (G-002, see devlog M1.5)
 - **Blockers:** none
 - **Waiting for a human decision:**
   - reserving the name `dirustat` on crates.io / a GitHub organization;

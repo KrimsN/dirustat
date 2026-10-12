@@ -2,6 +2,11 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M1.6 · Claude
+- Landed: `engine::guard::guarded` (private) wraps `Session::run` in `catch_unwind`; a panic becomes `CommandError::Panicked { what, message }` and is logged via `tracing::error!`. New `Session::finish_scan(handle)` joins a scan under the same guard: a scan-thread panic or failure becomes `CommandError::Scan`, a cancelled scan keeps the old tree, otherwise the new tree replaces it. The scan crate already caught worker panics per directory (M1.4).
+- Numbers: engine tests 2 -> 8 (str/String/opaque payloads, pass-through, session survives a panicking `test.panic` command, `finish_scan` replaces the tree).
+- Still open: the control channel / UI shell must route every call through `Session::run` (M2); cold-cache scan slowness and `xtask perf` (G-002) are unchanged.
+
 ## 2026-10-13 · M1.5 · Claude
 - Landed: ignored integration test `crates/scan/tests/fixture_scan.rs` (scan vs an independent `std` walk: dirs, files, errors, size bound; path via `DIRUSTAT_FIXTURE`, absolute) and `examples/scan_bench.rs` (prints only aggregates).
 - Numbers (Windows 11, release, default rayon threads): 100k fixture (100020 nodes) warm 0.03-0.14 s; 1M fixture (1000020 nodes) warm 1.43 s (~700k nodes/s), within the 25 s budget. The very first scan right after generation was slow: 12.9 s for 100k, 125 s for 1M (~8k nodes/s), i.e. cold cache / antivirus-style overhead on freshly written files.
