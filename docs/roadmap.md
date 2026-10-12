@@ -1,6 +1,6 @@
 # Roadmap
 
-> Status: 2026-10-13 · revision 2 · **Current focus: M1** (portable scan + model + treemap + window).
+> Status: 2026-10-13 · revision 3 · **Current focus: M1** (portable scan + model + treemap + window). M1.1-M1.11 landed; remaining: screenshot verification (needs `ui.screenshot`, M2.5), then M2.1 command registry.
 
 | Milestone | Result | Main gaps | Estimate |
 |---|---|---|---|
@@ -27,3 +27,4 @@
 
 - 2026-10-13 · r1: milestones M0-M7.
 - 2026-10-13 · r2: translated to English.
+- 2026-10-13 · r3: current focus updated after M1.7-M1.11 (M1 exit criterion "screenshot in devlog" still open).

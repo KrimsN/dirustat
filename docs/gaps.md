@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-13 · revision 7. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-13 · revision 8. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -9,8 +9,8 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | ID | P | Milestone | Description | Done when |
 |---|---|---|---|---|
 | G-002 | P0 | M1 | Portable parallel scan in `scan` (rayon, progress, cancellation, hardlinks, reparse points; errors do not abort the walk) | integration tests on fixtures; budget documented. M1.4 `scan::start` and M1.5 fixture test + measurement landed; open: cold-cache scan slowness (125 s for 1M), `xtask perf` |
-| G-005 | P1 | M1 | eframe/wgpu window: tree, extension list, status bar | screenshot in `log/devlog.md` |
-| G-006 | P1 | M1 | Treemap: layout rendering, highlight, click selection, selection sync | layout invariants + screenshot |
+| G-005 | P1 | M1 | eframe/wgpu window: tree, extension list, status bar | screenshot in `log/devlog.md`. Progress: eframe/egui 0.36 shell (menu, path bar, Scan/Stop, status bar), virtualized sortable tree panel, extension list panel landed (M1.8, M1.9, M1.11); open: screenshot (needs `ui.screenshot`, M2.5; the release app was only smoke-launched for 8 s), keyboard navigation in the tree, menus are placeholders |
+| G-006 | P1 | M1 | Treemap: layout rendering, highlight, click selection, selection sync | layout invariants + screenshot. Progress: layout invariants, rendering with extension colours, hover tooltip, click select, selected-extension highlight and selection sync landed (M1.10); open: screenshot, cushion shading (G-018) |
 | G-008 | P1 | M2 | Command registry (`CommandSpec`), menu catalog, command palette | `engine.commands` lists everything |
 | G-009 | P0 | M2 | `hostile_params_never_panic` over the whole registry | test is green |
 | G-010 | P1 | M2 | Control channel (TCP/key), `ui.screenshot`, CLI, MCP | the protocol in `docs/control-protocol.md` works |
@@ -48,3 +48,4 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-13 · r5: G-003 closed (M1.3).
 - 2026-10-13 · r6: G-007 closed (M1.6).
 - 2026-10-13 · r7: G-024 closed (M1.7); G-005/G-006 partially advanced (see devlog M1.8-M1.11).
+- 2026-10-13 · r8: G-005/G-006 progress notes updated after M1.9-M1.11 panels; both stay open pending a screenshot.
