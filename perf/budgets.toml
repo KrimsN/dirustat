@@ -1,0 +1,22 @@
+# Бюджеты производительности. enforce = false пока нет измерений; после первого замера — true.
+# Измеряется в release на эталонных деревьях (см. docs/performance.md).
+
+[scan_portable_1m_files_ssd]
+budget_seconds = 25.0
+enforce = false
+
+[scan_mft_1m_files_ntfs]
+budget_seconds = 3.0
+enforce = false
+
+[treemap_layout_1m_nodes]
+budget_ms = 150
+enforce = false
+
+[treemap_render_frame_1m_nodes]
+budget_ms = 8
+enforce = false
+
+[ui_first_paint_after_scan_start]
+budget_ms = 300
+enforce = false

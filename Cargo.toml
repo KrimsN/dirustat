@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "apps/*", "xtask"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/dirustat/dirustat"
+authors = ["diRUSTat contributors"]
+
+[workspace.dependencies]
+dirustat-model = { path = "crates/model" }
+dirustat-treemap = { path = "crates/treemap" }
+dirustat-ntfs = { path = "crates/ntfs" }
+dirustat-scan = { path = "crates/scan" }
+dirustat-engine = { path = "crates/engine" }
+dirustat-control = { path = "crates/control" }
+dirustat-ui = { path = "crates/ui" }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+dbg_macro = "deny"
+print_stdout = "warn"
+print_stderr = "warn"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+panic = "unwind"   # last-resort guard ловит панику; не менять на abort
+
+[profile.dev]
+debug = "line-tables-only"

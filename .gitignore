@@ -1,0 +1,14 @@
+/target
+/target-*
+target/agent-*
+*.pdb
+.DS_Store
+Thumbs.db
+corpus/
+fixtures-local/
+*.local.json
+.claude/settings.local.json
+*.log
+!log/devlog.md
+
+plan/refs/
