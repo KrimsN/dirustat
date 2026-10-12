@@ -3,9 +3,9 @@
 > A snapshot for hand-off between agent sessions. Overwrite at the end of every session (it is not a journal; the journal is `log/devlog.md`).
 
 - **Updated:** 2026-10-13
-- **Milestone:** M1 "Core and first window" in progress (M1.1, M1.2, M1.3 done)
+- **Milestone:** M1 "Core and first window" in progress (M1.1-M1.4 done)
 - **Tree:** green (`cargo xtask ci` passes: fmt, clippy `-D warnings`, tests, layers; wasm-core is skipped when the target is not installed)
-- **Next task:** M1.4 (see `plan/execution-plan.md`): portable scan `scan::start(root, opts) -> ScanHandle` (G-002); fixtures come from `cargo xtask fixtures`
+- **Next task:** M1.5 (see `plan/execution-plan.md`): scan integration tests on `cargo xtask fixtures` trees, measure 100k/1M, fill `perf/budgets.toml` (G-002)
 - **Blockers:** none
 - **Waiting for a human decision:**
   - reserving the name `dirustat` on crates.io / a GitHub organization;

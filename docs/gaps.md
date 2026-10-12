@@ -8,7 +8,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 
 | ID | P | Milestone | Description | Done when |
 |---|---|---|---|---|
-| G-002 | P0 | M1 | Portable parallel scan in `scan` (rayon, progress, cancellation, hardlinks, reparse points; errors do not abort the walk) | integration tests on fixtures; budget documented |
+| G-002 | P0 | M1 | Portable parallel scan in `scan` (rayon, progress, cancellation, hardlinks, reparse points; errors do not abort the walk) | integration tests on fixtures; budget documented. M1.4 landed `scan::start`; M1.5 (fixture tests, budget) remains |
 | G-005 | P1 | M1 | eframe/wgpu window: tree, extension list, status bar | screenshot in `log/devlog.md` |
 | G-006 | P1 | M1 | Treemap: layout rendering, highlight, click selection, selection sync | layout invariants + screenshot |
 | G-007 | P0 | M1 | Last-resort guard: `catch_unwind` around commands and scans | test: panic in a command gives `Err`, session intact |

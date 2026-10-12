@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M1.4 · Claude
+- Landed: `scan::start(root, ScanOptions) -> Result<ScanHandle, ScanError>` with `progress()`, `cancel()`, `is_finished()`, `join() -> ScanOutcome { tree, cancelled }`. Rayon workers read directories; one builder thread owns the `Tree` (no locks), work tracked by a pending counter (iterative). Symlinks/reparse points become `NodeKind::Link` and are never followed; unreadable directories get the error flag and the walk continues; a worker panic is caught and reported as a directory error; hardlinks counted once where `std` exposes identity (Unix only).
+- Numbers: scan tests 1 -> 9.
+- Limits (documented in the crate header): allocated size is logical rounded up to `cluster_size` (4096 default), sparse/compressed files are not detected, Windows hardlinks are not deduplicated in the portable path (needs the `ntfs` fast path or `unsafe`).
+- Still open: M1.5 integration tests on generated fixtures, 100k/1M measurements, `perf/budgets.toml`; hardlink dedup was tested via the builder function only, not on a real Unix FS.
+
 ## 2026-10-13 · M1.3 · Claude
 - Landed: `cargo xtask fixtures` (`xtask/src/fixtures.rs`): splitmix64 plan streamed through a `Sink` trait (disk sink + in-memory sink for tests), iterative generation with exact node count, depth cap 14, `_special/` edge cases (empty dirs, hardlinks, symlink cycle, unicode, 300+ char path via `\\?\`). Refuses a non-empty output directory.
 - Numbers: xtask tests 1 -> 9; 100k nodes (seed 1) = 14441 dirs + 85577 files + specials in ~32 s on Windows (file creation bound).

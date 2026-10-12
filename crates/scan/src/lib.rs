@@ -1,10 +1,29 @@
 //! L1: filesystem scanning. Builds `dirustat_model::Tree`.
 //!
-//! Status: stub (milestone M1). Planned: portable parallel walk (rayon), progress stream and
-//! cancellation, correct size on disk (cluster size, sparse, hardlinks counted once, reparse
-//! points not followed), fast path through `dirustat-ntfs`.
+//! The portable scanner reads directories in parallel on a rayon pool; a single builder thread owns
+//! the `Tree` and turns directory listings into nodes, so there are no locks around the arena and the
+//! walk is iterative (a work counter instead of recursion). Reparse points and symlinks become
+//! `NodeKind::Link` nodes and are never followed, so cycles cannot occur. Unreadable directories are
+//! flagged with `NodeData::error` and the walk continues.
+//!
+//! Limits of the portable path: allocated size is the logical size rounded up to
+//! `ScanOptions::cluster_size`, sparse and compressed files are not detected, and hardlinks are
+//! deduplicated only where the platform exposes file identity through `std` (Unix). The NTFS fast
+//! path (`dirustat-ntfs`) is the exact source on Windows.
 
-use dirustat_model::Tree;
+use std::collections::HashSet;
+use std::fmt;
+use std::fs;
+use std::io;
+use std::panic::{self, AssertUnwindSafe};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread::JoinHandle;
+use std::time::UNIX_EPOCH;
+
+use dirustat_model::{NodeData, NodeId, NodeKind, Tree};
 
 /// Builds a tree with a single root and no disk walk — a skeleton for testing higher layers.
 pub fn empty_tree(root: &str) -> Tree {
@@ -18,10 +37,341 @@ pub fn mft_available(volume: &str) -> bool {
     dirustat_ntfs::probe(volume) != dirustat_ntfs::MftSupport::Unavailable
 }
 
+/// Scan configuration.
+#[derive(Clone, Debug)]
+pub struct ScanOptions {
+    /// Reader threads; `None` lets rayon pick.
+    pub threads: Option<usize>,
+    /// Allocation unit used to estimate allocated size (clamped to at least 1).
+    pub cluster_size: u64,
+}
+
+impl Default for ScanOptions {
+    fn default() -> Self {
+        Self { threads: None, cluster_size: 4096 }
+    }
+}
+
+/// Errors that prevent a scan from starting or finishing.
+#[derive(Debug)]
+pub enum ScanError {
+    /// The root cannot be read or is not a directory.
+    Root(io::Error),
+    /// The root exists but is not a directory.
+    NotADirectory,
+    /// The thread pool could not be created.
+    Pool(String),
+    /// The scan thread panicked (the session survives).
+    Panicked,
+}
+
+impl fmt::Display for ScanError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Root(err) => write!(f, "cannot read scan root: {err}"),
+            Self::NotADirectory => f.write_str("scan root is not a directory"),
+            Self::Pool(msg) => write!(f, "cannot create scan thread pool: {msg}"),
+            Self::Panicked => f.write_str("scan thread panicked"),
+        }
+    }
+}
+
+impl std::error::Error for ScanError {}
+
+/// Live counters, readable while the scan runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    pub dirs: u64,
+    pub files: u64,
+    /// Sum of logical sizes seen so far (saturating).
+    pub bytes: u64,
+    pub errors: u64,
+}
+
+#[derive(Debug, Default)]
+struct Counters {
+    dirs: AtomicU64,
+    files: AtomicU64,
+    bytes: AtomicU64,
+    errors: AtomicU64,
+}
+
+/// Result of a finished (or cancelled) scan. The tree is aggregated.
+#[derive(Debug)]
+pub struct ScanOutcome {
+    pub tree: Tree,
+    /// `true` when the scan was cancelled; the tree is then partial.
+    pub cancelled: bool,
+}
+
+/// Handle to a running scan.
+#[derive(Debug)]
+pub struct ScanHandle {
+    cancel: Arc<AtomicBool>,
+    counters: Arc<Counters>,
+    thread: JoinHandle<ScanOutcome>,
+}
+
+impl ScanHandle {
+    /// Asks the scan to stop; `join` then returns the partial tree.
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_finished(&self) -> bool {
+        self.thread.is_finished()
+    }
+
+    pub fn progress(&self) -> Progress {
+        Progress {
+            dirs: self.counters.dirs.load(Ordering::Relaxed),
+            files: self.counters.files.load(Ordering::Relaxed),
+            bytes: self.counters.bytes.load(Ordering::Relaxed),
+            errors: self.counters.errors.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Waits for the scan and returns its tree.
+    pub fn join(self) -> Result<ScanOutcome, ScanError> {
+        self.thread.join().map_err(|_| ScanError::Panicked)
+    }
+}
+
+/// One directory entry as read by a worker.
+#[derive(Debug)]
+struct Entry {
+    name: String,
+    kind: NodeKind,
+    data: NodeData,
+    /// `(device, inode)` of a file with more than one hard link, when the platform exposes it.
+    link_id: Option<(u64, u64)>,
+}
+
+/// What a worker reports about one directory.
+#[derive(Debug)]
+struct Listing {
+    dir: NodeId,
+    path: PathBuf,
+    entries: Vec<Entry>,
+    /// The directory (or some entry) could not be read.
+    error: bool,
+}
+
+/// Starts a scan of `root` on a background thread.
+pub fn start(root: &Path, opts: ScanOptions) -> Result<ScanHandle, ScanError> {
+    let meta = fs::metadata(root).map_err(ScanError::Root)?;
+    if !meta.is_dir() {
+        return Err(ScanError::NotADirectory);
+    }
+    let mut builder = rayon::ThreadPoolBuilder::new();
+    if let Some(n) = opts.threads {
+        builder = builder.num_threads(n.max(1));
+    }
+    let pool = builder.build().map_err(|e| ScanError::Pool(e.to_string()))?;
+    let cancel = Arc::new(AtomicBool::new(false));
+    let counters = Arc::new(Counters::default());
+    let root = root.to_path_buf();
+    let thread = {
+        let (cancel, counters) = (Arc::clone(&cancel), Arc::clone(&counters));
+        std::thread::spawn(move || run(&pool, &root, &opts, &cancel, &counters))
+    };
+    Ok(ScanHandle { cancel, counters, thread })
+}
+
+fn run(
+    pool: &rayon::ThreadPool,
+    root: &Path,
+    opts: &ScanOptions,
+    cancel: &Arc<AtomicBool>,
+    counters: &Arc<Counters>,
+) -> ScanOutcome {
+    let mut tree = Tree::new(&root.to_string_lossy());
+    let cluster = opts.cluster_size.max(1);
+    let (tx, rx) = mpsc::channel::<Listing>();
+    let mut pending = 0usize;
+    let spawn = |dir: NodeId, path: PathBuf, pending: &mut usize| {
+        *pending += 1;
+        let (tx, cancel) = (tx.clone(), Arc::clone(cancel));
+        pool.spawn(move || {
+            let fallback = path.clone();
+            let listing = panic::catch_unwind(AssertUnwindSafe(|| read_dir(dir, path, cluster, &cancel)))
+                .unwrap_or_else(|_| Listing { dir, path: fallback, entries: Vec::new(), error: true });
+            // The receiver outlives every task; a failed send means the builder is gone.
+            let _ = tx.send(listing);
+        });
+    };
+    counters.dirs.fetch_add(1, Ordering::Relaxed);
+    spawn(tree.root(), root.to_path_buf(), &mut pending);
+
+    let mut seen_links = HashSet::new();
+    while pending > 0 {
+        let Ok(listing) = rx.recv() else { break };
+        pending -= 1;
+        let subdirs = apply(&mut tree, &mut seen_links, listing, counters);
+        if !cancel.load(Ordering::Relaxed) {
+            for (dir, path) in subdirs {
+                spawn(dir, path, &mut pending);
+            }
+        }
+    }
+    tree.aggregate();
+    ScanOutcome { tree, cancelled: cancel.load(Ordering::Relaxed) }
+}
+
+/// Adds the entries of a listing to the tree; returns the sub-directories still to be read.
+fn apply(
+    tree: &mut Tree,
+    seen_links: &mut HashSet<(u64, u64)>,
+    listing: Listing,
+    counters: &Counters,
+) -> Vec<(NodeId, PathBuf)> {
+    let mut subdirs = Vec::new();
+    if listing.error {
+        let _ = tree.mark_error(listing.dir);
+        counters.errors.fetch_add(1, Ordering::Relaxed);
+    }
+    for entry in listing.entries {
+        let mut data = entry.data;
+        // A hardlinked file is counted once: later names of the same file keep a node but no size.
+        if entry.link_id.is_some_and(|id| !seen_links.insert(id)) {
+            data.logical_size = 0;
+            data.allocated_size = 0;
+        }
+        let Ok(id) = tree.add_node(listing.dir, &entry.name, entry.kind, data) else {
+            // Node limit reached: stop adding, the rest of the disk is not representable.
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+            break;
+        };
+        if data.error {
+            counters.errors.fetch_add(1, Ordering::Relaxed);
+        }
+        match entry.kind {
+            NodeKind::Dir => {
+                counters.dirs.fetch_add(1, Ordering::Relaxed);
+                subdirs.push((id, listing.path.join(&entry.name)));
+            }
+            NodeKind::File | NodeKind::Link => {
+                counters.files.fetch_add(1, Ordering::Relaxed);
+                let total = counters.bytes.load(Ordering::Relaxed).saturating_add(data.logical_size);
+                counters.bytes.store(total, Ordering::Relaxed);
+            }
+        }
+    }
+    subdirs
+}
+
+fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool) -> Listing {
+    let mut listing = Listing { dir, path, entries: Vec::new(), error: false };
+    if cancel.load(Ordering::Relaxed) {
+        return listing;
+    }
+    let iter = match fs::read_dir(&listing.path) {
+        Ok(iter) => iter,
+        Err(_) => {
+            listing.error = true;
+            return listing;
+        }
+    };
+    for item in iter {
+        let Ok(item) = item else {
+            listing.error = true;
+            continue;
+        };
+        let name = item.file_name().to_string_lossy().into_owned();
+        listing.entries.push(match item.metadata() {
+            Ok(meta) => entry_from(name, &meta, cluster),
+            Err(_) => Entry {
+                name,
+                kind: NodeKind::File,
+                data: NodeData { error: true, ..NodeData::default() },
+                link_id: None,
+            },
+        });
+    }
+    listing.entries.sort_by(|a, b| a.name.cmp(&b.name));
+    listing
+}
+
+fn entry_from(name: String, meta: &fs::Metadata, cluster: u64) -> Entry {
+    let attributes = attributes_of(meta);
+    let kind = if meta.file_type().is_symlink() || is_reparse_point(attributes) {
+        NodeKind::Link
+    } else if meta.is_dir() {
+        NodeKind::Dir
+    } else {
+        NodeKind::File
+    };
+    let logical = if kind == NodeKind::File { meta.len() } else { 0 };
+    let data = NodeData {
+        logical_size: logical,
+        allocated_size: round_up(logical, cluster),
+        mtime: mtime_of(meta),
+        attributes,
+        error: false,
+    };
+    let link_id = if kind == NodeKind::File { link_id_of(meta) } else { None };
+    Entry { name, kind, data, link_id }
+}
+
+/// Rounds `size` up to a multiple of `cluster` (saturating); zero stays zero.
+fn round_up(size: u64, cluster: u64) -> u64 {
+    size.div_ceil(cluster.max(1)).saturating_mul(cluster.max(1))
+}
+
+fn mtime_of(meta: &fs::Metadata) -> Option<i64> {
+    let modified = meta.modified().ok()?;
+    match modified.duration_since(UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_secs()).ok(),
+        Err(before) => i64::try_from(before.duration().as_secs()).ok().map(i64::wrapping_neg),
+    }
+}
+
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+fn is_reparse_point(attributes: u32) -> bool {
+    attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(windows)]
+fn attributes_of(meta: &fs::Metadata) -> u32 {
+    std::os::windows::fs::MetadataExt::file_attributes(meta)
+}
+
+#[cfg(not(windows))]
+fn attributes_of(_meta: &fs::Metadata) -> u32 {
+    0
+}
+
+#[cfg(unix)]
+fn link_id_of(meta: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    (meta.nlink() > 1).then(|| (meta.dev(), meta.ino()))
+}
+
+/// `std` does not expose the file index on Windows without nightly features.
+#[cfg(not(unix))]
+fn link_id_of(_meta: &fs::Metadata) -> Option<(u64, u64)> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dirustat_model::NodeKind;
+    use dirustat_model::SizeMode;
+
+    fn write(path: &Path, size: u64) {
+        fs::File::create(path).unwrap().set_len(size).unwrap();
+    }
+
+    fn names(tree: &Tree, id: NodeId) -> Vec<String> {
+        let mut out: Vec<String> = tree.children(id).filter_map(|c| tree.get(c).map(|n| n.name().to_owned())).collect();
+        out.sort();
+        out
+    }
+
+    fn scan(path: &Path) -> ScanOutcome {
+        start(path, ScanOptions::default()).unwrap().join().unwrap()
+    }
 
     #[test]
     fn empty_tree_has_only_root() {
@@ -29,5 +379,127 @@ mod tests {
         assert_eq!(t.len(), 1);
         assert_eq!(t.get(t.root()).map(|n| n.kind()), Some(NodeKind::Dir));
         assert!(!mft_available("C:"));
+    }
+
+    #[test]
+    fn scans_nested_tree_with_sizes_and_counts() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("a/b")).unwrap();
+        fs::create_dir(tmp.path().join("empty")).unwrap();
+        write(&tmp.path().join("top.bin"), 10);
+        write(&tmp.path().join("a/mid.bin"), 5000);
+        write(&tmp.path().join("a/b/deep.bin"), 0);
+        write(&tmp.path().join("файл_日本語.txt"), 1);
+
+        let out = scan(tmp.path());
+        assert!(!out.cancelled);
+        let root = out.tree.get(out.tree.root()).unwrap();
+        assert_eq!(root.total_size(SizeMode::Logical), 5011);
+        // 10 -> 4096, 5000 -> 8192, 0 -> 0, 1 -> 4096
+        assert_eq!(root.total_size(SizeMode::Allocated), 4096 + 8192 + 4096);
+        assert_eq!((root.dir_count(), root.file_count(), root.error_count()), (4, 4, 0));
+        assert!(names(&out.tree, out.tree.root()).contains(&"файл_日本語.txt".to_owned()));
+    }
+
+    #[test]
+    fn progress_matches_final_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("d")).unwrap();
+        write(&tmp.path().join("d/f"), 100);
+        let handle = start(tmp.path(), ScanOptions::default()).unwrap();
+        while !handle.is_finished() {
+            std::thread::yield_now();
+        }
+        let progress = handle.progress();
+        assert_eq!(progress, Progress { dirs: 2, files: 1, bytes: 100, errors: 0 });
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn rejects_missing_root_and_file_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(matches!(start(&tmp.path().join("nope"), ScanOptions::default()), Err(ScanError::Root(_))));
+        let file = tmp.path().join("f");
+        write(&file, 1);
+        assert!(matches!(start(&file, ScanOptions::default()), Err(ScanError::NotADirectory)));
+    }
+
+    #[test]
+    fn cancel_returns_a_valid_partial_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..50 {
+            fs::create_dir_all(tmp.path().join(format!("d{i}/sub"))).unwrap();
+            write(&tmp.path().join(format!("d{i}/sub/f")), 1);
+        }
+        let handle = start(tmp.path(), ScanOptions { threads: Some(2), ..ScanOptions::default() }).unwrap();
+        handle.cancel();
+        let out = handle.join().unwrap();
+        assert!(out.cancelled);
+        assert!(out.tree.len() <= 1 + 50 * 3);
+    }
+
+    #[test]
+    fn links_are_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir(tmp.path().join("real")).unwrap();
+        write(&tmp.path().join("real/f"), 10);
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(tmp.path(), tmp.path().join("real/loop")).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(tmp.path(), tmp.path().join("real/loop")).is_ok();
+        if !made {
+            return; // no privilege to create symlinks on this machine
+        }
+        let out = scan(tmp.path());
+        let real = out.tree.children(out.tree.root()).next().unwrap();
+        let link = out.tree.children(real).find(|c| out.tree.get(*c).map(|n| n.name()) == Some("loop")).unwrap();
+        assert_eq!(out.tree.get(link).unwrap().kind(), NodeKind::Link);
+        assert_eq!(out.tree.children(link).count(), 0);
+        assert_eq!(out.tree.len(), 4);
+    }
+
+    #[test]
+    fn hardlinked_file_is_counted_once() {
+        let mut tree = Tree::new("r");
+        let mut seen = HashSet::new();
+        let mk = |name: &str| Entry {
+            name: name.to_owned(),
+            kind: NodeKind::File,
+            data: NodeData::with_size(100),
+            link_id: Some((1, 7)),
+        };
+        let listing = Listing {
+            dir: tree.root(),
+            path: PathBuf::from("r"),
+            entries: vec![mk("a"), mk("b"), mk("c")],
+            error: false,
+        };
+        apply(&mut tree, &mut seen, listing, &Counters::default());
+        tree.aggregate();
+        let root = tree.get(tree.root()).unwrap();
+        assert_eq!(root.total_size(SizeMode::Logical), 100);
+        assert_eq!(root.file_count(), 3);
+    }
+
+    #[test]
+    fn unreadable_directory_is_flagged_and_walk_continues() {
+        let mut tree = Tree::new("r");
+        let mut seen = HashSet::new();
+        let dir = tree.add_child(tree.root(), "locked", NodeKind::Dir, 0).unwrap();
+        let counters = Counters::default();
+        let bad = Listing { dir, path: PathBuf::from("r/locked"), entries: Vec::new(), error: true };
+        assert!(apply(&mut tree, &mut seen, bad, &counters).is_empty());
+        tree.aggregate();
+        assert_eq!(tree.get(tree.root()).unwrap().error_count(), 1);
+        assert_eq!(counters.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn round_up_is_saturating_and_zero_safe() {
+        assert_eq!(round_up(0, 4096), 0);
+        assert_eq!(round_up(1, 4096), 4096);
+        assert_eq!(round_up(4096, 4096), 4096);
+        assert_eq!(round_up(u64::MAX, 4096), u64::MAX);
+        assert_eq!(round_up(5, 0), 5);
     }
 }
