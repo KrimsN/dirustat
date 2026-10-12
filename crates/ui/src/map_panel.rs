@@ -130,6 +130,25 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
         }
     };
 
+    // Leaves whose extension is selected in the extension panel (cached per revision/layout/extension).
+    let ext_hits: Option<Arc<Vec<bool>>> = state.selected_ext.as_deref().map(|want| {
+        let id = ui.id().with("map_ext_hits");
+        let hit_key = (key, want.to_owned());
+        if let Some((k, v)) = ui.data(|d| d.get_temp::<(((u64, [u32; 2], bool), String), Arc<Vec<bool>>)>(id))
+            && k == hit_key
+        {
+            return v;
+        }
+        let v: Arc<Vec<bool>> = Arc::new(
+            tiles
+                .iter()
+                .map(|t| t.leaf && tree.get(t.node).is_some_and(|n| dirustat_engine::extension_of(n.name()) == want))
+                .collect(),
+        );
+        ui.data_mut(|d| d.insert_temp(id, (hit_key, Arc::clone(&v))));
+        v
+    });
+
     painter.rect_filled(response.rect, 0.0, Tokens::color(tokens.background));
     let frame_stroke = Stroke::new(1.0, Tokens::color(tokens.border));
     let leaf_stroke = Stroke::new(1.0, Color32::from_black_alpha(70));
@@ -154,6 +173,14 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
             }
         } else if r.w >= MIN_OUTLINE_PX && r.h >= MIN_OUTLINE_PX {
             painter.rect_stroke(screen, 0.0, frame_stroke, StrokeKind::Inside);
+        }
+    }
+    if let Some(hits) = ext_hits.as_ref().filter(|h| h.len() == tiles.len()) {
+        let accent = Tokens::color(tokens.accent);
+        for (tile, _) in tiles.iter().zip(hits.iter()).filter(|(_, hit)| **hit) {
+            if tile.rect.w >= MIN_TILE_PX && tile.rect.h >= MIN_TILE_PX {
+                painter.rect_stroke(to_screen(origin, tile.rect), 0.0, Stroke::new(1.0, accent), StrokeKind::Inside);
+            }
         }
     }
     if let Some((screen, leaf)) = hovered_rect {
