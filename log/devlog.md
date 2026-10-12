@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M1.5 · Claude
+- Landed: ignored integration test `crates/scan/tests/fixture_scan.rs` (scan vs an independent `std` walk: dirs, files, errors, size bound; path via `DIRUSTAT_FIXTURE`, absolute) and `examples/scan_bench.rs` (prints only aggregates).
+- Numbers (Windows 11, release, default rayon threads): 100k fixture (100020 nodes) warm 0.03-0.14 s; 1M fixture (1000020 nodes) warm 1.43 s (~700k nodes/s), within the 25 s budget. The very first scan right after generation was slow: 12.9 s for 100k, 125 s for 1M (~8k nodes/s), i.e. cold cache / antivirus-style overhead on freshly written files.
+- Test passes on both fixtures: counts equal the reference walk, 0 errors.
+- Still open: explain/avoid the cold-cache slowness (measure after reboot or with Defender exclusion; try `FindFirstFileExW` large fetch); `enforce` stays false; `xtask perf` does not exist yet; G-002 stays open for that.
+
 ## 2026-10-13 · M1.4 · Claude
 - Landed: `scan::start(root, ScanOptions) -> Result<ScanHandle, ScanError>` with `progress()`, `cancel()`, `is_finished()`, `join() -> ScanOutcome { tree, cancelled }`. Rayon workers read directories; one builder thread owns the `Tree` (no locks), work tracked by a pending counter (iterative). Symlinks/reparse points become `NodeKind::Link` and are never followed; unreadable directories get the error flag and the walk continues; a worker panic is caught and reported as a directory error; hardlinks counted once where `std` exposes identity (Unix only).
 - Numbers: scan tests 1 -> 9.

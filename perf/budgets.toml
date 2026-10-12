@@ -2,6 +2,9 @@
 # Measured in release on reference trees (see docs/performance.md).
 
 [scan_portable_1m_files_ssd]
+# Measured 2026-10-13 (Windows 11, release, fixtures 1m-seed1, 1.0M nodes): warm cache 1.43 s;
+# cold first scan right after generation 125 s (open: find out why, see devlog M1.5).
+# enforce stays false until a cold-cache measurement is defined and met.
 budget_seconds = 25.0
 enforce = false
 
