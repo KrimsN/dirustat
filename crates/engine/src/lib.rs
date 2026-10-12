@@ -3,12 +3,14 @@
 //! UI, CLI, control channel and MCP invoke commands by `id`. A command has an id, label, menu group,
 //! shortcut, params doc, `enabled` and `run`. A programmatic call never opens a dialog.
 //!
-//! Status: skeleton (milestone M1).
+//! Status: command registry in place (milestone M2); see `cmd`.
 
+mod cmd;
 mod ext;
 mod guard;
 mod map;
 
+pub use cmd::{CommandInfo, CommandSpec};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
 
 pub use ext::{ExtStat, NO_EXT_COLOR, ext_color, extension_of};
@@ -24,6 +26,10 @@ pub enum CommandError {
     UnknownCommand(String),
     InvalidParams(String),
     Unsupported(String),
+    /// A destructive command was called without `confirm: true` (`docs/safety.md`).
+    ConfirmationRequired(String),
+    /// The command exists but its `enabled` predicate is false in the current session state.
+    NotEnabled(String),
     /// A panic was caught by the last-resort guard; the session is intact.
     Panicked {
         what: String,
@@ -33,12 +39,28 @@ pub enum CommandError {
     Scan(String),
 }
 
+impl CommandError {
+    /// Stable machine-readable code from `docs/control-protocol.md`.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::UnknownCommand(_) => "unknown_command",
+            Self::InvalidParams(_) => "invalid_params",
+            Self::Unsupported(_) => "unsupported",
+            Self::ConfirmationRequired(_) => "confirmation_required",
+            Self::NotEnabled(_) => "not_enabled",
+            Self::Panicked { .. } | Self::Scan(_) => "internal",
+        }
+    }
+}
+
 impl fmt::Display for CommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnknownCommand(id) => write!(f, "unknown command: {id}"),
             Self::InvalidParams(why) => write!(f, "invalid params: {why}"),
             Self::Unsupported(what) => write!(f, "unsupported: {what}"),
+            Self::ConfirmationRequired(id) => write!(f, "confirmation required: {id}"),
+            Self::NotEnabled(id) => write!(f, "command not enabled: {id}"),
             Self::Panicked { what, message } => write!(f, "internal error in {what}: {message}"),
             Self::Scan(why) => write!(f, "scan failed: {why}"),
         }
@@ -54,11 +76,20 @@ pub struct Session {
     /// Bumped whenever the tree is replaced (cache key for derived data).
     revision: u64,
     map: MapState,
+    /// Background scan started by `scan.start`, not yet joined.
+    scan: Option<PendingScan>,
+}
+
+/// A running scan owned by the session.
+#[derive(Debug)]
+struct PendingScan {
+    handle: ScanHandle,
+    root: String,
 }
 
 impl Session {
     pub fn new() -> Self {
-        Self { tree: empty_tree(""), revision: 0, map: MapState::new() }
+        Self { tree: empty_tree(""), revision: 0, map: MapState::new(), scan: None }
     }
 
     pub fn tree(&self) -> &Tree {
@@ -82,9 +113,15 @@ impl Session {
         squarify(&weights, bounds)
     }
 
-    /// Runs a command by id under the last-resort panic guard. The command registry arrives in M2.
+    /// Thin text wrapper over [`Session::execute`]: parses `params` as JSON (empty means no
+    /// params; invalid JSON is `InvalidParams`) and discards the result value.
     pub fn run(&mut self, id: &str, params: &str) -> Result<(), CommandError> {
-        guard::guarded(id, || self.dispatch(id, params))
+        let value = if params.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_str(params).map_err(|e| CommandError::InvalidParams(format!("invalid JSON: {e}")))?
+        };
+        self.execute(id, &value).map(|_| ())
     }
 
     /// Waits for a scan and, unless it was cancelled, makes its tree current. A panic in the scan
@@ -97,14 +134,6 @@ impl Session {
         self.tree = outcome.tree;
         self.tree_replaced();
         Ok(true)
-    }
-
-    fn dispatch(&mut self, id: &str, _params: &str) -> Result<(), CommandError> {
-        match id {
-            #[cfg(test)]
-            "test.panic" => panic!("deliberate test panic"),
-            _ => Err(CommandError::UnknownCommand(id.to_owned())),
-        }
     }
 }
 
