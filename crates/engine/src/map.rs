@@ -4,7 +4,7 @@
 
 use crate::Session;
 use dirustat_model::{NodeId, SizeMode, Tree};
-use dirustat_treemap::{LayoutOptions, Rect, hit_test_tiles, layout_tree};
+use dirustat_treemap::{LayoutOptions, Rect, layout_tree};
 use serde::Serialize;
 
 /// One laid-out node.
@@ -60,17 +60,15 @@ impl MapLayout {
         &self.tiles
     }
 
-    /// Deepest tile under the point.
+    /// Deepest tile under the point (ties: the later one). Allocation-free.
     pub fn tile_at(&self, px: f32, py: f32) -> Option<&MapTile> {
-        // Reuse the treemap hit test on a parallel slice of plain tiles.
-        let plain: Vec<dirustat_treemap::Tile> = self
-            .tiles
-            .iter()
-            .enumerate()
-            .map(|(i, t)| dirustat_treemap::Tile { id: i, rect: t.rect, depth: t.depth, leaf: t.leaf })
-            .collect();
-        let i = hit_test_tiles(&plain, px, py)?;
-        self.tiles.get(i)
+        let mut best: Option<&MapTile> = None;
+        for t in &self.tiles {
+            if t.rect.contains(px, py) && best.is_none_or(|b| t.depth >= b.depth) {
+                best = Some(t);
+            }
+        }
+        best
     }
 }
 
@@ -139,6 +137,18 @@ impl Session {
         }
     }
 
+    /// Cached layout for `bounds` together with the tree it was built from.
+    pub fn map_view(&mut self, bounds: Rect) -> (&Tree, &MapLayout) {
+        self.map_layout(bounds);
+        match &self.map.cache {
+            Some((_, layout)) => (&self.tree, layout),
+            None => {
+                static EMPTY: MapLayout = MapLayout { tiles: Vec::new() };
+                (&self.tree, &EMPTY)
+            }
+        }
+    }
+
     /// Node under the point in the last computed layout (empty when none was computed yet).
     pub fn tile_at(&self, px: f32, py: f32) -> Option<NodeId> {
         let (_, layout) = self.map.cache.as_ref()?;
@@ -153,6 +163,15 @@ impl Session {
 
     pub fn selection(&self) -> Option<NodeId> {
         self.map.selected
+    }
+
+    /// Selects `id`; returns false (selection unchanged) when the node does not exist.
+    pub fn select_node(&mut self, id: NodeId) -> bool {
+        if self.tree.get(id).is_none() {
+            return false;
+        }
+        self.map.selected = Some(id);
+        true
     }
 
     pub fn clear_selection(&mut self) {
@@ -229,6 +248,21 @@ mod tests {
         assert_eq!(s.revision(), rev + 1);
         assert_eq!(s.selection(), None);
         assert_eq!(s.tile_at(1.0, 1.0), None, "cache dropped with the old tree");
+    }
+
+    #[test]
+    fn select_node_validates_the_id() {
+        let mut s = sample_session();
+        let root = s.tree().root();
+        assert!(s.select_node(root));
+        assert_eq!(s.selection(), Some(root));
+        let mut other = Tree::new("x");
+        let mut last = other.root();
+        for i in 0..20 {
+            last = other.add_child(last, &format!("n{i}"), NodeKind::Dir, 0).unwrap();
+        }
+        assert!(!s.select_node(last), "id outside the arena is rejected");
+        assert_eq!(s.selection(), Some(root));
     }
 
     #[test]

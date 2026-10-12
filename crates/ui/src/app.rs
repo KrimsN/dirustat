@@ -211,7 +211,7 @@ impl DirustatApp {
         let panels = self.state.panels;
         if panels.tree {
             egui::Panel::left("tree_panel").default_size(320.0).show(ui, |ui| {
-                tree_panel::show(ui, &self.session, &mut self.state);
+                tree_panel::show(ui, &mut self.session, &mut self.state, &self.tokens);
             });
         }
         if panels.extensions {
@@ -221,7 +221,7 @@ impl DirustatApp {
         }
         egui::CentralPanel::default().show(ui, |ui| {
             if panels.map {
-                map_panel::show(ui, &self.session, &mut self.state);
+                map_panel::show(ui, &mut self.session, &mut self.state);
             }
         });
     }

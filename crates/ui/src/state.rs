@@ -39,6 +39,30 @@ pub enum ScanStatus {
     },
 }
 
+/// Sortable columns of the file-type (extension) list.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtSortColumn {
+    Extension,
+    Files,
+    #[default]
+    Size,
+    Percent,
+}
+
+/// Sort order of the file-type list (size descending by default).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtSort {
+    pub column: ExtSortColumn,
+    pub descending: bool,
+}
+
+impl Default for ExtSort {
+    fn default() -> Self {
+        Self { column: ExtSortColumn::Size, descending: true }
+    }
+}
+
 /// Everything the shell needs to remember between frames.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiState {
@@ -47,6 +71,24 @@ pub struct UiState {
     pub panels: PanelVisibility,
     pub scan: ScanStatus,
     pub theme: ThemeKind,
+    /// Extension picked in the file-type list (lowercase, empty = files without one); the map
+    /// highlights it.
+    #[serde(default)]
+    pub selected_ext: Option<String>,
+    #[serde(default)]
+    pub ext_sort: ExtSort,
+    /// Directory tree: arena indices of the expanded folders (reset when the tree is replaced).
+    #[serde(default)]
+    pub tree_expanded: std::collections::BTreeSet<usize>,
+    /// Directory tree: sort column and direction.
+    #[serde(default)]
+    pub tree_sort: crate::tree_panel::TreeSort,
+    /// Session revision the expansion set belongs to.
+    #[serde(default)]
+    pub tree_revision: Option<u64>,
+    /// Flattened-row cache of the tree panel; never serialized, ignored by equality.
+    #[serde(skip)]
+    pub tree_cache: crate::tree_panel::TreeCache,
 }
 
 #[cfg(test)]
