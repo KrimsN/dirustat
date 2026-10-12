@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-13 · revision 4. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-13 · revision 5. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -9,7 +9,6 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | ID | P | Milestone | Description | Done when |
 |---|---|---|---|---|
 | G-002 | P0 | M1 | Portable parallel scan in `scan` (rayon, progress, cancellation, hardlinks, reparse points; errors do not abort the walk) | integration tests on fixtures; budget documented |
-| G-003 | P0 | M1 | Fixture generator `cargo xtask fixtures` (deterministic, seeded, 100k/1M/5M) | reproducible trees |
 | G-005 | P1 | M1 | eframe/wgpu window: tree, extension list, status bar | screenshot in `log/devlog.md` |
 | G-006 | P1 | M1 | Treemap: layout rendering, highlight, click selection, selection sync | layout invariants + screenshot |
 | G-007 | P0 | M1 | Last-resort guard: `catch_unwind` around commands and scans | test: panic in a command gives `Err`, session intact |
@@ -38,6 +37,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-000 | 2026-10-13 | M0: workspace, lints, xtask layers/ci, documentation, CI |
 | G-001 | 2026-10-13 | M1.1: model with logical/allocated sizes (`SizeMode`), `NodeData`, file/dir/error counters, mtime, attributes |
 | G-004 | 2026-10-13 | M1.2: rayon, serde, serde_json, tracing, tempfile, proptest added; `cargo deny check` passes |
+| G-003 | 2026-10-13 | M1.3: `cargo xtask fixtures` (seeded splitmix64 plan, exact node count, hardlinks, symlink cycle, empty/unicode/long-path cases) |
 
 ## Revision history
 
@@ -45,3 +45,4 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-13 · r2: translated to English.
 - 2026-10-13 · r3: G-001 closed (M1.1).
 - 2026-10-13 · r4: G-004 closed (M1.2).
+- 2026-10-13 · r5: G-003 closed (M1.3).

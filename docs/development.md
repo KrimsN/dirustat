@@ -27,7 +27,7 @@ cargo deny check                              # licences, sources, banned depend
 
 ## Fixtures
 
-Scanner tests run only on **synthetic trees in temporary directories** (`tempfile`), never on a user's real data. Large trees (1M files) are produced by `cargo xtask fixtures` (arrives in M1; the generator is deterministic by seed). MFT corpora are NTFS images with synthetic content built by an `xtask` script and never committed (`corpus/` is in `.gitignore`).
+Scanner tests run only on **synthetic trees in temporary directories** (`tempfile`), never on a user's real data. Large trees are produced by `cargo xtask fixtures [--size small|100k|1m|5m|<nodes>] [--seed N] [--out DIR]` (default `fixtures-local/<size>-seed<N>`, git-ignored). The tree is deterministic by `(size, seed)`; the random part has exactly `<nodes>` entries, and a `_special/` folder adds empty folders, hardlinks, a symlink cycle (skipped with a note when the OS refuses), unicode names and a 300+ character path. File sizes are set with `set_len`, nothing is written; expect roughly 4 KiB of disk per file (100k takes about 30 s on Windows, 5m needs tens of GB). The command refuses a non-empty `--out` and never deletes anything: remove old fixtures yourself. MFT corpora are NTFS images with synthetic content built by an `xtask` script and never committed (`corpus/` is in `.gitignore`).
 
 ## Running and driving the app (from M2)
 

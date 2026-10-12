@@ -1,12 +1,13 @@
 //! `cargo xtask <command>` — single entry point for checks and automation.
 //!
-//! Commands: `layers` (dependency layer check), `ci` (the whole gate), `help`.
-//! Planned: `parity`, `scorecard`, `perf`, `fixtures`, `version` (see docs/development.md).
+//! Commands: `layers` (dependency layer check), `ci` (the whole gate), `fixtures` (synthetic trees), `help`.
+//! Planned: `parity`, `scorecard`, `perf`, `version` (see docs/development.md).
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+mod fixtures;
 mod layers;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 fn workspace_root() -> PathBuf {
@@ -61,14 +62,60 @@ fn wasm_target_installed() -> bool {
         .unwrap_or(false)
 }
 
+/// `cargo xtask fixtures [--size small|100k|1m|5m|<nodes>] [--seed N] [--out DIR]`.
+fn fixtures_command(root: &Path, args: &[String]) -> bool {
+    let mut size = "100k".to_owned();
+    let mut seed = 1u64;
+    let mut out: Option<PathBuf> = None;
+    let mut iter = args.iter();
+    while let Some(flag) = iter.next() {
+        match (flag.as_str(), iter.next()) {
+            ("--size", Some(v)) => size = v.clone(),
+            ("--seed", Some(v)) => match v.parse() {
+                Ok(n) => seed = n,
+                Err(_) => {
+                    eprintln!("invalid --seed: {v}");
+                    return false;
+                }
+            },
+            ("--out", Some(v)) => out = Some(PathBuf::from(v)),
+            _ => {
+                eprintln!("usage: cargo xtask fixtures [--size small|100k|1m|5m|<nodes>] [--seed N] [--out DIR]");
+                return false;
+            }
+        }
+    }
+    let Some(nodes) = fixtures::preset(&size).or_else(|| size.parse().ok()) else {
+        eprintln!("invalid --size: {size}");
+        return false;
+    };
+    let out = out.unwrap_or_else(|| root.join("fixtures-local").join(format!("{size}-seed{seed}")));
+    println!("==> fixtures: {nodes} nodes, seed {seed} -> {}", out.display());
+    match fixtures::create(&out, nodes, seed) {
+        Ok(summary) => {
+            let skipped = if summary.skipped.is_empty() { "none".to_owned() } else { summary.skipped.join("; ") };
+            println!(
+                "done: {} dirs, {} files, {} bytes logical; skipped: {skipped}",
+                summary.dirs, summary.files, summary.bytes
+            );
+            true
+        }
+        Err(err) => {
+            eprintln!("FAILED: fixtures: {err}");
+            false
+        }
+    }
+}
+
 fn main() -> ExitCode {
     let root = workspace_root();
     let command = std::env::args().nth(1).unwrap_or_else(|| "help".to_owned());
     let ok = match command.as_str() {
         "layers" => layers::check(&root),
         "ci" => ci(&root),
+        "fixtures" => fixtures_command(&root, &std::env::args().skip(2).collect::<Vec<_>>()),
         _ => {
-            println!("usage: cargo xtask <layers|ci>");
+            println!("usage: cargo xtask <layers|ci|fixtures>");
             return if command == "help" { ExitCode::SUCCESS } else { ExitCode::from(2) };
         }
     };

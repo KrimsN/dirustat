@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M1.3 · Claude
+- Landed: `cargo xtask fixtures` (`xtask/src/fixtures.rs`): splitmix64 plan streamed through a `Sink` trait (disk sink + in-memory sink for tests), iterative generation with exact node count, depth cap 14, `_special/` edge cases (empty dirs, hardlinks, symlink cycle, unicode, 300+ char path via `\\?\`). Refuses a non-empty output directory.
+- Numbers: xtask tests 1 -> 9; 100k nodes (seed 1) = 14441 dirs + 85577 files + specials in ~32 s on Windows (file creation bound).
+- Fixed on the way: a rounding bug in `split` that produced `nodes + 1` entries (caught by `node_count_is_exact`).
+- Still open: M1.4 portable scan; 1M/5M fixtures not generated yet (disk/time heavy), do it when M1.5 needs them.
+
 ## 2026-10-13 · M1.2 · Claude
 - Landed: workspace dependencies `rayon 1.12`, `serde 1.0`, `serde_json 1.0`, `tracing 0.1`; dev: `tempfile 3.27`, `proptest 1.12`; wired into model/scan/engine/control; rows in `docs/engineering.md`. Installed `cargo-deny` 0.20.2: `cargo deny check` passes (only a duplicate `syn` warning).
 - Human decision: dependency set confirmed by the user.
