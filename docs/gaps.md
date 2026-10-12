@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-13 · revision 2. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-13 · revision 3. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -8,7 +8,6 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 
 | ID | P | Milestone | Description | Done when |
 |---|---|---|---|---|
-| G-001 | P0 | M1 | Model: logical/allocated size, file/folder counters, mtime, attributes, access-error flag | aggregation tests, saturation, unicode names |
 | G-002 | P0 | M1 | Portable parallel scan in `scan` (rayon, progress, cancellation, hardlinks, reparse points; errors do not abort the walk) | integration tests on fixtures; budget documented |
 | G-003 | P0 | M1 | Fixture generator `cargo xtask fixtures` (deterministic, seeded, 100k/1M/5M) | reproducible trees |
 | G-004 | P0 | M1 | Add `tracing`, `serde`, `rayon`, `tempfile`, `proptest` (rows in `docs/engineering.md`, `cargo deny`) | `cargo xtask ci` is green |
@@ -38,8 +37,10 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | ID | Date | What |
 |---|---|---|
 | G-000 | 2026-10-13 | M0: workspace, lints, xtask layers/ci, documentation, CI |
+| G-001 | 2026-10-13 | M1.1: model with logical/allocated sizes (`SizeMode`), `NodeData`, file/dir/error counters, mtime, attributes |
 
 ## Revision history
 
 - 2026-10-13 · r1: initial list.
 - 2026-10-13 · r2: translated to English.
+- 2026-10-13 · r3: G-001 closed (M1.1).

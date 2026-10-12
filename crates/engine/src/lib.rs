@@ -5,7 +5,7 @@
 //!
 //! Status: skeleton (milestone M1).
 
-use dirustat_model::Tree;
+use dirustat_model::{SizeMode, Tree};
 use dirustat_scan::empty_tree;
 use dirustat_treemap::{Rect, squarify};
 use std::fmt;
@@ -47,8 +47,11 @@ impl Session {
 
     /// Layout of the root's children inside `bounds` — a minimal model + treemap example.
     pub fn layout_root(&self, bounds: Rect) -> Vec<Rect> {
-        let mut weights: Vec<u64> =
-            self.tree.children(self.tree.root()).filter_map(|id| self.tree.get(id).map(|n| n.total_size())).collect();
+        let mut weights: Vec<u64> = self
+            .tree
+            .children(self.tree.root())
+            .filter_map(|id| self.tree.get(id).map(|n| n.total_size(SizeMode::default())))
+            .collect();
         weights.sort_unstable_by(|a, b| b.cmp(a));
         squarify(&weights, bounds)
     }

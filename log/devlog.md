@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M1.1 · Claude
+- Landed: model carries `NodeData` (logical/allocated size, mtime, attributes, error flag), `SizeMode` selector, subtree counters (`file_count`, `dir_count`, `error_count`), `Tree::add_node`, `mark_error`; all sums saturate. `engine` adapted (`total_size(SizeMode)`).
+- Numbers: model tests 3 -> 7.
+- Verified: `cargo xtask ci` is green (wasm-core skipped locally).
+- Still open: M1.2 (dependency set needs human confirmation), M1.3 fixtures.
+
 ## 2026-10-13 · M0 · Claude (language switch)
 - Landed: all repository text translated to English; `AGENTS.md` §0 now says repository text is English and chat uses the user's language (ADR 0007). Code comments, Cargo descriptions, agent/command definitions, templates and docs updated.
 - Verified: `cargo xtask ci` is green after the change.
