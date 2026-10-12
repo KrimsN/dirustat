@@ -1,15 +1,15 @@
-//! L4: egui/eframe-оболочка. Тонкая: состояние читает из `Session`, действия отправляет командами.
-//! Цвета и радиусы — только из `theme::Tokens`, не хардкодом. Ничего ниже L4 не знает про egui.
+//! L4: egui/eframe shell. Thin: reads state from `Session`, sends actions as commands.
+//! Colours and radii come only from `theme::Tokens`, never hard-coded. Nothing below L4 knows about egui.
 //!
-//! Статус: каркас (веха M1 подключит egui/eframe/wgpu).
+//! Status: skeleton (milestone M1 brings in egui/eframe/wgpu).
 
 use dirustat_control::PROTOCOL_VERSION;
 use dirustat_engine::Session;
 
-/// Заголовок окна: имя продукта пишется `diRUSTat`.
+/// Window title: the product name is spelled `diRUSTat`.
 pub const WINDOW_TITLE: &str = "diRUSTat";
 
-/// Строка-баннер для приложений.
+/// Banner line for the applications.
 pub fn banner(session: &Session) -> String {
     format!("{WINDOW_TITLE} (control protocol v{PROTOCOL_VERSION}, {} nodes)", session.tree().len())
 }

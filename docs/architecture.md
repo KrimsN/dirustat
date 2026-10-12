@@ -1,74 +1,74 @@
-# Архитектура diRUSTat
+# diRUSTat architecture
 
-> Статус: 2026-10-13 · ревизия 1 · каркас M0.
+> Status: 2026-10-13 · revision 2 · M0 skeleton.
 
-## 1. Принципы
+## 1. Principles
 
-1. **Слои.** Каждый крейт принадлежит слою и зависит только от нижних. Проверка — `cargo xtask layers`.
-2. **Шов engine/UI.** Вся логика — в `engine` за реестром команд. UI — тонкий клиент: читает `Session`, шлёт команды.
-3. **Данные отдельно от представления.** `model` и `treemap` — чистые данные/геометрия без I/O и без GUI; они же компилируются в wasm.
-4. **Один путь для человека и агента.** UI, CLI, control-канал, MCP — равноправные клиенты одного реестра команд.
-5. **Сканирование — только чтение.** Любая запись на диск — отдельная деструктивная команда по правилам `docs/safety.md`.
+1. **Layers.** Every crate belongs to a layer and depends only on lower ones. Checked by `cargo xtask layers`.
+2. **The engine/UI seam.** All logic lives in `engine` behind the command registry. The UI is a thin client: it reads `Session` and sends commands.
+3. **Data apart from presentation.** `model` and `treemap` are pure data/geometry with no I/O and no GUI; they also compile to wasm.
+4. **One path for humans and agents.** UI, CLI, control channel and MCP are equal clients of one command registry.
+5. **Scanning is read-only.** Any write to disk is a separate destructive command governed by `docs/safety.md`.
 
-## 2. Слои и крейты
+## 2. Layers and crates
 
-| Слой | Крейт | Ответственность | Статус |
+| Layer | Crate | Responsibility | Status |
 |---|---|---|---|
-| L0 | `dirustat-model` | Arena-дерево файлов (`Tree`, `NodeId`, `Node`), агрегация размеров итеративно и насыщающе | каркас + тесты |
-| L0 | `dirustat-treemap` | Squarified-раскладка (`squarify`), позже cushion-коэффициенты и hit-testing | каркас + тесты |
-| L0 | `dirustat-ntfs` | Чтение и разбор NTFS MFT; единственная зона `unsafe` (Win32 FFI) | заглушка |
-| L1 | `dirustat-scan` | Обход ФС → `Tree`: переносимый параллельный и быстрый MFT-путь; прогресс и отмена | заглушка |
-| L2 | `dirustat-engine` | `Session`, реестр команд, статистика расширений, поиск, фильтры, снимки, действия | каркас |
-| L3 | `dirustat-control` | JSON control-канал (TCP 127.0.0.1 + ключ), MCP-сервер | каркас |
-| L4 | `dirustat-ui` | egui-оболочка: дерево, treemap, список расширений, темы, меню | каркас |
-| apps | `dirustat`, `dirustat-cli` | Бинарники | баннер |
+| L0 | `dirustat-model` | Arena file tree (`Tree`, `NodeId`, `Node`), iterative saturating size aggregation | skeleton + tests |
+| L0 | `dirustat-treemap` | Squarified layout (`squarify`); later cushion coefficients and hit-testing | skeleton + tests |
+| L0 | `dirustat-ntfs` | NTFS MFT reading and parsing; the only `unsafe` zone (Win32 FFI) | stub |
+| L1 | `dirustat-scan` | Filesystem walk to `Tree`: portable parallel and fast MFT paths; progress and cancellation | stub |
+| L2 | `dirustat-engine` | `Session`, command registry, extension statistics, search, filters, snapshots, actions | skeleton |
+| L3 | `dirustat-control` | JSON control channel (TCP 127.0.0.1 + key), MCP server | skeleton |
+| L4 | `dirustat-ui` | egui shell: tree, treemap, extension list, themes, menus | skeleton |
+| apps | `dirustat`, `dirustat-cli` | Binaries | banner |
 
-Зависимости (стрелка = «зависит от»): `ui → control → engine → scan → ntfs`, `engine → model, treemap`, `scan → model`. `ui` и `dirustat` — единственные, кому можно тянуть egui/eframe/winit/rfd/wgpu.
+Dependencies (arrow = "depends on"): `ui → control → engine → scan → ntfs`, `engine → model, treemap`, `scan → model`. Only `ui` and `dirustat` may pull in egui/eframe/winit/rfd/wgpu.
 
-## 3. Модель данных
+## 3. Data model
 
-- `Tree` — плоский `Vec<Node>`; `NodeId` — `u32`. Узел: имя (`Box<str>`), `NodeKind` (`Dir`/`File`/`Link`), `own_size`, `total_size`, родитель, первый/последний потомок, следующий брат. Родитель всегда добавляется раньше потомка → агрегация обратным проходом без рекурсии.
-- **Размеры.** Базовое поле — `own_size`; в M1 модель получит пару *logical* / *allocated* (кластеры, sparse, сжатие) и счётчики `files`/`dirs`/`mtime`/атрибуты. Режим показа выбирается настройкой (правило 3 в `AGENTS.md`).
-- **Имена.** Хранятся как UTF-8; имена Windows с невалидным UTF-16 кодируются без паники (lossy + флаг) — детали в ADR при реализации M1.
-- **Неизменяемость после скана.** Скан строит дерево в фоне, публикует снимки с ревизией; UI работает с `Arc` последней ревизии. Кэши (раскладка, статистика) привязаны к ревизии.
+- `Tree` is a flat `Vec<Node>`; `NodeId` is a `u32`. A node holds a name (`Box<str>`), `NodeKind` (`Dir`/`File`/`Link`), `own_size`, `total_size`, parent, first/last child and next sibling. A parent is always added before its children, so aggregation is a reverse pass without recursion.
+- **Sizes.** The base field is `own_size`; in M1 the model gains a *logical* / *allocated* pair (clusters, sparse files, compression) and `files`/`dirs`/`mtime`/attribute counters. The display mode is a setting (rule 3 in `AGENTS.md`).
+- **Names.** Stored as UTF-8; Windows names with invalid UTF-16 are encoded without panicking (lossy + flag), details in an ADR when M1 lands.
+- **Immutable after a scan.** A scan builds the tree in the background and publishes revisioned snapshots; the UI works with an `Arc` of the latest revision. Caches (layout, statistics) are keyed by revision.
 
-## 4. Скан
+## 4. Scanning
 
 ```text
 scan::start(root, options) -> ScanHandle { progress: Receiver<Progress>, cancel(), join() -> Result<Tree> }
 ```
 
-- Переносимый путь: пул rayon, work-stealing по каталогам, `read_dir` + метаданные; hardlink — по (volume, file id), reparse points не обходим, ошибки доступа записываются как узлы с флагом, обход продолжается.
-- Быстрый путь (Windows/NTFS): `dirustat-ntfs` читает MFT и отдаёт плоские записи (id, parent id, имя, размеры, флаги); `scan` собирает из них `Tree`. Нужны права администратора → без них прозрачный откат на переносимый путь.
-- Прогресс и отмена — каналы; UI-поток не блокируется. Скан можно прервать в любой момент; частичное дерево валидно.
+- Portable path: rayon pool, work-stealing across directories, `read_dir` + metadata; hardlinks keyed by (volume, file id), reparse points not followed, access errors recorded as flagged nodes and the walk goes on.
+- Fast path (Windows/NTFS): `dirustat-ntfs` reads the MFT and yields flat records (id, parent id, name, sizes, flags); `scan` builds a `Tree` from them. Needs administrator rights; without them it falls back to the portable path transparently.
+- Progress and cancellation use channels; the UI thread never blocks. A scan can be cancelled at any time; a partial tree is valid.
 
-## 5. Команды
+## 5. Commands
 
 `CommandSpec { id, label, menu_path, shortcut, params_doc, enabled(&Session), run(&mut Session, Params) -> Result<Value, CommandError> }`.
 
-- id — `группа.действие` в snake_case: `scan.start`, `scan.cancel`, `view.zoom_in`, `file.delete`, `export.csv`.
-- Реестр собирается из `engine/src/cmd/*.rs` (по модулю на область; каждый экспортирует `specs()`).
-- Меню и палитра команд строятся из реестра. Каталог меню/шорткатов — `ui/src/menu_catalog.rs`: пункт с точным id оживает автоматически.
-- Тест `hostile_params_never_panic` прогоняет каждую команду с мусорными параметрами и обязан быть зелёным.
+- An id is `group.action` in snake_case: `scan.start`, `scan.cancel`, `view.zoom_in`, `file.delete`, `export.csv`.
+- The registry is assembled from `engine/src/cmd/*.rs` (one module per area; each exports `specs()`).
+- Menus and the command palette are built from the registry. The menu/shortcut catalog is `ui/src/menu_catalog.rs`: an item with an exact id goes live automatically.
+- The `hostile_params_never_panic` test runs every command with junk parameters and must stay green.
 
 ## 6. UI
 
-egui/eframe на wgpu. Панели: дерево каталогов (колонки), treemap, список расширений, статус-бар (прогресс, свободное место). Treemap рисуется mesh-ем/тайловым кэшем; раскладка пересчитывается только при смене ревизии, размера или фокуса. Состояние (`ui::state`, serde) читается и пишется control-каналом. Дизайн — `docs/ui-design.md`.
+egui/eframe on wgpu. Panels: directory tree (columns), treemap, extension list, status bar (progress, free space). The treemap is drawn with a mesh/tile cache; layout is recomputed only when the revision, size or focus changes. State (`ui::state`, serde) is read and written by the control channel. Design: `docs/ui-design.md`.
 
-## 7. Агентное управление
+## 7. Agent control
 
-См. `docs/control-protocol.md`: `engine.execute`, `engine.commands`, `session.state`, `ui.screenshot`. Один и тот же набор доступен через CLI (`dirustat-cli run`) и MCP (`dirustat-cli mcp`).
+See `docs/control-protocol.md`: `engine.execute`, `engine.commands`, `session.state`, `ui.screenshot`. The same set is available through the CLI (`dirustat-cli run`) and MCP (`dirustat-cli mcp`).
 
-## 8. Платформы
+## 8. Platforms
 
-- Windows 10/11 — основная (MFT, корзина, проводник, контекстное меню).
-- Linux/macOS — переносимый скан (M6); платформенные действия за трейтом `PlatformServices` в `engine`.
-- Web: только L0 (демо раскладки). Скан диска в браузере не цель.
+- Windows 10/11 is primary (MFT, recycle bin, Explorer, context menu).
+- Linux/macOS get the portable scan (M6); platform actions sit behind a `PlatformServices` trait in `engine`.
+- Web: L0 only (layout demo). Scanning a disk in a browser is not a goal.
 
-## 9. Глоссарий
+## 9. Glossary
 
-- **MFT** — Master File Table, таблица всех файлов NTFS; чтение целиком даёт сверхбыстрый скан.
-- **Logical size** — размер данных файла; **allocated size** — занято на диске (кластеры).
-- **Treemap** — карта вложенных прямоугольников, площадь ∝ размеру; **squarified** — алгоритм, минимизирующий вытянутость; **cushion** — подушечное затенение (van Wijk), показывает иерархию.
-- **Cleanup** — пользовательское действие над выбранным файлом/каталогом (открыть, удалить, выполнить команду).
-- **Ревизия** — монотонный номер состояния дерева; ключ кэшей.
+- **MFT**: Master File Table, the table of all NTFS files; reading it whole gives a very fast scan.
+- **Logical size**: the file's data size; **allocated size**: space taken on disk (clusters).
+- **Treemap**: a map of nested rectangles with area proportional to size; **squarified**: an algorithm that minimizes elongation; **cushion**: van Wijk's cushion shading that reveals hierarchy.
+- **Cleanup**: a user-defined action on the selected file/directory (open, delete, run a command).
+- **Revision**: a monotonic number of the tree state; the cache key.

@@ -1,32 +1,32 @@
 # diRUSTat
 
-Быстрый анализатор дискового пространства на чистом Rust: «куда делось место?» — в стиле WinDirStat, со скоростью WizTree.
+A fast disk-space analyzer in pure Rust: "where did my space go?" in the style of WinDirStat, at WizTree speed.
 
-> Статус: **M0 (bootstrap)** — каркас workspace, правила и документация для агентной разработки. Приложение пока печатает баннер; первое окно — веха M1. См. [ROADMAP.md](ROADMAP.md).
+> Status: **M0 (bootstrap)**: workspace skeleton, rules and documentation for agent-driven development. The app only prints a banner for now; the first window is milestone M1. See [ROADMAP.md](ROADMAP.md).
 
-## Цели
+## Goals
 
-- **Паритет по функциям с WinDirStat:** дерево каталогов, treemap с cushion-шейдингом, список типов файлов с цветами, очистки (cleanups), поиск, фильтры.
-- **Скорость уровня WizTree:** прямое чтение NTFS MFT (быстрый путь, Windows), параллельный переносимый обход для остальных ФС.
-- **Нативно и без оболочек:** egui/eframe на wgpu. Без Tauri/Electron/webview, без JS/TS.
-- **Каждая функция доступна агентам:** все действия — команды; JSON control-канал, CLI и MCP-сервер.
-- **Никогда не падает:** без `unwrap`/`panic`/`unsafe` (кроме изолированного MFT-крейта), враждебные входы дают ошибки.
-- **Безопасность данных:** сканирование только читает; удаление — через корзину и подтверждение.
+- **Feature parity with WinDirStat:** directory tree, treemap with cushion shading, file-type list with colours, cleanups, search, filters.
+- **WizTree-class speed:** direct NTFS MFT reading (fast path, Windows) and a parallel portable walk for other filesystems.
+- **Native, no shells:** egui/eframe on wgpu. No Tauri/Electron/webview, no JS/TS.
+- **Every feature available to agents:** all actions are commands; JSON control channel, CLI and MCP server.
+- **Never crashes:** no `unwrap`/`panic`/`unsafe` (except the isolated MFT crate); hostile input yields errors.
+- **Data safety:** scanning is read-only; deletion goes through the recycle bin and requires confirmation.
 
-## Быстрый старт
+## Quick start
 
 ```sh
-cargo run -p dirustat                 # десктопное приложение (пока баннер)
+cargo run -p dirustat                 # desktop app (banner only for now)
 cargo run -p dirustat-cli             # headless CLI
-cargo xtask ci                        # полный гейт качества
+cargo xtask ci                        # full quality gate
 ```
 
-Требуется Rust stable (см. `rust-toolchain.toml`). Подробности: [docs/development.md](docs/development.md).
+Requires stable Rust (see `rust-toolchain.toml`). Details: [docs/development.md](docs/development.md).
 
-## Для агентов и контрибьюторов
+## For agents and contributors
 
-Начните с [AGENTS.md](AGENTS.md) (для Claude Code — `CLAUDE.md`, он подключает `AGENTS.md`), затем `plan/STATUS.md`. Архитектура — [docs/architecture.md](docs/architecture.md), правила — [docs/contributing.md](docs/contributing.md).
+Start with [AGENTS.md](AGENTS.md) (Claude Code reads `CLAUDE.md`, which imports `AGENTS.md`), then `plan/STATUS.md`. Architecture: [docs/architecture.md](docs/architecture.md); rules: [docs/contributing.md](docs/contributing.md).
 
-## Лицензия
+## License
 
-MIT OR Apache-2.0 ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). WinDirStat и WizTree — торговые марки их владельцев; проект с ними не связан и реализован clean-room ([docs/clean-room.md](docs/clean-room.md)).
+MIT OR Apache-2.0 ([LICENSE-MIT](LICENSE-MIT), [LICENSE-APACHE](LICENSE-APACHE)). WinDirStat and WizTree are trademarks of their owners; this project is unaffiliated and implemented clean-room ([docs/clean-room.md](docs/clean-room.md)).

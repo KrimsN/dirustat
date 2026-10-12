@@ -1,35 +1,35 @@
-//! L0: модель дерева файлов.
+//! L0: file tree model.
 //!
-//! Дерево хранится в плоском arena-векторе: узел ссылается на родителя, первого потомка и
-//! следующего брата по индексу `NodeId`. Родитель всегда добавляется раньше потомка, поэтому
-//! агрегация размеров идёт одним обратным проходом без рекурсии (миллионы узлов, глубокие деревья).
+//! The tree lives in a flat arena vector: a node refers to its parent, first child and next
+//! sibling by `NodeId` index. A parent is always added before its children, so size aggregation
+//! is a single reverse pass with no recursion (millions of nodes, deep trees).
 
 use std::fmt;
 
-/// Максимум узлов: `NodeId` — это `u32`, плюс запас под служебные значения.
+/// Node limit: `NodeId` is a `u32`, minus headroom for reserved values.
 pub const MAX_NODES: usize = (u32::MAX - 1) as usize;
 
-/// Индекс узла в arena.
+/// Index of a node in the arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(u32);
 
 impl NodeId {
-    /// Индекс узла как `usize` для доступа к arena.
+    /// Node index as `usize` for arena access.
     pub fn index(self) -> usize {
         usize::try_from(self.0).unwrap_or(usize::MAX)
     }
 }
 
-/// Тип узла дерева.
+/// Kind of a tree node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeKind {
     Dir,
     File,
-    /// Симлинк/junction/reparse point: размер собственный, внутрь не заходим.
+    /// Symlink/junction/reparse point: has its own size, is never descended into.
     Link,
 }
 
-/// Узел дерева. Поля приватны: инварианты поддерживает `Tree`.
+/// A tree node. Fields are private: `Tree` maintains the invariants.
 #[derive(Clone, Debug)]
 pub struct Node {
     name: Box<str>,
@@ -49,11 +49,11 @@ impl Node {
     pub fn kind(&self) -> NodeKind {
         self.kind
     }
-    /// Размер самого узла (для каталога обычно 0).
+    /// Size of the node itself (usually 0 for a directory).
     pub fn own_size(&self) -> u64 {
         self.own_size
     }
-    /// Размер узла вместе с потомками; корректен после `Tree::aggregate`.
+    /// Size of the node including descendants; valid after `Tree::aggregate`.
     pub fn total_size(&self) -> u64 {
         self.total_size
     }
@@ -62,14 +62,14 @@ impl Node {
     }
 }
 
-/// Ошибки модели. Паники в этом крейте запрещены.
+/// Model errors. Panics are forbidden in this crate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelError {
-    /// Такого `NodeId` нет в дереве.
+    /// No such `NodeId` in the tree.
     UnknownNode,
-    /// Потомка нельзя добавить к файлу или ссылке.
+    /// A child cannot be added to a file or a link.
     NotADirectory,
-    /// Превышен `MAX_NODES`.
+    /// `MAX_NODES` exceeded.
     TooManyNodes,
 }
 
@@ -85,14 +85,14 @@ impl fmt::Display for ModelError {
 
 impl std::error::Error for ModelError {}
 
-/// Дерево файлов. Корень всегда существует и всегда каталог.
+/// File tree. The root always exists and is always a directory.
 #[derive(Clone, Debug)]
 pub struct Tree {
     nodes: Vec<Node>,
 }
 
 impl Tree {
-    /// Создаёт дерево с корневым каталогом `root_name` (обычно путь, который сканируем).
+    /// Creates a tree with a root directory named `root_name` (usually the scanned path).
     pub fn new(root_name: &str) -> Self {
         let root = Node {
             name: root_name.into(),
@@ -115,7 +115,7 @@ impl Tree {
         self.nodes.len()
     }
 
-    /// Дерево никогда не пусто (есть корень); метод нужен для clippy и симметрии с `len`.
+    /// The tree is never empty (the root exists); kept for clippy and symmetry with `len`.
     pub fn is_empty(&self) -> bool {
         false
     }
@@ -124,7 +124,7 @@ impl Tree {
         self.nodes.get(id.index())
     }
 
-    /// Добавляет потомка. Размер `own_size` учитывается в итогах после `aggregate`.
+    /// Adds a child. `own_size` is reflected in totals after `aggregate`.
     pub fn add_child(
         &mut self,
         parent: NodeId,
@@ -163,13 +163,13 @@ impl Tree {
         Ok(new_id)
     }
 
-    /// Итерация по прямым потомкам.
+    /// Iterates over direct children.
     pub fn children(&self, id: NodeId) -> Children<'_> {
         Children { tree: self, next: self.get(id).and_then(|n| n.first_child) }
     }
 
-    /// Пересчитывает `total_size` всех узлов одним обратным проходом (родитель раньше потомка).
-    /// Суммы насыщающие: враждебные размеры не вызывают переполнения.
+    /// Recomputes `total_size` of every node in one reverse pass (a parent precedes its children).
+    /// Sums saturate: hostile sizes cannot overflow.
     pub fn aggregate(&mut self) {
         for node in &mut self.nodes {
             node.total_size = node.own_size;
@@ -186,7 +186,7 @@ impl Tree {
     }
 }
 
-/// Итератор по прямым потомкам узла в порядке добавления.
+/// Iterator over the direct children of a node, in insertion order.
 #[derive(Debug)]
 pub struct Children<'a> {
     tree: &'a Tree,

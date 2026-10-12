@@ -1,16 +1,16 @@
-//! L2: `Session` и реестр команд. **Всё пользовательское поведение — команда** (ADR 0003).
+//! L2: `Session` and the command registry. **All user-visible behaviour is a command** (ADR 0003).
 //!
-//! UI, CLI, control-канал и MCP вызывают команды по `id`. Команда: id, подпись, группа меню,
-//! шорткат, описание параметров, `enabled`, `run`. Программный вызов никогда не открывает диалогов.
+//! UI, CLI, control channel and MCP invoke commands by `id`. A command has an id, label, menu group,
+//! shortcut, params doc, `enabled` and `run`. A programmatic call never opens a dialog.
 //!
-//! Статус: каркас (веха M1).
+//! Status: skeleton (milestone M1).
 
 use dirustat_model::Tree;
 use dirustat_scan::empty_tree;
 use dirustat_treemap::{Rect, squarify};
 use std::fmt;
 
-/// Ошибка выполнения команды. `run` обязан возвращать её, а не паниковать, на любых параметрах.
+/// Command execution error. `run` must return it instead of panicking, for any params.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CommandError {
     UnknownCommand(String),
@@ -30,7 +30,7 @@ impl fmt::Display for CommandError {
 
 impl std::error::Error for CommandError {}
 
-/// Состояние сессии: текущее дерево и производные данные.
+/// Session state: the current tree and derived data.
 #[derive(Debug)]
 pub struct Session {
     tree: Tree,
@@ -45,7 +45,7 @@ impl Session {
         &self.tree
     }
 
-    /// Раскладка потомков корня в `bounds` — минимальный пример связки model + treemap.
+    /// Layout of the root's children inside `bounds` — a minimal model + treemap example.
     pub fn layout_root(&self, bounds: Rect) -> Vec<Rect> {
         let mut weights: Vec<u64> =
             self.tree.children(self.tree.root()).filter_map(|id| self.tree.get(id).map(|n| n.total_size())).collect();
@@ -53,7 +53,7 @@ impl Session {
         squarify(&weights, bounds)
     }
 
-    /// Выполняет команду по id. Реестр команд появится в M1.
+    /// Runs a command by id. The command registry arrives in M1.
     pub fn run(&mut self, id: &str, _params: &str) -> Result<(), CommandError> {
         Err(CommandError::UnknownCommand(id.to_owned()))
     }

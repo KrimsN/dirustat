@@ -1,9 +1,9 @@
 # ATTRIBUTION
 
-Каждый нетекстовый ассет (иконки, изображения, звуки, данные) и сторонний материал перечисляется здесь в том же коммите, где добавлен файл.
+Every non-text asset (icons, images, sounds, data) and any third-party material is listed here in the same commit that adds the file.
 
-| Путь | Название | Автор | Источник | Лицензия |
+| Path | Title | Author | Source | Licence |
 |---|---|---|---|---|
-| (пока ассетов нет) | — | — | — | — |
+| (no assets yet) | - | - | - | - |
 
-Правила: `docs/clean-room.md`. Шрифты в репозиторий не добавляются.
+Rules: `docs/clean-room.md`. Fonts are never added to the repository.

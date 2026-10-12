@@ -1,46 +1,46 @@
-# Дизайн UI
+# UI design
 
-> Статус: 2026-10-13 · ревизия 1 · проект (реализация — M1/M5).
+> Status: 2026-10-13 · revision 2 · draft (implementation in M1/M5).
 
-## Макет
+## Layout
 
 ```text
-┌ меню: Файл  Правка  Вид  Очистка  Справка ───────────────────────────┐
-│ панель инструментов: выбор диска/папки · скан/стоп · режим размера · поиск │
+┌ menu: File  Edit  View  Cleanup  Help ────────────────────────────────┐
+│ toolbar: drive/folder picker · scan/stop · size mode · search           │
 ├───────────────────────────────┬───────────────────────────────────────┤
-│ Дерево каталогов (колонки)    │ Список типов файлов (расширения)       │
-│ имя · % · размер · файлов ·   │ цвет · .ext · размер · % · файлов      │
-│ папок · изменено · атрибуты   │                                        │
+│ Directory tree (columns)      │ File-type list (extensions)            │
+│ name · % · size · files ·     │ colour · .ext · size · % · files       │
+│ folders · modified · attrs    │                                        │
 ├───────────────────────────────┴───────────────────────────────────────┤
-│ Treemap (cushion), подсветка выбранного / расширения                   │
+│ Treemap (cushion), highlight of selection / extension                  │
 ├────────────────────────────────────────────────────────────────────────┤
-│ статус: путь · размер · прогресс скана · свободно на диске             │
+│ status: path · size · scan progress · free space on disk               │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-Панели докуются и скрываются (команды `view.*`); раскладка сохраняется в настройках. Окно открывается за < 300 мс и остаётся отзывчивым во время скана.
+Panels dock and hide (`view.*` commands); the layout is saved in settings. The window opens in under 300 ms and stays responsive during a scan.
 
-## Токены и темы
+## Tokens and themes
 
-- Все цвета, радиусы, отступы, размеры шрифтов — в `theme::Tokens` (`crates/ui/src/theme.rs`). Хардкод цветов в виджетах запрещён.
-- Темы: светлая, тёмная, высококонтрастная; переключаются командой `view.theme`.
-- Палитра расширений: категориальная, различимая в обеих темах и для дальтоников; назначение цвета по расширению стабильно (хэш → палитра) и переопределяется пользователем.
-- Иконки — рисуются в коде (векторные примитивы) или CC0/OSI с записью в `ATTRIBUTION.md`. **Не копировать иконки WinDirStat/WizTree.**
+- All colours, radii, spacing and font sizes live in `theme::Tokens` (`crates/ui/src/theme.rs`). Hard-coded colours in widgets are forbidden.
+- Themes: light, dark, high contrast; switched by the `view.theme` command.
+- The extension palette is categorical, distinguishable in both themes and for colour-blind users; a colour is assigned to an extension stably (hash → palette) and the user can override it.
+- Icons are drawn in code (vector primitives) or CC0/OSI with a row in `ATTRIBUTION.md`. **Never copy icons from WinDirStat/WizTree.**
 
 ## Treemap
 
-- Раскладка squarified (`dirustat-treemap`), затенение cushion (van Wijk) — параметры: яркость, высота, масштаб, источник света, сетка.
-- Узлы меньше порога (≈ 2 px) не раскладываются. Клик выбирает узел; двойной клик — зум; подсказка — путь, размер, процент от родителя.
-- Выбор синхронизируется между деревом, treemap и списком расширений.
+- Squarified layout (`dirustat-treemap`), cushion shading (van Wijk) with parameters: brightness, height, scale, light source, grid.
+- Nodes smaller than a threshold (about 2 px) are not laid out. Click selects a node; double click zooms; the tooltip shows path, size and percentage of the parent.
+- Selection is synchronized between the tree, the treemap and the extension list.
 
-## Доступность и ввод
+## Accessibility and input
 
-Все действия — с клавиатуры (шорткаты из реестра команд, палитра команд `Ctrl+Shift+P`), масштабирование UI, контраст ≥ WCAG AA, поддержка скринридеров настолько, насколько позволяет egui/AccessKit.
+Everything is reachable from the keyboard (shortcuts from the command registry, a command palette on `Ctrl+Shift+P`), UI scaling, contrast at least WCAG AA, screen-reader support as far as egui/AccessKit allow.
 
-## Локализация
+## Localization
 
-Строки интерфейса — в каталоге `crates/ui/locales/`; язык по умолчанию — русский и английский. Ключи — английские идентификаторы. Перевод строк сторонних программ не копируем.
+UI strings live in a catalog `crates/ui/locales/`; the source language is English, other languages are translations. Keys are English identifiers. Strings from other programs are never copied.
 
-## Проверка
+## Verification
 
-После UI-правок: `ui.screenshot` (или offscreen-пример) → PNG → посмотри в обеих темах и на масштабах 100 % / 150 %. Демо-данные синтетические.
+After UI changes: `ui.screenshot` (or the offscreen example) → PNG → inspect it in both themes at 100 % / 150 % scale. Demo data is synthetic.

@@ -1,6 +1,6 @@
 [package]
 name = "dirustat-treemap"
-description = "L0: раскладка treemap (squarified), чистая геометрия"
+description = "L0: treemap layout (squarified), pure geometry"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

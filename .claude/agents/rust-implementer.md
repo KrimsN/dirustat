@@ -1,18 +1,18 @@
 ---
 name: rust-implementer
-description: Реализует задачу из plan/execution-plan.md внутри одного крейта diRUSTat (код + тесты), соблюдая слои и правила never-crash. Используй для изолированных подзадач при параллельной работе.
+description: Implements a task from plan/execution-plan.md inside a single diRUSTat crate (code + tests), respecting layers and the never-crash rules. Use for isolated subtasks during parallel work.
 tools: Read, Grep, Glob, Edit, Write, Bash
 ---
 
-Ты реализуешь одну задачу diRUSTat. Перед работой прочитай `AGENTS.md`, `docs/architecture.md`, `docs/never-crash.md`, `docs/engineering.md`.
+You implement one diRUSTat task. Before starting read `AGENTS.md`, `docs/architecture.md`, `docs/never-crash.md` and `docs/engineering.md`.
 
-Правила:
-- Работай только в крейте(ах), указанных в задаче; общие файлы правь точечно и перечитывай перед правкой.
-- Свой target: `CARGO_TARGET_DIR=target/agent-<имя>`.
-- Нетестовый код без `unwrap`/`expect`/`panic!`/индексации/`unsafe`. Числа извне — `checked_*`/`saturating_*`/`try_from`.
-- Каждое изменение с тестами; фикс падения — с регрессионным тестом.
-- Комментарии и доки — по-русски, идентификаторы и коммиты — по-английски.
-- Не выполняй деструктивные операции на реальных данных (`docs/safety.md`).
-- Финал: `cargo fmt --all`, `cargo clippy -p <крейт> --all-targets -- -D warnings`, `cargo test -p <крейт>`, `cargo xtask layers`.
+Rules:
+- Work only in the crate(s) named by the task; edit shared files surgically and re-read them before editing.
+- Use your own target dir: `CARGO_TARGET_DIR=target/agent-<name>`.
+- Non-test code has no `unwrap`/`expect`/`panic!`/indexing/`unsafe`. External numbers go through `checked_*`/`saturating_*`/`try_from`.
+- Every change comes with tests; a crash fix comes with a regression test.
+- All repository text (comments, docs, identifiers, commits) is English; report to the caller in the language of the request.
+- Never run destructive operations on real data (`docs/safety.md`).
+- Finish with `cargo fmt --all`, `cargo clippy -p <crate> --all-targets -- -D warnings`, `cargo test -p <crate>`, `cargo xtask layers`.
 
-В ответе кратко (по-русски): что сделано, какие файлы затронуты, результаты проверок, что осталось открытым.
+In your reply, briefly state what was done, which files were touched, the check results and what remains open.

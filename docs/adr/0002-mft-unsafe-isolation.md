@@ -1,21 +1,21 @@
-# ADR 0002 — Быстрый MFT-путь и изоляция `unsafe`
+# ADR 0002: MFT fast path and `unsafe` isolation
 
-- Статус: Accepted · 2026-10-13
+- Status: Accepted · 2026-10-13
 
-## Контекст
+## Context
 
-WizTree быстр, потому что читает NTFS Master File Table напрямую, минуя обход каталогов. Это даёт на порядок меньше системных вызовов, но требует открыть том (`\\.\C:`) и читать сырые данные — Win32 FFI, то есть `unsafe`. Остальной проект запрещает `unsafe` (`unsafe_code = "forbid"`).
+WizTree is fast because it reads the NTFS Master File Table directly instead of walking directories. That needs an order of magnitude fewer syscalls but requires opening the volume (`\\.\C:`) and reading raw data: Win32 FFI, i.e. `unsafe`. The rest of the project forbids `unsafe` (`unsafe_code = "forbid"`).
 
-## Решение
+## Decision
 
-- Весь `unsafe` живёт в одном крейте `dirustat-ntfs` (L0). В нём `unsafe_code = "deny"` (разрешается точечным `#[allow]` на модуль FFI), `clippy::undocumented_unsafe_blocks = "deny"`, каждый блок снабжён `// SAFETY:`.
-- Граница чёткая: FFI-модуль возвращает safe-описание (дескриптор, чтение блоков в `Vec<u8>`); **разбор записей MFT — полностью safe-код**, с проверкой границ, fixup, лимитами аллокаций и итераций.
-- Для парсера обязательны fuzz-таргет и property-тест «не паникует на произвольных байтах».
-- Права администратора запрашиваются явно; без них — прозрачный откат на переносимый скан (`dirustat-scan`). Приложение не повышает привилегии молча.
-- Крейт `windows-sys` (или `windows`) подключается только здесь и в платформенных сервисах (корзина, проводник).
+- All `unsafe` lives in one crate, `dirustat-ntfs` (L0). It sets `unsafe_code = "deny"` (allowed locally with `#[allow]` on the FFI module) and `clippy::undocumented_unsafe_blocks = "deny"`; every block carries a `// SAFETY:` comment.
+- The boundary is crisp: the FFI module returns a safe description (a handle, block reads into `Vec<u8>`); **MFT record parsing is entirely safe code** with bounds checks, fixups, and allocation and iteration limits.
+- The parser must have a fuzz target and a property test "does not panic on arbitrary bytes".
+- Administrator rights are requested explicitly; without them the scan falls back transparently to the portable path (`dirustat-scan`). The app never elevates silently.
+- `windows-sys` (or `windows`) is pulled in only here and in platform services (recycle bin, file manager).
 
-## Последствия
+## Consequences
 
-- Аудит безопасности сводится к одному небольшому модулю.
-- На не-Windows крейт компилируется как заглушка (`MftSupport::Unavailable`).
-- Любое расширение `unsafe` за пределами FFI-модуля `dirustat-ntfs` требует нового ADR.
+- A security audit shrinks to one small module.
+- On non-Windows the crate compiles as a stub (`MftSupport::Unavailable`).
+- Any extension of `unsafe` beyond the FFI module of `dirustat-ntfs` requires a new ADR.

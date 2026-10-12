@@ -1,14 +1,14 @@
-# ADR 0006 — Имя, лицензия, clean-room
+# ADR 0006: Name, licence, clean-room
 
-- Статус: Accepted · 2026-10-13
+- Status: Accepted · 2026-10-13
 
-## Решение
+## Decision
 
-- Продукт: **diRUSTat** (в UI, документах, релизах). Технические имена: крейты `dirustat-*`, бинарники `dirustat` и `dirustat-cli`, id `dev.dirustat.app`. Регистр `diRUSTat` не сохраняется в crates.io и командной строке — это сознательно.
-- Имя `dirustat` на момент 2026-10-13 свободно на crates.io и GitHub (проверка выполнена); резервирование (`cargo publish` заглушки, организация на GitHub) — решение человека.
-- Лицензия: `MIT OR Apache-2.0`. Совместимо с зависимостями из `deny.toml`.
-- WinDirStat — GPL, WizTree — проприетарный: **clean-room** (`docs/clean-room.md`), без заимствования кода и ресурсов; проект не аффилирован с ними.
+- Product: **diRUSTat** (in the UI, documents, releases). Technical names: crates `dirustat-*`, binaries `dirustat` and `dirustat-cli`, id `dev.dirustat.app`. The `diRUSTat` capitalization is not preserved on crates.io or on the command line; this is deliberate.
+- As of 2026-10-13 the name `dirustat` is free on crates.io and GitHub (checked); reserving it (publishing a stub crate, creating a GitHub organization) is a human decision.
+- Licence: `MIT OR Apache-2.0`, compatible with the dependencies allowed in `deny.toml`.
+- WinDirStat is GPL and WizTree is proprietary: **clean-room** (`docs/clean-room.md`), no borrowing of code or resources; the project is unaffiliated with them.
 
-## Последствия
+## Consequences
 
-Любой вклад проверяется на чистоту происхождения; ассеты — с атрибуцией. Переименование потребует нового ADR.
+Every contribution is checked for clean provenance; assets carry attribution. A rename requires a new ADR.

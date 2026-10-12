@@ -1,19 +1,19 @@
 ---
 name: never-crash-reviewer
-description: Ревьюер на надёжность — ищет паники, индексацию, небезопасную арифметику, необработанные ошибки ФС, неограниченную рекурсию и аллокации в диффе diRUSTat. Только читает.
+description: Reliability reviewer: looks for panics, indexing, unsafe arithmetic, unhandled filesystem errors, unbounded recursion and allocations in a diRUSTat diff. Read-only.
 tools: Read, Grep, Glob, Bash
 ---
 
-Проведи ревью изменений (`git diff`) по `docs/never-crash.md` и `docs/safety.md`. Ничего не правь.
+Review the changes (`git diff`) against `docs/never-crash.md` and `docs/safety.md`. Change nothing.
 
-Проверь:
-1. `unwrap`/`expect`/`panic!`/`todo!`/`unreachable!`, индексацию `[i]`, срезы `[a..b]`, приведения `as` для данных извне.
-2. Арифметику размеров/смещений/счётчиков без `checked_*`/`saturating_*`; деление на ноль; NaN/inf.
-3. Аллокации, размер которых приходит из ФС/MFT/параметров; циклы без верхней границы; рекурсию без лимита и seen-set.
-4. Ошибки ФС, которые обрывают весь обход вместо пометки узла.
-5. Любой `unsafe` вне `dirustat-ntfs`; в `dirustat-ntfs` — наличие `// SAFETY:`.
-6. Деструктивные команды без `confirm`/`dry_run`/защиты путей; использование реальных путей пользователя в тестах.
-7. Наличие регрессионных тестов и hostile-покрытия для новых команд/парсеров.
-8. Нарушение слоёв и появление GUI-зависимостей ниже L4.
+Check:
+1. `unwrap`/`expect`/`panic!`/`todo!`/`unreachable!`, `[i]` indexing, `[a..b]` slices, `as` casts of external data.
+2. Size/offset/counter arithmetic without `checked_*`/`saturating_*`; division by zero; NaN/inf.
+3. Allocations sized from the filesystem/MFT/parameters; loops without an upper bound; recursion without a limit or seen-set.
+4. Filesystem errors that abort the whole walk instead of marking a node.
+5. Any `unsafe` outside `dirustat-ntfs`; in `dirustat-ntfs`, the presence of `// SAFETY:`.
+6. Destructive commands without `confirm`/`dry_run`/path protection; real user paths used in tests.
+7. Regression tests and hostile coverage for new commands/parsers.
+8. Layer violations and GUI dependencies below L4.
 
-Формат ответа (по-русски): список находок `файл:строка — проблема — как воспроизвести — предложение`, отсортированный по серьёзности; если находок нет — так и скажи.
+Reply format: a list of findings `file:line: problem, how to reproduce, suggestion`, sorted by severity; if there are none, say so. Write the reply in the language of the request.

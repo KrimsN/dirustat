@@ -1,21 +1,21 @@
-# ADR 0001 — Чистый Rust, нативный egui/eframe на wgpu
+# ADR 0001: Pure Rust, native egui/eframe on wgpu
 
-- Статус: Accepted · 2026-10-13
+- Status: Accepted · 2026-10-13
 
-## Контекст
+## Context
 
-Нужен быстрый нативный анализатор диска с большим интерактивным treemap (сотни тысяч прямоугольников) и полным управлением агентами. Родственные проекты storytold (photocraft, wordcraft) выбрали нативный egui/eframe на wgpu без Tauri/Electron.
+We need a fast native disk analyzer with a large interactive treemap (hundreds of thousands of rectangles) and full agent control. The sibling storytold projects (photocraft, wordcraft) chose native egui/eframe on wgpu without Tauri/Electron.
 
-## Решение
+## Decision
 
-- Весь код — Rust. Никакого рукописного JS/TS. Никаких Tauri, wry, Electron, webview.
-- UI — egui/eframe на wgpu (`dirustat-ui`, слой L4). Treemap рисуется собственным mesh/кэшем поверх egui painter.
-- UI тонкий: состояние в serde-структурах, действия — команды (ADR 0003).
-- Web-сборка не цель; `model` и `treemap` остаются совместимыми с wasm (демо, переиспользование).
+- All code is Rust. No hand-written JS/TS. No Tauri, wry, Electron or webview.
+- The UI is egui/eframe on wgpu (`dirustat-ui`, layer L4). The treemap is drawn by our own mesh/cache on top of the egui painter.
+- The UI is thin: state lives in serde structures, actions are commands (ADR 0003).
+- A web build is not a goal; `model` and `treemap` stay wasm-compatible (demo, reuse).
 
-## Последствия
+## Consequences
 
-- Единый стек для разработчиков и агентов, простые релизы (один бинарник).
-- Нестандартные виджеты (дерево с колонками, treemap) пишем сами; виртуализация строк обязательна.
-- Доступность ограничена возможностями egui/AccessKit — следим за обновлениями.
-- Альтернативы (Tauri, Slint, iced) отклонены: webview противоречит цели; Slint/iced — меньше опыта в родственных проектах и ниже готовность виджетов; можно пересмотреть новым ADR, если egui упрётся в производительность treemap.
+- One stack for developers and agents, simple releases (a single binary).
+- Non-standard widgets (a tree with columns, the treemap) are written by us; row virtualization is mandatory.
+- Accessibility is bounded by what egui/AccessKit offer; we follow their updates.
+- Alternatives (Tauri, Slint, iced) were rejected: a webview contradicts the goal; Slint/iced have less experience in sibling projects and less mature widgets. A new ADR can revisit this if egui hits a treemap performance wall.

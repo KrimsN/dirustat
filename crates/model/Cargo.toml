@@ -1,6 +1,6 @@
 [package]
 name = "dirustat-model"
-description = "L0: модель дерева файлов (arena), чистые данные"
+description = "L0: file tree model (arena), pure data"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

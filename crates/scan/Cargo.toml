@@ -1,6 +1,6 @@
 [package]
 name = "dirustat-scan"
-description = "L1: сканирование файловой системы, строит dirustat-model"
+description = "L1: filesystem scanning, builds dirustat-model"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

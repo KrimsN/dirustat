@@ -1,50 +1,50 @@
-# Инженерные конвенции
+# Engineering conventions
 
-> Статус: 2026-10-13 · ревизия 1.
+> Status: 2026-10-13 · revision 2.
 
-## Ошибки
+## Errors
 
-- Каждый крейт имеет свой тип ошибки (`enum`, `Display` + `std::error::Error`), без `anyhow` в библиотечных крейтах. В приложениях (`apps/*`) допустим верхнеуровневый `Result<(), Box<dyn Error>>`.
-- Ошибка несёт контекст для человека (по-русски в `Display` пользовательских ошибок) и машинный вариант (`enum`), по которому код ветвится.
-- `CommandError` — единственный тип, который видят клиенты команд (UI/CLI/control/MCP); внутренние ошибки конвертируются в него на границе engine.
+- Every crate has its own error type (`enum`, `Display` + `std::error::Error`), no `anyhow` in library crates. Applications (`apps/*`) may use a top-level `Result<(), Box<dyn Error>>`.
+- An error carries human-readable context and a machine-readable variant that code branches on.
+- `CommandError` is the only type command clients (UI/CLI/control/MCP) see; internal errors convert to it at the engine boundary.
 
-## Конкурентность
+## Concurrency
 
-- Тяжёлая работа (скан, раскладка больших деревьев, экспорт) — в фоновых потоках; UI-поток не блокируется. Rayon для data-parallel, каналы (`std::sync::mpsc`/`crossbeam`) для прогресса.
-- Разделяемое состояние — `Arc<Snapshot>` с неизменяемым содержимым; публикация новой ревизии атомарна. Держи мьютексы коротко и не вызывай чужой код под локом.
-- Отмена кооперативная (`AtomicBool`/токен), проверяется в циклах обхода не реже чем раз на каталог.
-- Никаких блокирующих операций ФС в UI-потоке.
+- Heavy work (scan, layout of big trees, export) runs on background threads; the UI thread never blocks. Rayon for data parallelism, channels (`std::sync::mpsc`/`crossbeam`) for progress.
+- Shared state is an `Arc<Snapshot>` with immutable contents; publishing a new revision is atomic. Hold mutexes briefly and never call foreign code under a lock.
+- Cancellation is cooperative (`AtomicBool`/token), checked in walk loops at least once per directory.
+- No blocking filesystem calls on the UI thread.
 
-## Производительность кода
+## Code performance
 
-- Горячие структуры компактны: `NodeId` — `u32`, имена `Box<str>`, без лишних `String` на узел. Измеряй (`docs/performance.md`), прежде чем усложнять.
-- Не аллоцируй в цикле раскладки/рендера: переиспользуй буферы.
-- Кэш по ревизии вместо пересчёта на кадр.
+- Hot structures are compact: `NodeId` is `u32`, names are `Box<str>`, no extra `String` per node. Measure (`docs/performance.md`) before complicating.
+- Do not allocate in the layout/render loop: reuse buffers.
+- Cache by revision instead of recomputing per frame.
 
-## Комментарии и документация в коде
+## Comments and in-code docs
 
-- Комментарии по-русски, объясняют причину и инварианты, не пересказывают код. Не оставляй `TODO` без id задачи из `docs/gaps.md` (`// TODO(G-014): …`).
-- Публичные элементы — `///` с примером поведения на границах (пустой вход, переполнение).
-- Модуль начинается с `//!`: слой, ответственность, статус (если заглушка — укажи веху).
+- Comments are English and explain the reason and invariants; they do not restate the code. Leave no `TODO` without a task id from `docs/gaps.md` (`// TODO(G-014): ...`).
+- Public items get `///` describing behaviour at the edges (empty input, overflow).
+- A module starts with `//!`: layer, responsibility and, for a stub, the milestone.
 
-## Логирование
+## Logging
 
-`tracing` (с M1). Уровни: `error` — потеряно действие пользователя; `warn` — деградация (откат с MFT на переносимый скан); `info` — вехи сессии; `debug`/`trace` — подробности, пути пользователя только здесь.
+`tracing` (from M1). Levels: `error` is a lost user action; `warn` is a degradation (falling back from MFT to the portable scan); `info` marks session milestones; `debug`/`trace` is detail, and user paths appear only there.
 
-## Зависимости
+## Dependencies
 
-Каждая зависимость обоснована в таблице ниже (добавляй строку в том же изменении). Предпочитай чистый Rust и малые деревья зависимостей. Проверка `cargo deny check`.
+Every dependency is justified in the table below (add a row in the same change). Prefer pure Rust and small dependency trees. Checked by `cargo deny check`.
 
-| Зависимость | Крейт-потребитель | Зачем | Лицензия | Статус |
+| Dependency | Consumer crate | Why | Licence | Status |
 |---|---|---|---|---|
-| (пока нет внешних) | — | каркас M0 использует только std | — | — |
+| (no external ones yet) | - | the M0 skeleton uses only std | - | - |
 
-Планируются (решение в ADR при внедрении): `eframe`/`egui` + `wgpu` (UI), `rayon` (параллельный обход), `serde`/`serde_json` (состояние, control), `tracing`, `tempfile` (dev), `proptest` (dev), `windows-sys`/`windows` (только `dirustat-ntfs` и платформенные сервисы), `trash` (корзина), `regex` (поиск), `image` (экспорт PNG).
+Planned (decided in an ADR when introduced): `eframe`/`egui` + `wgpu` (UI), `rayon` (parallel walk), `serde`/`serde_json` (state, control), `tracing`, `tempfile` (dev), `proptest` (dev), `windows-sys`/`windows` (only `dirustat-ntfs` and platform services), `trash` (recycle bin), `regex` (search), `image` (PNG export).
 
-## Версионирование и релизы
+## Versioning and releases
 
-SemVer по workspace (`workspace.package.version`). Протокол control версионируется отдельно (`PROTOCOL_VERSION`); изменение после первого релиза — решение человека. Релизная автоматизация — `cargo xtask version` и workflow `release.yml` (веха M6).
+SemVer for the workspace (`workspace.package.version`). The control protocol is versioned separately (`PROTOCOL_VERSION`); changing it after the first release is a human decision. Release automation is `cargo xtask version` plus a `release.yml` workflow (milestone M6).
 
-## Платформенный код
+## Platform code
 
-Всё платформенное — за трейтом `PlatformServices` (корзина, проводник, свободное место, права). Реализации под `cfg(windows)` / `cfg(unix)`; на неподдерживаемой платформе возвращай `Unsupported`, а не `panic`. Тесты платформенного кода помечай `cfg` и не ломай сборку других ОС.
+Everything platform-specific sits behind a `PlatformServices` trait (recycle bin, file manager, free space, privileges). Implementations live under `cfg(windows)` / `cfg(unix)`; on an unsupported platform return `Unsupported`, never `panic`. Gate platform tests with `cfg` and do not break builds on other OSes.

@@ -1,12 +1,13 @@
 # Architecture Decision Records
 
-Решения фиксируются коротко: контекст → решение → последствия. Принятое не пересматривай без нового ADR, который ссылается на старый (`Supersedes`). Нумерация сквозная, файл `NNNN-kebab-title.md`, статус: `Accepted` / `Superseded` / `Proposed`.
+Decisions are recorded briefly: context → decision → consequences. Do not revisit an accepted decision without a new ADR that references the old one (`Supersedes`). Numbering is sequential, files are `NNNN-kebab-title.md`, status is `Accepted` / `Superseded` / `Proposed`.
 
-| № | Решение | Статус |
+| No. | Decision | Status |
 |---|---|---|
-| [0001](0001-rust-only-native-egui.md) | Чистый Rust, нативный egui/eframe на wgpu, без webview | Accepted |
-| [0002](0002-mft-unsafe-isolation.md) | Быстрый MFT-путь и изоляция `unsafe` в `dirustat-ntfs` | Accepted |
-| [0003](0003-everything-is-a-command.md) | Всё — команда; клиенты равноправны | Accepted |
-| [0004](0004-arena-tree-model.md) | Arena-дерево с `u32` id и итеративной агрегацией | Accepted |
-| [0005](0005-layers-and-agent-workflow.md) | Слои, проверка в xtask, процесс агентной разработки | Accepted |
-| [0006](0006-naming-and-licensing.md) | Имя diRUSTat/dirustat, лицензия MIT OR Apache-2.0, clean-room | Accepted |
+| [0001](0001-rust-only-native-egui.md) | Pure Rust, native egui/eframe on wgpu, no webview | Accepted |
+| [0002](0002-mft-unsafe-isolation.md) | MFT fast path and isolating `unsafe` in `dirustat-ntfs` | Accepted |
+| [0003](0003-everything-is-a-command.md) | Everything is a command; clients are equal | Accepted |
+| [0004](0004-arena-tree-model.md) | Arena tree with `u32` ids and iterative aggregation | Accepted |
+| [0005](0005-layers-and-agent-workflow.md) | Layers, xtask enforcement, agent development workflow | Accepted |
+| [0006](0006-naming-and-licensing.md) | Name diRUSTat/dirustat, licence MIT OR Apache-2.0, clean-room | Accepted |
+| [0007](0007-english-only-repository.md) | All repository text is English; chat uses the user's language | Accepted |

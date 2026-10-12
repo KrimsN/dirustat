@@ -1,12 +1,12 @@
 ---
-description: Измерить производительность горячего пути и сверить с бюджетами
-argument-hint: <сценарий: scan | mft | treemap | ui>
+description: Measure a hot path's performance and compare with the budgets
+argument-hint: <scenario: scan | mft | treemap | ui>
 ---
 
-Проверь производительность сценария `$ARGUMENTS`:
+Check the performance of the scenario `$ARGUMENTS`:
 
-1. Прочитай `docs/performance.md` и `perf/budgets.toml`.
-2. Собери в release. Используй синтетические фикстуры (`cargo xtask fixtures`, когда есть) — не реальные данные пользователя.
-3. Сделай 3 замера, запиши медиану, машину и конфигурацию.
-4. Сравни с бюджетом. Если бюджет выполнен впервые — поставь `enforce = true`. Если нет — найди узкое место профилированием, а не догадками.
-5. Запиши числа до/после в `log/devlog.md`; при публикации базовой линии — `cargo xtask perf --update-baseline`.
+1. Read `docs/performance.md` and `perf/budgets.toml`.
+2. Build in release. Use synthetic fixtures (`cargo xtask fixtures` once it exists), never the user's real data.
+3. Take 3 measurements and record the median, the machine and the configuration.
+4. Compare with the budget. If a budget is met for the first time, set `enforce = true`. If not, find the bottleneck by profiling, not by guessing.
+5. Record before/after numbers in `log/devlog.md`; to publish a baseline run `cargo xtask perf --update-baseline`.

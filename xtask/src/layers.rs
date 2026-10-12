@@ -1,10 +1,10 @@
-//! Проверка слоёв зависимостей. Крейт может зависеть только от крейтов НИЖНЕГО слоя.
-//! Новый крейт обязан быть зарегистрирован в `LAYERS` (иначе проверка падает).
+//! Dependency layer check. A crate may depend only on crates of a LOWER layer.
+//! A new crate must be registered in `LAYERS` (otherwise the check fails).
 
 use std::fs;
 use std::path::Path;
 
-/// (имя пакета, слой). Приложения (`dirustat`, `dirustat-cli`) стоят выше всех слоёв — слой 99.
+/// (package name, layer). Applications (`dirustat`, `dirustat-cli`) sit above all layers: layer 99.
 pub const LAYERS: &[(&str, u8)] = &[
     ("dirustat-model", 0),
     ("dirustat-treemap", 0),
@@ -17,14 +17,14 @@ pub const LAYERS: &[(&str, u8)] = &[
     ("dirustat-cli", 99),
 ];
 
-/// Крейты, которым запрещены зависимости от GUI-стека (всё ниже L4 и headless CLI).
+/// Dependencies forbidden below L4 and in the headless CLI (the GUI stack).
 const GUI_DEPS: &[&str] = &["egui", "eframe", "winit", "rfd", "wgpu", "egui_extras"];
 
 fn layer_of(name: &str) -> Option<u8> {
     LAYERS.iter().find(|(n, _)| *n == name).map(|(_, l)| *l)
 }
 
-/// Имена зависимостей из секций `[dependencies]` и `[dev-dependencies]` простым построчным разбором.
+/// Dependency names from `[dependencies]`, `[dev-dependencies]` and `[build-dependencies]` via a simple line parser.
 fn dependency_names(manifest: &str) -> Vec<String> {
     let mut in_deps = false;
     let mut names = Vec::new();
@@ -60,7 +60,7 @@ fn manifests(root: &Path) -> Vec<std::path::PathBuf> {
     out
 }
 
-/// Возвращает `true`, если нарушений нет.
+/// Returns `true` when there are no violations.
 pub fn check(root: &Path) -> bool {
     let mut ok = true;
     for path in manifests(root) {

@@ -1,59 +1,59 @@
-# Control-протокол и MCP
+# Control protocol and MCP
 
-> Статус: 2026-10-13 · ревизия 1 · **проект протокола** (реализация — веха M2). `PROTOCOL_VERSION = 1`.
+> Status: 2026-10-13 · revision 2 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
 
-Цель: любое действие человека доступно агенту; приложение можно запустить, просканировать тестовую папку, нажать команды и снять скриншот без мыши и клавиатуры.
+Goal: any action a human can take is available to an agent; the app can be launched, scan a test folder, run commands and take a screenshot without a mouse or keyboard.
 
-## Транспорт
+## Transport
 
-- Запуск: `dirustat --control <порт>`. Слушает только `127.0.0.1:<порт>`.
-- Ключ окна генерируется при старте и записывается в файл `control-key.local-<порт>` (Windows: `%APPDATA%\dirustat\`, Linux: `~/.config/dirustat/`, macOS: `~/Library/Application Support/diRUSTat/`). Каждый запрос обязан содержать `key`.
-- Формат: одна JSON-строка на запрос, одна на ответ.
+- Launch: `dirustat --control <port>`. Listens only on `127.0.0.1:<port>`.
+- A window key is generated at start and written to `control-key.local-<port>` (Windows: `%APPDATA%\dirustat\`, Linux: `~/.config/dirustat/`, macOS: `~/Library/Application Support/diRUSTat/`). Every request must carry `key`.
+- Format: one JSON line per request, one per response.
 
 ```json
-{"id":1,"key":"…","method":"engine.execute","params":{"command":"scan.start","params":{"path":"C:\\fixtures\\small"}}}
+{"id":1,"key":"...","method":"engine.execute","params":{"command":"scan.start","params":{"path":"C:\\fixtures\\small"}}}
 {"id":1,"ok":true,"result":{"revision":3}}
 {"id":2,"ok":false,"error":{"code":"invalid_params","message":"path is empty"}}
 ```
 
-Коды ошибок (стабильные, английские): `unknown_command`, `invalid_params`, `unsupported`, `confirmation_required`, `not_enabled`, `internal`.
+Stable error codes: `unknown_command`, `invalid_params`, `unsupported`, `confirmation_required`, `not_enabled`, `internal`.
 
-## Методы
+## Methods
 
-| Метод | Параметры | Результат |
+| Method | Parameters | Result |
 |---|---|---|
-| `engine.commands` | — | список команд: id, label, menu, shortcut, params_doc, destructive |
-| `engine.execute` | `command`, `params` | результат команды; деструктивные требуют `confirm: true` |
-| `session.state` | `path?` | JSON состояния сессии (дерево верхнего уровня, выбор, прогресс, ревизия) |
-| `session.tree` | `node?`, `depth?`, `limit?` | поддерево с размерами (пагинация, без полного дерева) |
-| `ui.state` | — | сериализованное состояние UI (serde) |
-| `ui.set_state` | `patch` | изменить состояние UI (панели, сортировка, масштаб) |
-| `ui.screenshot` | `path`, `region?` | сохранить PNG окна (рендер offscreen, без захвата фокуса) |
-| `app.quit` | — | корректное завершение |
+| `engine.commands` | none | list of commands: id, label, menu, shortcut, params_doc, destructive |
+| `engine.execute` | `command`, `params` | command result; destructive ones require `confirm: true` |
+| `session.state` | `path?` | session state as JSON (top-level tree, selection, progress, revision) |
+| `session.tree` | `node?`, `depth?`, `limit?` | subtree with sizes (paginated, never the whole tree) |
+| `ui.state` | none | serialized UI state (serde) |
+| `ui.set_state` | `patch` | change UI state (panels, sorting, zoom) |
+| `ui.screenshot` | `path`, `region?` | save a window PNG (offscreen render, no focus stealing) |
+| `app.quit` | none | graceful shutdown |
 
-Правила:
-- Программный вызов никогда не открывает диалог; всё, что в UI требует диалога, имеет параметризованный вариант команды.
-- `engine.execute` блокирует до завершения быстрых команд; долгие (`scan.start`) возвращают сразу, прогресс — через `session.state`.
-- Ответы ограничены по размеру: большие деревья отдаются страницами (`session.tree`).
+Rules:
+- A programmatic call never opens a dialog; anything that needs a dialog in the UI has a parameterized command variant.
+- `engine.execute` blocks until fast commands finish; long ones (`scan.start`) return at once and progress is read through `session.state`.
+- Responses are size-limited: big trees are returned in pages (`session.tree`).
 
 ## MCP
 
-`dirustat-cli mcp` — MCP-сервер (stdio), `dirustat-cli mcp --connect 127.0.0.1:<порт>` — мост к запущенному приложению. Каждая команда реестра публикуется как tool с JSON-схемой параметров; деструктивные помечены `destructive: true` и требуют `confirm`. Дополнительно: ресурсы `dirustat://session/state`, `dirustat://session/tree`.
+`dirustat-cli mcp` is an MCP server (stdio); `dirustat-cli mcp --connect 127.0.0.1:<port>` bridges to a running app. Every registry command is published as a tool with a JSON parameter schema; destructive ones are marked `destructive: true` and require `confirm`. Resources: `dirustat://session/state`, `dirustat://session/tree`.
 
-## CLI-эквиваленты
+## CLI equivalents
 
 ```sh
 dirustat-cli commands
-dirustat-cli scan <папка> --json out.json
-dirustat-cli run --scan <папка> --cmd 'export.csv={"path":"out.csv"}'
+dirustat-cli scan <folder> --json out.json
+dirustat-cli run --scan <folder> --cmd 'export.csv={"path":"out.csv"}'
 ```
 
-## Соглашения о командах
+## Command conventions
 
-- id: `группа.действие` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`, `file.delete`, `export.csv`, `search.find`).
-- Группы: `scan`, `view`, `select`, `tree`, `treemap`, `ext`, `file`, `cleanup`, `search`, `filter`, `export`, `snapshot`, `settings`, `ui` (только оболочка).
-- Параметры — объект JSON; все поля документированы в `params_doc`; неизвестные поля — ошибка `invalid_params`.
+- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`, `file.delete`, `export.csv`, `search.find`).
+- Groups: `scan`, `view`, `select`, `tree`, `treemap`, `ext`, `file`, `cleanup`, `search`, `filter`, `export`, `snapshot`, `settings`, `ui` (shell only).
+- Parameters are a JSON object; every field is documented in `params_doc`; unknown fields are an `invalid_params` error.
 
-## Безопасность канала
+## Channel security
 
-Только loopback, обязательный ключ, лимит размера запроса, лимит скорости; деструктивные команды — по `docs/safety.md`. Канал по умолчанию выключен.
+Loopback only, mandatory key, request size limit, rate limit; destructive commands follow `docs/safety.md`. The channel is off by default.

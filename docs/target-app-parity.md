@@ -1,77 +1,78 @@
-# Паритет с WinDirStat и WizTree
+# Parity with WinDirStat and WizTree
 
-> Статус: 2026-10-13 · ревизия 1 · WinDirStat 0/34, WizTree 0/12. Поведение определено по пользовательской документации и использованию программ как чёрных ящиков (`docs/clean-room.md`).
+> Status: 2026-10-13 · revision 2 · WinDirStat 0/34, WizTree 0/12. Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
-Статусы: `missing` · `partial` · `done`. При изменении строки обнови дату, пересчитай итоги в шапке и в `ROADMAP.md`, допиши историю ревизий. Идентификаторы — id команд (`docs/control-protocol.md`).
+Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
 ## A. WinDirStat (34)
 
-| # | Функция | Команда / область | Веха | Статус |
+| # | Feature | Command / area | Milestone | Status |
 |---|---|---|---|---|
-| 1 | Скан выбранной папки | `scan.start` | M1 | missing |
-| 2 | Выбор дисков (все локальные / отдельные) | `scan.start_drives` | M1 | missing |
-| 3 | Отмена скана | `scan.cancel` | M1 | missing |
-| 4 | Повторный скан / обновление | `scan.rescan` | M1 | missing |
-| 5 | Индикация прогресса и оценки | статус-бар | M1 | missing |
-| 6 | Исключения при скане (маски, пути) | `scan.exclude` | M4 | missing |
-| 7 | Раскрытие/сворачивание дерева | `tree.expand` / `tree.collapse` | M1 | missing |
-| 8 | Сортировка по колонкам | `tree.sort` | M1 | missing |
-| 9 | Колонки: имя, доля (бар), %, размер, элементы, файлы, папки, изменён, атрибуты | `tree.columns` | M1 | missing |
-| 10 | Синхронизация выбора дерево ↔ treemap ↔ расширения | `select.node` | M1 | missing |
-| 11 | Режим размера: логический / на диске | `settings.size_mode` | M1 | missing |
-| 12 | Элементы «свободное место» и «неизвестно» | `view.free_space` | M2 | missing |
-| 13 | Treemap squarified | `treemap.render` | M1 | missing |
-| 14 | Cushion-шейдинг | `treemap.cushion` | M5 | missing |
-| 15 | Параметры treemap (сетка, яркость, высота, масштаб, свет) | `treemap.options` | M5 | missing |
-| 16 | Зум в/из каталога | `view.zoom_in` / `view.zoom_out` | M2 | missing |
-| 17 | Подсветка выбранного на treemap | `treemap.highlight` | M1 | missing |
-| 18 | Выбор кликом по treemap | `treemap.pick` | M1 | missing |
-| 19 | Показ/скрытие treemap | `view.toggle_treemap` | M1 | missing |
-| 20 | Список типов файлов (расширение, размер, число, %) | `ext.list` | M1 | missing |
-| 21 | Цвета типов файлов | `ext.colors` | M1 | missing |
-| 22 | Подсветка файлов расширения на treemap | `ext.highlight` | M2 | missing |
-| 23 | Сортировка списка расширений | `ext.sort` | M1 | missing |
-| 24 | Открыть файл | `file.open` | M4 | missing |
-| 25 | Показать в проводнике | `file.reveal` | M4 | missing |
-| 26 | Удалить в корзину | `file.delete` | M4 | missing |
-| 27 | Удалить безвозвратно | `file.delete_permanent` | M4 | missing |
-| 28 | Копировать путь | `file.copy_path` | M4 | missing |
-| 29 | Пользовательские очистки (cleanups) | `cleanup.run` | M4 | missing |
-| 30 | Свойства файла/папки | `file.properties` | M4 | missing |
-| 31 | Поиск по имени | `search.find` | M4 | missing |
-| 32 | Фильтр по имени/размеру/дате | `filter.set` | M4 | missing |
-| 33 | Сохранение настроек | `settings.save` | M2 | missing |
-| 34 | Запуск из командной строки с путём | `dirustat <path>` | M2 | missing |
+| 1 | Scan a chosen folder | `scan.start` | M1 | missing |
+| 2 | Choose drives (all local / specific) | `scan.start_drives` | M1 | missing |
+| 3 | Cancel a scan | `scan.cancel` | M1 | missing |
+| 4 | Rescan / refresh | `scan.rescan` | M1 | missing |
+| 5 | Progress and estimate display | status bar | M1 | missing |
+| 6 | Scan exclusions (masks, paths) | `scan.exclude` | M4 | missing |
+| 7 | Expand/collapse the tree | `tree.expand` / `tree.collapse` | M1 | missing |
+| 8 | Sort by column | `tree.sort` | M1 | missing |
+| 9 | Columns: name, share (bar), %, size, items, files, folders, modified, attributes | `tree.columns` | M1 | missing |
+| 10 | Selection sync tree ↔ treemap ↔ extensions | `select.node` | M1 | missing |
+| 11 | Size mode: logical / on disk | `settings.size_mode` | M1 | missing |
+| 12 | "Free space" and "unknown" items | `view.free_space` | M2 | missing |
+| 13 | Squarified treemap | `treemap.render` | M1 | missing |
+| 14 | Cushion shading | `treemap.cushion` | M5 | missing |
+| 15 | Treemap options (grid, brightness, height, scale, light) | `treemap.options` | M5 | missing |
+| 16 | Zoom into/out of a directory | `view.zoom_in` / `view.zoom_out` | M2 | missing |
+| 17 | Highlight the selection on the treemap | `treemap.highlight` | M1 | missing |
+| 18 | Select by clicking the treemap | `treemap.pick` | M1 | missing |
+| 19 | Show/hide the treemap | `view.toggle_treemap` | M1 | missing |
+| 20 | File-type list (extension, size, count, %) | `ext.list` | M1 | missing |
+| 21 | File-type colours | `ext.colors` | M1 | missing |
+| 22 | Highlight an extension's files on the treemap | `ext.highlight` | M2 | missing |
+| 23 | Sort the extension list | `ext.sort` | M1 | missing |
+| 24 | Open a file | `file.open` | M4 | missing |
+| 25 | Reveal in file manager | `file.reveal` | M4 | missing |
+| 26 | Delete to recycle bin | `file.delete` | M4 | missing |
+| 27 | Delete permanently | `file.delete_permanent` | M4 | missing |
+| 28 | Copy path | `file.copy_path` | M4 | missing |
+| 29 | User-defined cleanups | `cleanup.run` | M4 | missing |
+| 30 | File/folder properties | `file.properties` | M4 | missing |
+| 31 | Search by name | `search.find` | M4 | missing |
+| 32 | Filter by name/size/date | `filter.set` | M4 | missing |
+| 33 | Persist settings | `settings.save` | M2 | missing |
+| 34 | Launch from the command line with a path | `dirustat <path>` | M2 | missing |
 
-## B. Отличительные возможности WizTree (12)
+## B. Distinctive WizTree features (12)
 
-| # | Функция | Команда / область | Веха | Статус |
+| # | Feature | Command / area | Milestone | Status |
 |---|---|---|---|---|
-| 1 | Скан через MFT | `scan.start` (backend `mft`) | M3 | missing |
-| 2 | Запрос прав администратора и откат на обычный скан | `scan.elevate` | M3 | missing |
-| 3 | Плоский список всех файлов | `view.file_list` | M2 | missing |
-| 4 | Топ самых больших файлов | `view.largest_files` | M2 | missing |
-| 5 | Поиск с wildcard/regex | `search.find` (mode) | M4 | missing |
-| 6 | Экспорт CSV | `export.csv` | M5 | missing |
-| 7 | Экспорт изображения treemap | `export.image` | M5 | missing |
-| 8 | Сохранение/загрузка снимков скана | `snapshot.save` / `snapshot.load` | M5 | missing |
-| 9 | Сравнение снимков | `snapshot.compare` | M5 | missing |
-| 10 | Выбор диска с полосами заполнения | `view.drive_picker` | M2 | missing |
-| 11 | Скан не-NTFS / сетевых путей | `scan.start` (backend `portable`) | M1 | missing |
-| 12 | Портативный режим (без установки, настройки рядом) | `settings.portable` | M6 | missing |
+| 1 | Scan through the MFT | `scan.start` (backend `mft`) | M3 | missing |
+| 2 | Ask for administrator rights and fall back to a normal scan | `scan.elevate` | M3 | missing |
+| 3 | Flat list of all files | `view.file_list` | M2 | missing |
+| 4 | Top largest files | `view.largest_files` | M2 | missing |
+| 5 | Search with wildcard/regex | `search.find` (mode) | M4 | missing |
+| 6 | CSV export | `export.csv` | M5 | missing |
+| 7 | Treemap image export | `export.image` | M5 | missing |
+| 8 | Save/load scan snapshots | `snapshot.save` / `snapshot.load` | M5 | missing |
+| 9 | Compare snapshots | `snapshot.compare` | M5 | missing |
+| 10 | Drive picker with fill bars | `view.drive_picker` | M2 | missing |
+| 11 | Scan non-NTFS / network paths | `scan.start` (backend `portable`) | M1 | missing |
+| 12 | Portable mode (no install, settings alongside) | `settings.portable` | M6 | missing |
 
-## C. Сверх паритета (не входит в проценты)
+## C. Beyond parity (not counted in percentages)
 
-Дубликаты файлов (хэш по размеру → частичный → полный), история изменений между снимками с графиком, тёмная/высококонтрастная темы, палитра команд, управление агентами (control/MCP), CLI-экспорт, шаблоны очисток, подсказки «что можно удалить» (кэши, временные).
+Duplicate file finder (size → partial hash → full hash), change history between snapshots with a chart, dark/high-contrast themes, a command palette, agent control (control/MCP), CLI export, cleanup templates, "what can be deleted" hints (caches, temp files).
 
-## D. Метрики
+## D. Metrics
 
-| Метрика | Значение |
+| Metric | Value |
 |---|---|
 | WinDirStat, `done` | 0 / 34 |
 | WizTree, `done` | 0 / 12 |
-| Скорость MFT-скана (1M файлов) | не измерена |
+| MFT scan speed (1M files) | not measured |
 
-## История ревизий
+## Revision history
 
-- 2026-10-13 · r1 — первичная матрица.
+- 2026-10-13 · r1: initial matrix.
+- 2026-10-13 · r2: translated to English.

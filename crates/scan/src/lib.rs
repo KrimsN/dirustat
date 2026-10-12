@@ -1,19 +1,19 @@
-//! L1: сканирование файловой системы. Строит `dirustat_model::Tree`.
+//! L1: filesystem scanning. Builds `dirustat_model::Tree`.
 //!
-//! Статус: заглушка (веха M1). Планируется: переносимый параллельный обход (rayon), поток
-//! прогресса и отмена, корректный размер на диске (cluster size, sparse, hardlinks без
-//! двойного счёта, reparse points без захода), быстрый путь через `dirustat-ntfs`.
+//! Status: stub (milestone M1). Planned: portable parallel walk (rayon), progress stream and
+//! cancellation, correct size on disk (cluster size, sparse, hardlinks counted once, reparse
+//! points not followed), fast path through `dirustat-ntfs`.
 
 use dirustat_model::Tree;
 
-/// Строит дерево из одного корня без обхода диска — каркас для тестов вышележащих слоёв.
+/// Builds a tree with a single root and no disk walk — a skeleton for testing higher layers.
 pub fn empty_tree(root: &str) -> Tree {
     let mut tree = Tree::new(root);
     tree.aggregate();
     tree
 }
 
-/// Доступен ли быстрый путь MFT для тома.
+/// Whether the MFT fast path is available for the volume.
 pub fn mft_available(volume: &str) -> bool {
     dirustat_ntfs::probe(volume) != dirustat_ntfs::MftSupport::Unavailable
 }

@@ -1,21 +1,21 @@
-# ADR 0004 — Arena-дерево с `u32` id
+# ADR 0004: Arena tree with `u32` ids
 
-- Статус: Accepted · 2026-10-13
+- Status: Accepted · 2026-10-13
 
-## Контекст
+## Context
 
-Дерево файлов — миллионы узлов, строится сканером, читается UI и treemap. Указатели/`Rc`/`Box` на узел дороги по памяти и скорости, рекурсия опасна на глубоких деревьях.
+The file tree has millions of nodes, is built by the scanner and read by the UI and treemap. Per-node pointers/`Rc`/`Box` are expensive in memory and speed, and recursion is dangerous on deep trees.
 
-## Решение
+## Decision
 
-- Плоский `Vec<Node>`; `NodeId(u32)`; связи `parent`, `first_child`, `last_child`, `next_sibling`. Родитель добавляется раньше потомка.
-- Агрегация размеров — один обратный проход, без рекурсии, насыщающее сложение.
-- Предел — `MAX_NODES` (≈ 4,29 млрд); при превышении `ModelError::TooManyNodes`.
-- Имена — `Box<str>`; пути собираются по требованию, а не хранятся.
-- После скана дерево неизменяемо и публикуется как `Arc` с ревизией; кэши привязаны к ревизии.
+- A flat `Vec<Node>`; `NodeId(u32)`; links `parent`, `first_child`, `last_child`, `next_sibling`. A parent is added before its children.
+- Size aggregation is one reverse pass, without recursion, using saturating addition.
+- The limit is `MAX_NODES` (about 4.29 billion); beyond it `ModelError::TooManyNodes`.
+- Names are `Box<str>`; paths are built on demand, not stored.
+- After a scan the tree is immutable and published as an `Arc` with a revision; caches are keyed by revision.
 
-## Последствия
+## Consequences
 
-- Компактно и быстро, удобно для параллельной сборки (локальные поддеревья сливаются в arena).
-- Удаление узлов не поддерживается на месте — после деструктивных действий пересканируем поддерево и публикуем новую ревизию (M4).
-- Расширение полей узла (allocated size, счётчики, mtime) допускается без смены схемы id.
+- Compact and fast, convenient for parallel construction (local subtrees merge into the arena).
+- Nodes cannot be removed in place: after destructive actions we rescan the subtree and publish a new revision (M4).
+- Node fields (allocated size, counters, mtime) can be extended without changing the id scheme.

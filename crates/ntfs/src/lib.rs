@@ -1,17 +1,17 @@
-//! L0: быстрый разбор NTFS MFT (путь «как у WizTree»).
+//! L0: fast NTFS MFT parsing (the "WizTree-style" path).
 //!
-//! Статус: заглушка (веха M3). Здесь будет парсинг MFT-записей из сырого тома. Крейт — единственное
-//! место workspace, где допустим `unsafe` (ADR 0002): только для Win32 FFI (`CreateFileW`,
-//! `DeviceIoControl`, чтение тома). Парсинг записей — только safe-код, с fuzz-таргетом.
+//! Status: stub (milestone M3). Will parse MFT records read from a raw volume. This crate is the only
+//! place in the workspace where `unsafe` is allowed (ADR 0002): Win32 FFI only (`CreateFileW`,
+//! `DeviceIoControl`, volume reads). Record parsing is safe code only, with a fuzz target.
 
-/// Результат проверки возможности быстрого пути.
+/// Result of probing for the fast path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MftSupport {
-    /// Платформа или права не позволяют читать MFT; используем переносимый обход.
+    /// The platform or privileges do not allow reading the MFT; use the portable walk.
     Unavailable,
 }
 
-/// Проверяет, доступен ли быстрый путь для тома. Пока всегда `Unavailable`.
+/// Checks whether the fast path is available for a volume. Always `Unavailable` for now.
 pub fn probe(_volume: &str) -> MftSupport {
     MftSupport::Unavailable
 }

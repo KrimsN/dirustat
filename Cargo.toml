@@ -39,7 +39,7 @@ print_stderr = "warn"
 [profile.release]
 lto = "thin"
 codegen-units = 1
-panic = "unwind"   # last-resort guard ловит панику; не менять на abort
+panic = "unwind"   # the last-resort guard catches panics; do not change to abort
 
 [profile.dev]
 debug = "line-tables-only"

@@ -1,15 +1,15 @@
 ---
-name: Баг
-about: Что-то работает неправильно или приложение упало
+name: Bug
+about: Something works incorrectly or the app crashed
 labels: bug
 ---
 
-**Что произошло**
+**What happened**
 
-**Ожидалось**
+**What was expected**
 
-**Как воспроизвести** (синтетическая папка/команда; без личных путей)
+**How to reproduce** (a synthetic folder/command; no personal paths)
 
-**Окружение:** ОС, версия diRUSTat, backend скана (mft / portable), права администратора (да/нет)
+**Environment:** OS, diRUSTat version, scan backend (mft / portable), administrator rights (yes/no)
 
-**Падение?** Любая паника — баг уровня «never crash» (`docs/never-crash.md`); приложи вывод `RUST_BACKTRACE=1`.
+**Crash?** Any panic is a "never crash" bug (`docs/never-crash.md`); attach the output with `RUST_BACKTRACE=1`.

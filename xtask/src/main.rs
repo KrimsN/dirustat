@@ -1,7 +1,7 @@
-//! `cargo xtask <команда>` — единая точка входа для проверок и автоматизации.
+//! `cargo xtask <command>` — single entry point for checks and automation.
 //!
-//! Команды: `layers` (проверка слоёв зависимостей), `ci` (весь гейт), `help`.
-//! Планируются: `parity`, `scorecard`, `perf`, `fixtures`, `version` (см. docs/development.md).
+//! Commands: `layers` (dependency layer check), `ci` (the whole gate), `help`.
+//! Planned: `parity`, `scorecard`, `perf`, `fixtures`, `version` (see docs/development.md).
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod layers;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 
 fn workspace_root() -> PathBuf {
-    // xtask лежит в <root>/xtask; CARGO_MANIFEST_DIR задаётся cargo при `cargo xtask`.
+    // xtask lives in <root>/xtask; cargo sets CARGO_MANIFEST_DIR for `cargo xtask`.
     let manifest = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from).unwrap_or_default();
     manifest.parent().map(PathBuf::from).unwrap_or_default()
 }
@@ -43,7 +43,7 @@ fn ci(root: &PathBuf) -> bool {
     ];
     let mut ok = layers::check(root);
     for (name, program, args) in steps {
-        // wasm-таргет может быть не установлен локально: пропускаем с предупреждением, в CI он есть.
+        // The wasm target may be missing locally: skip with a warning; CI always has it.
         if name == "wasm-core" && !wasm_target_installed() {
             eprintln!("SKIP: wasm-core (rustup target add wasm32-unknown-unknown)");
             continue;

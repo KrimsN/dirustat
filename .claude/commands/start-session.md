@@ -1,13 +1,15 @@
 ---
-description: Начать сессию разработки diRUSTat — ориентация и выбор задачи
+description: Start a diRUSTat development session: orient and pick a task
 ---
 
-Начни рабочую сессию по протоколу проекта:
+Start a work session following the project protocol:
 
-1. Прочитай `AGENTS.md`, `plan/STATUS.md` и две-три свежие записи `log/devlog.md`.
-2. Выполни `cargo xtask ci`. Если красное — выясни причину (своя ли она) и сначала почини дерево.
-3. Определи следующую задачу: из STATUS, иначе верхняя незаблокированная из `docs/gaps.md` текущей вехи (`docs/roadmap.md` › Current focus).
-4. Коротко (по-русски) объяви пользователю: веха, задача, план из 3–5 шагов, какие документы затронешь. Не жди подтверждения, если решение не из раздела 7 `AGENTS.md`.
-5. Работай маленькими шагами: код + тест → fmt → clippy → тест → коммит.
+1. Read `AGENTS.md`, `plan/STATUS.md` and two or three recent entries of `log/devlog.md`.
+2. Run `cargo xtask ci`. If it is red, find out whether the cause is yours and fix the tree first.
+3. Pick the next task: from STATUS, otherwise the top unblocked item of `docs/gaps.md` in the current milestone (`docs/roadmap.md` › Current focus).
+4. Briefly tell the user, in the user's language: milestone, task, a 3-5 step plan, which documents you will touch. Do not wait for confirmation unless the decision belongs to section 7 of `AGENTS.md`.
+5. Work in small steps: code + test → fmt → clippy → test → commit.
 
-Аргументы пользователя (если есть): $ARGUMENTS
+Repository text is English; talk to the user in the user's language.
+
+User arguments (if any): $ARGUMENTS

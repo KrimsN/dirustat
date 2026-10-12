@@ -1,5 +1,5 @@
-# Бюджеты производительности. enforce = false пока нет измерений; после первого замера — true.
-# Измеряется в release на эталонных деревьях (см. docs/performance.md).
+# Performance budgets. enforce = false until measurements exist; set true after the first measurement.
+# Measured in release on reference trees (see docs/performance.md).
 
 [scan_portable_1m_files_ssd]
 budget_seconds = 25.0

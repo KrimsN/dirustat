@@ -1,17 +1,17 @@
-# ADR 0003 — Всё — команда
+# ADR 0003: Everything is a command
 
-- Статус: Accepted · 2026-10-13
+- Status: Accepted · 2026-10-13
 
-## Контекст
+## Context
 
-Нужно, чтобы любое действие человека было доступно агенту (Claude, Codex, MCP-клиенты), тестировалось без GUI и не расходилось между UI и CLI.
+Every human action must be available to an agent (Claude, Codex, MCP clients), testable without a GUI, and must not diverge between the UI and the CLI.
 
-## Решение
+## Decision
 
-Каждое пользовательское поведение — `CommandSpec` в `dirustat-engine`: id (`группа.действие`), подпись, путь в меню, шорткат, документация параметров, `enabled`, `run`. UI, CLI, control-канал и MCP вызывают команды по id. Программный вызов не открывает диалогов. Визуальное состояние оболочки (панели, масштаб) — отдельные `ui.*` команды в `dirustat-ui`. Деструктивные команды помечены и требуют `confirm` (`docs/safety.md`).
+Every user-visible behaviour is a `CommandSpec` in `dirustat-engine`: id (`group.action`), label, menu path, shortcut, parameter docs, `enabled`, `run`. UI, CLI, control channel and MCP invoke commands by id. A programmatic call never opens a dialog. Shell-only view state (panels, zoom) lives in separate `ui.*` commands in `dirustat-ui`. Destructive commands are marked and require `confirm` (`docs/safety.md`).
 
-## Последствия
+## Consequences
 
-- Единый реестр → автоматические меню, палитра команд, `dirustat-cli commands`, MCP-схемы.
-- Hostile-тест перебирает реестр и гарантирует отсутствие паник.
-- Любая новая функция начинается с команды и тестов, а не с кнопки.
+- One registry gives menus, a command palette, `dirustat-cli commands` and MCP schemas for free.
+- The hostile test walks the registry and guarantees no panics.
+- Every new feature starts with a command and tests, not a button.

@@ -1,58 +1,58 @@
-# Разработка: сборка, тесты, запуск, отладка
+# Development: build, test, run, debug
 
-> Статус: 2026-10-13 · ревизия 1.
+> Status: 2026-10-13 · revision 2.
 
-## Инструменты
+## Tooling
 
-- Rust stable (закреплён `rust-toolchain.toml`: clippy, rustfmt). MSRV — `rust-version` в корневом `Cargo.toml`.
-- Windows: MSVC build tools. Для wasm-проверки L0: `rustup target add wasm32-unknown-unknown`.
-- Опционально: `cargo-nextest` (быстрые тесты), `cargo-deny` (лицензии), `cargo-fuzz` (fuzz парсеров).
+- Stable Rust, pinned by `rust-toolchain.toml` (clippy, rustfmt). MSRV is `rust-version` in the root `Cargo.toml`.
+- Windows: MSVC build tools. For the L0 wasm check: `rustup target add wasm32-unknown-unknown`.
+- Optional: `cargo-nextest` (fast tests), `cargo-deny` (licences), `cargo-fuzz` (parser fuzzing).
 
-## Основные команды
+## Main commands
 
 ```sh
 cargo build --workspace
-cargo run -p dirustat                         # приложение
-cargo run -p dirustat-cli -- <подкоманда>     # CLI
-cargo test -p <крейт> --lib --tests           # быстрый цикл (без doctests)
-cargo nextest run                             # параллельно по бинарникам (если установлен)
-cargo xtask layers                            # слои зависимостей
+cargo run -p dirustat                         # the app
+cargo run -p dirustat-cli -- <subcommand>     # CLI
+cargo test -p <crate> --lib --tests           # fast loop (skips doctests)
+cargo nextest run                             # parallel across binaries (if installed)
+cargo xtask layers                            # dependency layers
 cargo xtask ci                                # fmt + clippy -D warnings + test + wasm-core + layers
-cargo deny check                              # лицензии, источники, запрещённые зависимости
+cargo deny check                              # licences, sources, banned dependencies
 ```
 
-## Параллельные агенты и target
+## Parallel agents and target dirs
 
-`CARGO_TARGET_DIR=target/agent-<имя>`. Удаляй каталоги завершённых агентов.
+`CARGO_TARGET_DIR=target/agent-<name>`. Delete the directories of finished agents.
 
-## Фикстуры
+## Fixtures
 
-Тесты сканера работают только на **синтетических деревьях во временных каталогах** (`tempfile`), никогда на реальных данных пользователя. Крупные деревья (1M файлов) генерирует `cargo xtask fixtures` (появится в M1; генератор детерминирован по seed). Корпуса для MFT: образы NTFS с синтетическим содержимым, собираются скриптом из `xtask`, не коммитятся (`corpus/` в `.gitignore`).
+Scanner tests run only on **synthetic trees in temporary directories** (`tempfile`), never on a user's real data. Large trees (1M files) are produced by `cargo xtask fixtures` (arrives in M1; the generator is deterministic by seed). MFT corpora are NTFS images with synthetic content built by an `xtask` script and never committed (`corpus/` is in `.gitignore`).
 
-## Запуск и управление приложением (с M2)
+## Running and driving the app (from M2)
 
 ```sh
-cargo run --release -p dirustat -- --control 7981 --scan <тестовая-папка>
+cargo run --release -p dirustat -- --control 7981 --scan <test-folder>
 ```
 
-Control-канал: JSON-строки на `127.0.0.1:7981`, ключ окна лежит в `%APPDATA%\dirustat\control-key.local-7981`. Методы и примеры — `docs/control-protocol.md`. Скриншот: `ui.screenshot` → PNG → посмотри.
+Control channel: JSON lines on `127.0.0.1:7981`; the window key lives in `%APPDATA%\dirustat\control-key.local-7981`. Methods and examples: `docs/control-protocol.md`. Screenshot: `ui.screenshot` → PNG → look at it.
 
-Headless-режим CLI:
+Headless CLI:
 
 ```sh
-cargo run -p dirustat-cli -- scan <папка> --json out.json
-cargo run -p dirustat-cli -- run --scan <папка> --cmd export.csv={"path":"out.csv"}
-cargo run -p dirustat-cli -- commands            # список команд с описанием параметров
-cargo run -p dirustat-cli -- mcp                 # MCP-сервер (stdio)
+cargo run -p dirustat-cli -- scan <folder> --json out.json
+cargo run -p dirustat-cli -- run --scan <folder> --cmd export.csv={"path":"out.csv"}
+cargo run -p dirustat-cli -- commands            # list commands with parameter docs
+cargo run -p dirustat-cli -- mcp                 # MCP server (stdio)
 ```
 
-## Отладка
+## Debugging
 
-- Логи: `RUST_LOG=dirustat=debug` (крейт `tracing`, подключается в M1). Пользовательский текст ошибок — по-русски, технические теги — по-английски.
-- Паника в тесте: `RUST_BACKTRACE=1`. Паника вне тестов — это баг уровня «никогда не падать», заводится регрессионный тест.
-- Профилирование: `cargo xtask perf` (M1+) пишет числа в `perf/`; сравнение с бюджетами — `perf/budgets.toml`.
-- Windows: `Start-Process -Verb RunAs` для проверки MFT-пути с правами администратора; тесты, требующие админа, помечены `#[ignore]` и запускаются явно (`-- --ignored`).
+- Logs: `RUST_LOG=dirustat=debug` (the `tracing` crate, added in M1).
+- A panic in a test: `RUST_BACKTRACE=1`. A panic outside tests is a never-crash bug; add a regression test.
+- Profiling: `cargo xtask perf` (M1+) writes numbers to `perf/`; compare with `perf/budgets.toml`.
+- Windows: use `Start-Process -Verb RunAs` to exercise the MFT path with administrator rights; tests that need admin are `#[ignore]` and run explicitly (`-- --ignored`).
 
-## Оболочка (Windows)
+## Shell notes (Windows)
 
-Репозиторий разрабатывается на Windows. В bash-подобной оболочке длинные heredoc могут ломаться — используй инструмент записи файлов. Пути в коде — через `std::path`, не склеивай строками; тесты не должны зависеть от разделителя.
+The repository is developed on Windows. In bash-like shells long heredocs can break; use the file-writing tool instead. Build paths with `std::path`, never by string concatenation; tests must not depend on the path separator.

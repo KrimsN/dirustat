@@ -1,22 +1,22 @@
-# ADR 0005 — Слои и процесс агентной разработки
+# ADR 0005: Layers and the agent development workflow
 
-- Статус: Accepted · 2026-10-13
+- Status: Accepted · 2026-10-13
 
-## Контекст
+## Context
 
-Разработка ведётся агентами (Claude Code, Codex и др.), возможно параллельно и с обрывами сессий. Нужны жёсткие рельсы, чтобы код оставался согласованным без постоянного участия человека.
+Development is done by agents (Claude Code, Codex, etc.), possibly in parallel and with interrupted sessions. Strict rails are needed so the code stays consistent without constant human involvement.
 
-## Решение
+## Decision
 
-- **Слои L0–L4 + apps**, зависимости только вниз, проверка `cargo xtask layers`. Реестр слоёв — `xtask/src/layers.rs`.
-- **Единый вход для агентов — `AGENTS.md`** (Claude Code получает его через `CLAUDE.md`). Состояние работы — `plan/STATUS.md`; детали — `plan/execution-plan.md`; журнал — `log/devlog.md`.
-- **Гейт качества** — `cargo xtask ci`: fmt, clippy `-D warnings`, тесты, слои, wasm-проверка L0. Тот же набор в GitHub Actions.
-- **Lints «never crash»** на уровне workspace (deny для unwrap/expect/panic/индексации), `unsafe` запрещён кроме `dirustat-ntfs`.
-- **Параллельные агенты:** отдельные target-каталоги и ветки, новые команды в новых модулях, атомарные манифесты.
-- **Решения** — ADR; **прогресс** — живые документы с числами (`docs/progress-docs.md`).
-- **Автономность:** агент не останавливается с вопросами, если решение не в списке «решает человек» (`AGENTS.md` §7).
+- **Layers L0-L4 plus apps**, dependencies only downward, checked by `cargo xtask layers`. The layer registry is `xtask/src/layers.rs`.
+- **One entry point for agents: `AGENTS.md`** (Claude Code gets it through `CLAUDE.md`). Work state is `plan/STATUS.md`; details are `plan/execution-plan.md`; the journal is `log/devlog.md`.
+- **Quality gate** is `cargo xtask ci`: fmt, clippy `-D warnings`, tests, layers, wasm check of L0. The same set runs in GitHub Actions.
+- **"Never crash" lints** at workspace level (deny for unwrap/expect/panic/indexing); `unsafe` is forbidden except in `dirustat-ntfs`.
+- **Parallel agents:** separate target dirs and branches, new commands in new modules, atomic manifests.
+- **Decisions** are ADRs; **progress** is living documents with numbers (`docs/progress-docs.md`).
+- **Autonomy:** an agent does not stop to ask questions unless the decision is on the "human decides" list (`AGENTS.md` §7).
 
-## Последствия
+## Consequences
 
-- Любой агент может подхватить работу по `plan/STATUS.md` и `log/devlog.md`.
-- Нарушение слоёв и паник ловится механически, а не в ревью.
+- Any agent can pick up work from `plan/STATUS.md` and `log/devlog.md`.
+- Layer violations and panics are caught mechanically, not in review.

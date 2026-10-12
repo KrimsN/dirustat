@@ -1,14 +1,14 @@
-//! L3: control-канал (JSON по TCP на 127.0.0.1 с ключом) и MCP-сервер.
+//! L3: control channel (JSON over TCP on 127.0.0.1 with a key) and MCP server.
 //!
-//! Статус: каркас (веха M2). Протокол — `docs/control-protocol.md`. Любое действие, доступное
-//! человеку в UI, должно быть доступно агенту через `engine.execute`; скриншоты окна — `ui.screenshot`.
+//! Status: skeleton (milestone M2). Protocol: `docs/control-protocol.md`. Every action available to
+//! a human in the UI must be available to an agent via `engine.execute`; window screenshots via `ui.screenshot`.
 
 use dirustat_engine::{CommandError, Session};
 
-/// Версия протокола control-канала.
+/// Control channel protocol version.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Заготовка обработчика: пока только выполняет команду в сессии.
+/// Handler stub: for now it only runs the command in the session.
 pub fn execute(session: &mut Session, command: &str, params: &str) -> Result<(), CommandError> {
     session.run(command, params)
 }

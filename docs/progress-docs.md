@@ -1,24 +1,24 @@
-# Документы прогресса
+# Progress documents
 
-> Статус: 2026-10-13 · ревизия 1.
+> Status: 2026-10-13 · revision 2.
 
-Живые документы: `ROADMAP.md`, `docs/roadmap.md`, `docs/target-app-parity.md`, `docs/gaps.md`, `plan/STATUS.md`, `log/devlog.md`.
+Living documents: `ROADMAP.md`, `docs/roadmap.md`, `docs/target-app-parity.md`, `docs/gaps.md`, `plan/STATUS.md`, `log/devlog.md`.
 
-## Правила
+## Rules
 
-1. **Шапка с датой.** У каждого живого документа строка `> Статус: <дата> · ревизия N · <кратко>`. При изменении — обнови дату, увеличь ревизию, поправь краткое резюме.
-2. **История ревизий.** В конце документа список `- <дата> · rN — что изменилось`.
-3. **Числа измеряются, а не оцениваются.** Паритет считается по строкам `done` в `docs/target-app-parity.md`; производительность — по замерам в `perf/` и devlog. Не пиши «примерно».
-4. **Закрыл gap — обнови всё связанное:** `docs/gaps.md` (перенос в «Закрыто»), строки паритета, итоги в `ROADMAP.md`, `plan/STATUS.md`, запись в `log/devlog.md`.
-5. **Не расходись.** Числа в `ROADMAP.md` обязаны совпадать с `docs/target-app-parity.md`.
-6. **Формат devlog-записи:**
+1. **A dated header.** Every living document has a line `> Status: <date> · revision N · <summary>`. When you change it, update the date, bump the revision and fix the summary.
+2. **Revision history.** At the end of the document a list of `- <date> · rN: what changed`.
+3. **Numbers are measured, not estimated.** Parity is counted from `done` rows in `docs/target-app-parity.md`; performance from measurements in `perf/` and the devlog. Never write "approximately".
+4. **When you close a gap, update everything related:** `docs/gaps.md` (move to "Closed"), parity rows, totals in `ROADMAP.md`, `plan/STATUS.md`, an entry in `log/devlog.md`.
+5. **Do not diverge.** Numbers in `ROADMAP.md` must match `docs/target-app-parity.md`.
+6. **Devlog entry format:**
 
 ```markdown
-## 2026-10-14 · M1.2 · <агент>
-- Что вошло: …
-- Числа: скан 100k файлов — 1.9 с (release, SSD)
-- Проверено: cargo xtask ci — зелёный
-- Still open: …
+## 2026-10-14 · M1.2 · <agent>
+- Landed: ...
+- Numbers: scan of 100k files, 1.9 s (release, SSD)
+- Verified: cargo xtask ci is green
+- Still open: ...
 ```
 
-7. **`plan/STATUS.md`** — не журнал, а срез «где мы сейчас»: веха, активная задача, следующий шаг, блокеры; перезаписывается в конце каждой сессии.
+7. **`plan/STATUS.md`** is not a journal but a snapshot of "where we are now": milestone, active task, next step, blockers; rewritten at the end of every session.

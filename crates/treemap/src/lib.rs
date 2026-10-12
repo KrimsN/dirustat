@@ -1,9 +1,9 @@
-//! L0: раскладка treemap (squarified, Bruls/Huizing/van Wijk). Чистая геометрия без зависимостей.
+//! L0: treemap layout (squarified, Bruls/Huizing/van Wijk). Pure geometry, no dependencies.
 //!
-//! Вход — веса по убыванию и прямоугольник, выход — по прямоугольнику на вес. Вес 0 даёт
-//! прямоугольник нулевой площади. Функция не паникует ни на каких входах (NaN, пустой bounds).
+//! Input is weights in descending order plus a rectangle; output is one rectangle per weight. A weight
+//! of 0 yields a zero-area rectangle. The function never panics on any input (NaN, empty bounds).
 
-/// Прямоугольник в пикселях/условных единицах.
+/// Rectangle in pixels or abstract units.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
     pub x: f32,
@@ -20,7 +20,7 @@ impl Rect {
 
 #[allow(clippy::cast_precision_loss)]
 fn weight_to_f64(w: u64) -> f64 {
-    // Потеря точности на огромных весах допустима: раскладка визуальная.
+    // Precision loss on huge weights is acceptable: the layout is visual.
     w as f64
 }
 
@@ -28,7 +28,7 @@ fn at(values: &[f64], i: usize) -> f64 {
     values.get(i).copied().unwrap_or(0.0)
 }
 
-/// Худшее отношение сторон в ряду: `max` и `min` — площади крайних элементов ряда.
+/// Worst aspect ratio in a row; `max` and `min` are the areas of the row's extreme items.
 fn worst_ratio(sum: f64, max: f64, min: f64, side: f64) -> f64 {
     if sum <= 0.0 || min <= 0.0 {
         return f64::INFINITY;
@@ -37,7 +37,7 @@ fn worst_ratio(sum: f64, max: f64, min: f64, side: f64) -> f64 {
     (s2 * max / (sum * sum)).max(sum * sum / (s2 * min))
 }
 
-/// Раскладывает `weights` (по убыванию) в `bounds`. Результат имеет ту же длину, что и `weights`.
+/// Lays out `weights` (descending) inside `bounds`. The result has the same length as `weights`.
 pub fn squarify(weights: &[u64], bounds: Rect) -> Vec<Rect> {
     let n = weights.len();
     let mut out = vec![Rect::default(); n];
@@ -65,10 +65,10 @@ pub fn squarify(weights: &[u64], bounds: Rect) -> Vec<Rect> {
             j += 1;
         }
         if sum <= 0.0 {
-            break; // остались только нулевые веса
+            break; // only zero weights remain
         }
         if rw >= rh {
-            // колонка слева шириной sum / rh
+            // column on the left with width sum / rh
             let cw = sum / rh;
             let mut y = ry;
             for k in i..j {
@@ -81,7 +81,7 @@ pub fn squarify(weights: &[u64], bounds: Rect) -> Vec<Rect> {
             rx += cw;
             rw -= cw;
         } else {
-            // ряд сверху высотой sum / rw
+            // row on top with height sum / rw
             let row_h = sum / rw;
             let mut x = rx;
             for k in i..j {

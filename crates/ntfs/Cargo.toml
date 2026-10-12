@@ -1,6 +1,6 @@
 [package]
 name = "dirustat-ntfs"
-description = "L0: быстрый разбор NTFS MFT (единственная изолированная unsafe-зона)"
+description = "L0: fast NTFS MFT parsing (the only isolated unsafe zone)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,8 +10,8 @@ repository.workspace = true
 
 [dependencies]
 
-# Единственный крейт, где допустим unsafe (см. docs/adr/0002-mft-unsafe-isolation.md).
-# Каждый unsafe-блок обязан иметь комментарий `// SAFETY:`. Остальные lints — как в workspace.
+# The only crate where unsafe is allowed (see docs/adr/0002-mft-unsafe-isolation.md).
+# Every unsafe block must carry a `// SAFETY:` comment. Other lints match the workspace.
 [lints.rust]
 unsafe_code = "deny"
 missing_debug_implementations = "warn"

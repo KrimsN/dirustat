@@ -1,36 +1,36 @@
-# Стандарт «Never crash»
+# The "never crash" standard
 
-> Статус: 2026-10-13 · ревизия 1. Приоритет выше любых фич.
+> Status: 2026-10-13 · revision 2. Outranks any feature work.
 
-diRUSTat читает чужие диски — большие, повреждённые, меняющиеся под ногами. Падение посреди скана или во время удаления теряет доверие. Любой плохой вход даёт **ошибку, которую можно показать и обработать**.
+diRUSTat reads other people's disks: huge, damaged, changing under its feet. A crash in the middle of a scan or a delete destroys trust. Any bad input yields **an error that can be shown and handled**.
 
-## Правила
+## Rules
 
-1. **Нет паник в нетестовом коде:** `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!`, `unimplemented!` запрещены lints (`deny`). Незавершённая функция возвращает `Unsupported`.
-2. **Нет индексации:** `v[i]`, `s[a..b]` запрещены (`indexing_slicing = deny`). Используй `get()`, итераторы, `split_at_checked`; строки режь по границам символов.
-3. **Нет `unsafe`**, кроме `dirustat-ntfs` (ADR 0002): блок = `// SAFETY:` с доказательством; парсинг — safe-код.
-4. **Числа враждебны:** `checked_add/mul`, `saturating_*`, `try_from`; деление на ноль и NaN/inf проверяются; размеры аллокаций ограничены (длина имени в MFT-записи, число атрибутов, размер буфера чтения).
-5. **Рекурсия ограничена** или заменена итерацией; циклы в ФС (junction, symlink, hardlink-каталоги) не приводят к зацикливанию (seen-set по file id, лимит глубины).
-6. **Ошибки ФС — данные, а не исключения:** отказ в доступе, файл исчез, путь слишком длинный, невалидные имена — помечаются на узле/в отчёте, обход продолжается.
-7. **Не каскадь:** отравленные мьютексы обрабатываются, `JoinHandle::join` — `Result`, отмена потока не роняет UI.
-8. **Последний рубеж:** оболочка ловит `catch_unwind` вокруг диспетча команд и скана, превращает в ошибку, сохраняет сессию. `panic = "unwind"` в профилях.
-9. **Докажи:** каждый фикс падения — минимальный регрессионный тест, падавший до фикса.
-10. **Hostile-тест команд:** `engine::tests::hostile_params_never_panic` вызывает каждую команду с мусорными параметрами (пустые, огромные, отрицательные, NaN, юникод, невалидные пути).
+1. **No panics in non-test code:** `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!`, `unimplemented!` are forbidden by lints (`deny`). An unfinished function returns `Unsupported`.
+2. **No indexing:** `v[i]` and `s[a..b]` are forbidden (`indexing_slicing = deny`). Use `get()`, iterators, `split_at_checked`; slice strings only at char boundaries.
+3. **No `unsafe`** except in `dirustat-ntfs` (ADR 0002): a block needs a `// SAFETY:` proof; parsing is safe code.
+4. **Numbers are hostile:** `checked_add/mul`, `saturating_*`, `try_from`; check division by zero and NaN/inf; cap allocation sizes (name length in an MFT record, attribute count, read buffer size).
+5. **Bound recursion** or replace it with iteration; filesystem cycles (junctions, symlinks, hardlinked directories) must not loop (seen-set by file id, depth limit).
+6. **Filesystem errors are data, not exceptions:** access denied, file vanished, path too long, invalid names are marked on the node/in the report and the walk continues.
+7. **Don't cascade:** handle poisoned mutexes, treat `JoinHandle::join` as a `Result`, a cancelled thread must not take down the UI.
+8. **Last-resort guard:** the shell wraps command dispatch and scanning in `catch_unwind`, turns a panic into an error and keeps the session. Profiles keep `panic = "unwind"`.
+9. **Prove it:** every crash fix gets a minimal regression test that failed before the fix.
+10. **Hostile command test:** `engine::tests::hostile_params_never_panic` calls every command with junk parameters (empty, huge, negative, NaN, unicode, invalid paths).
 
-## Рецепты
+## Recipes
 
 ```rust
-// плохо: v[i], as, unwrap
-// хорошо:
+// bad: v[i], as, unwrap
+// good:
 let first = items.get(i).ok_or(ScanError::BadIndex)?;
 let len = usize::try_from(raw_len).map_err(|_| ScanError::TooLarge)?;
 let total = a.checked_add(b).ok_or(ScanError::Overflow)?;
 let Some(name) = parse_name(buf) else { return Err(ScanError::BadName) };
 ```
 
-## Что проверять в ревью
+## What to check in review
 
-- Любой `?` на границе файловой системы/MFT/параметров команды конвертирует ошибку в типизированную.
-- Любая аллокация, размер которой пришёл извне, ограничена константой с комментарием «почему такой предел».
-- Любой цикл по данным из MFT имеет верхнюю границу итераций.
-- Fuzz-таргет для каждого парсера (MFT record, USN, фильтры/паттерны) и property-тест «не паникует на произвольных байтах».
+- Every `?` at the filesystem/MFT/command-parameter boundary converts to a typed error.
+- Every allocation sized from external input is capped by a constant with a "why this limit" comment.
+- Every loop over MFT data has an upper bound on iterations.
+- A fuzz target for each parser (MFT record, USN, filters/patterns) and a property test "does not panic on arbitrary bytes".

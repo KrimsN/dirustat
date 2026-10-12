@@ -1,6 +1,6 @@
 [package]
 name = "dirustat-engine"
-description = "L2: Session и реестр команд (всё есть команда)"
+description = "L2: Session and command registry (everything is a command)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

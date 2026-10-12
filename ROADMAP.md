@@ -1,31 +1,32 @@
-# ROADMAP — diRUSTat
+# ROADMAP: diRUSTat
 
-> Статус: 2026-10-13 · ревизия 1 · стадия **M0 (bootstrap)**. Обновляй вместе с `docs/roadmap.md` и `docs/target-app-parity.md` (правила — `docs/progress-docs.md`).
+> Status: 2026-10-13 · revision 2 · stage **M0 (bootstrap)**. Update together with `docs/roadmap.md` and `docs/target-app-parity.md` (rules: `docs/progress-docs.md`).
 
-## Сводка
+## Summary
 
-| Измерение | Значение | Источник |
+| Dimension | Value | Source |
 |---|---|---|
-| Паритет функций WinDirStat | 0 / 34 (0 %) | `docs/target-app-parity.md` |
-| Паритет функций WizTree (отличительные) | 0 / 12 (0 %) | `docs/target-app-parity.md` |
-| Крейты каркаса | 7 + 2 приложения + xtask | `docs/architecture.md` |
-| Платформы | Windows (основная), Linux/macOS (M6) | `docs/roadmap.md` |
-| Скан 1M файлов, переносимый путь | не измерен (бюджет ≤ 25 с) | `perf/budgets.toml` |
-| Скан 1M файлов, MFT | не измерен (бюджет ≤ 3 с) | `perf/budgets.toml` |
+| WinDirStat feature parity | 0 / 34 (0 %) | `docs/target-app-parity.md` |
+| WizTree distinctive features | 0 / 12 (0 %) | `docs/target-app-parity.md` |
+| Skeleton crates | 7 + 2 apps + xtask | `docs/architecture.md` |
+| Platforms | Windows (primary), Linux/macOS (M6) | `docs/roadmap.md` |
+| Scan of 1M files, portable path | not measured (budget ≤ 25 s) | `perf/budgets.toml` |
+| Scan of 1M files, MFT | not measured (budget ≤ 3 s) | `perf/budgets.toml` |
 
-## Вехи
+## Milestones
 
-| Веха | Содержание | Статус |
+| Milestone | Content | Status |
 |---|---|---|
-| M0 | Bootstrap: workspace, lints, xtask (layers/ci), документация, CI | **готово** |
-| M1 | Переносимый скан + модель + treemap + окно egui (дерево, treemap, список расширений) | следующая |
-| M2 | Реестр команд, control-канал, CLI, MCP, скриншоты | — |
-| M3 | Быстрый путь NTFS MFT (Windows), права администратора, fallback | — |
-| M4 | Действия: удаление в корзину, открыть в проводнике, cleanups, поиск, фильтры | — |
-| M5 | Cushion-шейдинг, темы, экспорт CSV/JSON, сравнение снимков, дубликаты | — |
-| M6 | Linux/macOS, упаковка, подписанные релизы | — |
-| M7 | Локализации, доступность, документация для пользователей | — |
+| M0 | Bootstrap: workspace, lints, xtask (layers/ci), documentation, CI | **done** |
+| M1 | Portable scan + model + treemap + egui window (tree, treemap, extension list) | next |
+| M2 | Command registry, control channel, CLI, MCP, screenshots | - |
+| M3 | NTFS MFT fast path (Windows), administrator rights, fallback | - |
+| M4 | Actions: delete to recycle bin, reveal in file manager, cleanups, search, filters | - |
+| M5 | Cushion shading, themes, CSV/JSON export, snapshot comparison, duplicates | - |
+| M6 | Linux/macOS, packaging, signed releases | - |
+| M7 | Localizations, accessibility, user documentation | - |
 
-## Журнал прогресса
+## Progress log
 
-- 2026-10-13 — M0: инициализирован репозиторий; каркас крейтов с lints «never crash», слои в xtask, CI, документы для агентов.
+- 2026-10-13: M0: repository initialized; crate skeleton with never-crash lints, layers in xtask, CI, documents for agents.
+- 2026-10-13: all repository text switched to English (`AGENTS.md` §0).

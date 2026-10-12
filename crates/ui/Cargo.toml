@@ -1,6 +1,6 @@
 [package]
 name = "dirustat-ui"
-description = "L4: egui-оболочка (тонкая, всё через engine)"
+description = "L4: egui shell (thin, everything goes through engine)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

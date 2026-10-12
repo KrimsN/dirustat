@@ -1,35 +1,35 @@
-# Тестирование
+# Testing
 
-> Статус: 2026-10-13 · ревизия 1.
+> Status: 2026-10-13 · revision 2.
 
-## Пирамида
+## Pyramid
 
-| Уровень | Что | Где |
+| Level | What | Where |
 |---|---|---|
-| Юнит | Модель, раскладка, парсеры, арифметика размеров | `#[cfg(test)] mod tests` в крейте |
-| Инвариантные/property | «сумма площадей = площадь области», «детей не пересекаются», «total = own + Σ детей», «парсер не паникует на любых байтах» | `proptest` (dev-зависимость, M1) |
-| Интеграционные | Скан синтетического дерева в `tempfile`, сравнение с эталоном | `crates/scan/tests/` |
-| Командные | Каждая команда: успех, граничные параметры → `Err`, hostile-тест | `crates/engine/src/tests*.rs` |
-| Fuzz | Разбор MFT-записей, фильтров, импорта снимков | `crates/*/fuzz/` (`cargo fuzz`) |
-| Снимки UI | Offscreen-рендер egui → PNG, сравнение с эталоном с допуском | `crates/ui/examples/snapshot` (M1) |
-| Перф | Замеры против `perf/budgets.toml` | `cargo xtask perf` |
+| Unit | Model, layout, parsers, size arithmetic | `#[cfg(test)] mod tests` in the crate |
+| Invariant/property | "area sum = bounds area", "siblings do not overlap", "total = own + sum of children", "parser never panics on arbitrary bytes" | `proptest` (dev dependency, M1) |
+| Integration | Scan a synthetic tree in `tempfile`, compare with the expectation | `crates/scan/tests/` |
+| Command | Every command: success, edge parameters give `Err`, the hostile test | `crates/engine/src/tests*.rs` |
+| Fuzz | MFT record parsing, filters, snapshot import | `crates/*/fuzz/` (`cargo fuzz`) |
+| UI snapshots | Offscreen egui render to PNG, compare with a reference within tolerance | `crates/ui/examples/snapshot` (M1) |
+| Performance | Measurements against `perf/budgets.toml` | `cargo xtask perf` |
 
-## Правила
+## Rules
 
-1. **Тесты — гейт**: изменение без тестов не принимается. Фикс падения — с регрессионным тестом.
-2. **Никаких реальных данных пользователя.** Фикстуры синтетические, детерминированные (seed), во временных каталогах; чистятся автоматически.
-3. **Независимость от платформы**: не полагайся на разделитель пути, порядок `read_dir`, регистр имён, наличие админ-прав. Платформенные тесты — под `cfg`; требующие прав — `#[ignore]` с пояснением.
-4. **Скан-эталон**: тестовое дерево строится генератором, ожидаемые размеры известны заранее; сверяем `Tree` с ожиданием (имена, размеры, число файлов), включая hardlink, симлинк-цикл, недоступный каталог, пустые каталоги, юникод и очень длинные пути.
-5. **Раскладка**: проверяем инварианты (сумма площадей, границы, отсутствие пересечений с допуском, монотонность по весу), вырожденные входы (пустой, нули, NaN, огромные веса) и детерминизм.
-6. **MFT-парсер**: round-trip на синтетических записях, битые записи (обрезанные, неверный fixup, зацикленные атрибуты), fuzz; корпус реальных образов не коммитится.
-7. **Hostile-команды**: тест перебирает реестр и подаёт мусорные параметры; обязан быть зелёным.
-8. **Скриншоты**: после UI-изменений снять PNG и посмотреть; сравнение — только на синтетических данных.
+1. **Tests are the gate**: a change without tests is not accepted. A crash fix comes with a regression test.
+2. **No real user data.** Fixtures are synthetic, deterministic (seeded), in temporary directories, cleaned up automatically.
+3. **Platform independence**: do not rely on the path separator, `read_dir` order, name case or admin rights. Platform tests are gated by `cfg`; tests needing privileges are `#[ignore]` with an explanation.
+4. **Scan reference**: the test tree is built by a generator with known expected sizes; compare `Tree` with the expectation (names, sizes, file counts), including hardlinks, a symlink cycle, an inaccessible directory, empty directories, unicode and very long paths.
+5. **Layout**: check invariants (area sum, bounds, no overlaps within tolerance, monotonicity by weight), degenerate inputs (empty, zeros, NaN, huge weights) and determinism.
+6. **MFT parser**: round-trip on synthetic records, broken records (truncated, bad fixup, cyclic attributes), fuzzing; a corpus of real images is never committed.
+7. **Hostile commands**: the test walks the registry and feeds junk parameters; it must stay green.
+8. **Screenshots**: after UI changes take a PNG and look at it; compare only on synthetic data.
 
-## Запуск
+## Running
 
 ```sh
-cargo test -p <крейт>                        # крейт
-cargo test --workspace --locked              # всё
-cargo test -p dirustat-engine -- --ignored   # тяжёлые/привилегированные
-cargo fuzz run mft_record                    # fuzz (из каталога крейта)
+cargo test -p <crate>                        # one crate
+cargo test --workspace --locked              # everything
+cargo test -p dirustat-engine -- --ignored   # heavy/privileged
+cargo fuzz run mft_record                    # fuzzing (from the crate directory)
 ```

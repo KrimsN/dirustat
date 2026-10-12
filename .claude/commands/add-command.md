@@ -1,14 +1,14 @@
 ---
-description: Добавить команду в реестр engine по чеклисту проекта
-argument-hint: <id команды, например scan.cancel>
+description: Add a command to the engine registry following the project checklist
+argument-hint: <command id, e.g. scan.cancel>
 ---
 
-Добавь команду `$ARGUMENTS` строго по чеклисту «добавить команду» из `docs/contributing.md`:
+Add the command `$ARGUMENTS` strictly following the "add a command" checklist in `docs/contributing.md`:
 
-1. Проверь `docs/target-app-parity.md` и `docs/control-protocol.md` — id и группа должны соответствовать соглашениям.
-2. Новый модуль `crates/engine/src/cmd/<area>.rs` (или дополни существующий) с `specs()`; параметры валидируй, ошибки — `CommandError`, без паник и индексации.
-3. Деструктивная команда? Тогда `docs/safety.md`: `confirm`, `dry_run`, защищённые пути, журнал, тесты на отказ.
-4. Тесты: успех, граничные/мусорные параметры → `Err`; включи команду в hostile-тест.
-5. Если есть пункт меню/шорткат — добавь в `crates/ui/src/menu_catalog.rs`.
+1. Check `docs/target-app-parity.md` and `docs/control-protocol.md`: the id and group must follow the conventions.
+2. Create a module `crates/engine/src/cmd/<area>.rs` (or extend an existing one) with `specs()`; validate parameters, return `CommandError`, no panics and no indexing.
+3. A destructive command? Follow `docs/safety.md`: `confirm`, `dry_run`, protected paths, journal, refusal tests.
+4. Tests: success, edge/junk parameters give `Err`; include the command in the hostile test.
+5. If it has a menu item/shortcut, add it to `crates/ui/src/menu_catalog.rs`.
 6. `cargo test -p dirustat-engine`, `cargo xtask ci`.
-7. Обнови паритет/gaps и devlog.
+7. Update parity/gaps and the devlog.

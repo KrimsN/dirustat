@@ -1,4 +1,4 @@
-//! Headless CLI. Подкоманды (M2): `scan`, `info`, `run`, `commands`, `mcp`. Без egui и без UI-крейтов.
+//! Headless CLI. Subcommands (M2): `scan`, `info`, `run`, `commands`, `mcp`. No egui, no UI crates.
 #![allow(clippy::print_stdout)]
 
 use dirustat_engine::Session;

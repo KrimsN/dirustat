@@ -1,51 +1,51 @@
 # Contributing
 
-> Статус: 2026-10-13 · ревизия 1.
+> Status: 2026-10-13 · revision 2.
 
-- **Язык кода:** только Rust. Никакого JS/TS. Web-сборка, если появится, — через `wasm-bindgen` без рукописного JS.
-- **Лицензия:** вклады — `MIT OR Apache-2.0` (`LICENSE-MIT`, `LICENSE-APACHE`).
-- **Clean-room:** не копировать код, иконки, строки и ресурсы WinDirStat (GPL), WizTree и других программ. `docs/clean-room.md`.
-- **Never crash:** `docs/never-crash.md`. Ни `unwrap`/`expect`/`panic!`/индексации/`unsafe` в нетестовом коде (исключение — `dirustat-ntfs`).
-- **Команды, не обработчики:** новая функция = команда в `engine` + тесты; UI вызывает команду.
-- **Слои:** `cargo xtask layers` обязан проходить; новый крейт регистрируется в `xtask/src/layers.rs`.
-- **Безопасность данных:** `docs/safety.md` для всего, что пишет на диск.
-- **Язык текстов:** документация, комментарии, пользовательские сообщения — по-русски; идентификаторы, имена файлов, коммиты — по-английски (`AGENTS.md` §0).
+- **Language of code:** Rust only. No JS/TS. If a web build appears, it uses `wasm-bindgen` with no hand-written JS.
+- **Language of text:** everything in the repository is English (docs, comments, messages, commits, names). Conversation with the user happens in the user's language (`AGENTS.md` §0).
+- **Licence:** contributions are `MIT OR Apache-2.0` (`LICENSE-MIT`, `LICENSE-APACHE`).
+- **Clean-room:** do not copy code, icons, strings or resources from WinDirStat (GPL), WizTree or other programs. `docs/clean-room.md`.
+- **Never crash:** `docs/never-crash.md`. No `unwrap`/`expect`/`panic!`/indexing/`unsafe` in non-test code (exception: `dirustat-ntfs`).
+- **Commands, not handlers:** a new feature is a command in `engine` with tests; the UI calls it.
+- **Layers:** `cargo xtask layers` must pass; register new crates in `xtask/src/layers.rs`.
+- **Data safety:** `docs/safety.md` for anything that writes to disk.
 
-## Коммиты и ветки
+## Commits and branches
 
-- Ветка: `agent/<имя>/<задача>` или `feat/<тема>`. В `main` — через PR, зелёный CI.
-- Сообщение коммита — короткое английское, повелительное, с id задачи: `M1.3: add scan progress channel`.
-- Коммит делается после каждой законченной дуги, которая собирается. Не коммить поломанное дерево.
-- Не используй `--no-verify`, не переписывай историю общих веток.
-- Подпись соавтора-агента добавляется по настройке инструмента (`Co-Authored-By: ...`).
+- Branch: `agent/<name>/<task>` or `feat/<topic>`. Changes reach `main` via PR with green CI.
+- Commit message: short English imperative with a task id: `M1.3: add scan progress channel`.
+- Commit after every finished arc of work that builds. Never commit a broken tree.
+- Do not use `--no-verify` and do not rewrite shared history.
+- A co-author trailer for the agent is added as configured by the tool (`Co-Authored-By: ...`).
 
-## Стиль
+## Style
 
-- `cargo fmt` (`rustfmt.toml`: `max_width = 120`). Предупреждения clippy — ошибки (`-D warnings`).
-- Комментарии объясняют **почему**, а не **что**; по-русски. Не пиши нарративных комментариев вида «теперь мы делаем X». Doc-комментарии (`///`) — на публичном API.
-- Публичный API минимален: поля приватны, инварианты внутри типа.
-- Функции короткие; больше ~60 строк — повод разделить. Вложенность `match`/`if` — не глубже трёх.
-- Имена: `snake_case` функции, `UpperCamelCase` типы, id команд `group.action`.
+- `cargo fmt` (`rustfmt.toml`: `max_width = 120`). Clippy warnings are errors (`-D warnings`).
+- Comments explain **why**, not **what**. No narrative comments such as "now we do X". Doc comments (`///`) on public API.
+- Keep the public API minimal: private fields, invariants held inside the type.
+- Keep functions short; over ~60 lines is a reason to split. Nesting of `match`/`if` no deeper than three levels.
+- Names: `snake_case` functions, `UpperCamelCase` types, command ids `group.action`.
 
-## Чеклист «добавить команду»
+## Checklist: add a command
 
-1. Выбери id (`группа.действие`), занеси в каталог меню `ui/src/menu_catalog.rs` (если есть пункт меню/шорткат).
-2. Создай/дополни модуль `engine/src/cmd/<area>.rs`: `CommandSpec` с label, menu path, shortcut, `params_doc`, `enabled`, `run`.
-3. Параметры валидируются: диапазоны, пустые значения, неверные типы → `CommandError::InvalidParams`, не паника.
-4. Тесты: успешный случай; «граничные параметры → Err»; для деструктивных — dry-run и отказ без подтверждения.
-5. Зарегистрируй `specs()` в реестре (`engine/src/cmd/mod.rs`) — маленькая точечная правка.
-6. `cargo test -p dirustat-engine` (включая `hostile_params_never_panic`).
-7. Если команда меняет паритет: обнови `docs/target-app-parity.md` и `docs/gaps.md` (дата, числа).
-8. Допиши `log/devlog.md`.
+1. Choose an id (`group.action`) and add it to the menu catalog `ui/src/menu_catalog.rs` (if it has a menu item/shortcut).
+2. Create or extend the module `engine/src/cmd/<area>.rs`: a `CommandSpec` with label, menu path, shortcut, `params_doc`, `enabled`, `run`.
+3. Validate parameters: ranges, empty values, wrong types give `CommandError::InvalidParams`, never a panic.
+4. Tests: the success case; "edge parameters give Err"; for destructive commands, dry-run and refusal without confirmation.
+5. Register `specs()` in the registry (`engine/src/cmd/mod.rs`), a small surgical edit.
+6. `cargo test -p dirustat-engine` (includes `hostile_params_never_panic`).
+7. If the command moves parity, update `docs/target-app-parity.md` and `docs/gaps.md` (date, numbers).
+8. Append to `log/devlog.md`.
 
-## Чеклист «добавить крейт»
+## Checklist: add a crate
 
-Каталог `crates/<name>`, пакет `dirustat-<name>`, поля пакета из `workspace.package`, `[lints] workspace = true`, запись в `[workspace.dependencies]` корневого `Cargo.toml`, слой в `xtask/src/layers.rs`, строка в `docs/architecture.md`. Манифест создавай атомарно (`AGENTS.md` §6).
+Directory `crates/<name>`, package `dirustat-<name>`, package fields from `workspace.package`, `[lints] workspace = true`, an entry in `[workspace.dependencies]` of the root `Cargo.toml`, a layer in `xtask/src/layers.rs`, a row in `docs/architecture.md`. Create the manifest atomically (`AGENTS.md` §6).
 
-## Ассеты
+## Assets
 
-Иконки и изображения — оригинальные (рисуются в коде — предпочтительно), CC0/публичное достояние или OSI-совместимые. Каждый файл — строка в `ATTRIBUTION.md` (путь, название, автор, источник, лицензия) в том же коммите. Шрифты в репозиторий не добавляются: используем системные, а при необходимости — внешний репозиторий шрифтов как опциональный build-вход.
+Icons and images are original (drawn in code, preferably), CC0/public domain, or OSI-compatible. Every file gets a row in `ATTRIBUTION.md` (path, title, author, source, licence) in the same commit. Fonts are never added to the repository: use system fonts and, if needed, an external fonts repository as an optional build input.
 
-## Pull request
+## Pull requests
 
-Описание: что и зачем, ссылка на задачу в `docs/gaps.md`, результаты `cargo xtask ci`, скриншот для UI-изменений, затронутые документы прогресса. Шаблон — `.github/PULL_REQUEST_TEMPLATE.md`.
+Description: what and why, a link to the task in `docs/gaps.md`, the `cargo xtask ci` result, a screenshot for UI changes, the progress documents touched. Template: `.github/PULL_REQUEST_TEMPLATE.md`.

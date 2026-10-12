@@ -1,43 +1,44 @@
 # Execution plan
 
-> Подробный план для агентов. Задачи нумеруются `M<веха>.<n>` и ссылаются на gap-ы из `docs/gaps.md`.
+> The detailed plan for agents. Tasks are numbered `M<milestone>.<n>` and reference gaps from `docs/gaps.md`.
 
-## Протокол автономной работы
+## Autonomous operation protocol
 
-1. **Старт.** Прочитай `AGENTS.md`, `plan/STATUS.md`, свежие записи `log/devlog.md`. Убедись, что дерево зелёное: `cargo xtask ci`. Если красное — сначала чини его (кроме случая, когда красное из-за чужой незавершённой правки: подожди и повтори).
-2. **Выбор задачи.** Следующая в STATUS; если заблокирована — следующая по `docs/gaps.md` в той же вехе.
-3. **Работа маленькими шагами.** Каждый шаг: код + тест → `cargo fmt` → clippy → тест → коммит (`M1.2: …`). Не копи большие непроверенные изменения.
-4. **Решения.** Если нужно архитектурное решение, не описанное в ADR, прими его сам, запиши новый ADR (короткий) и иди дальше. Спрашивай человека только по разделу 7 `AGENTS.md`.
-5. **Проверка UI.** После изменений интерфейса сними скриншот и посмотри (`docs/ui-design.md`).
-6. **Финиш.** `cargo xtask ci` → обнови паритет/gaps/ROADMAP при сдвиге чисел → запись в `log/devlog.md` → перезапиши `plan/STATUS.md` → коммит.
-7. **Обрыв сессии.** Допустим в любой момент: правила 3 и 6 гарантируют, что следующий агент продолжит по STATUS и devlog.
-8. **Безопасность данных.** Никаких деструктивных операций на реальных данных (`docs/safety.md`).
+1. **Start.** Read `AGENTS.md`, `plan/STATUS.md` and the recent entries of `log/devlog.md`. Make sure the tree is green: `cargo xtask ci`. If it is red, fix it first (unless it is red because of someone else's unfinished edit: wait and retry).
+2. **Pick a task.** The next one in STATUS; if it is blocked, the next by `docs/gaps.md` in the same milestone.
+3. **Work in small steps.** Each step: code + test → `cargo fmt` → clippy → test → commit (`M1.2: ...`). Do not accumulate large unverified changes.
+4. **Decisions.** If an architectural decision is needed that no ADR covers, make it yourself, write a short new ADR and move on. Ask the human only about section 7 of `AGENTS.md`.
+5. **UI verification.** After interface changes take a screenshot and look at it (`docs/ui-design.md`).
+6. **Finish.** `cargo xtask ci` → update parity/gaps/ROADMAP if numbers moved → entry in `log/devlog.md` → rewrite `plan/STATUS.md` → commit.
+7. **Session interruption.** Allowed at any moment: rules 3 and 6 guarantee the next agent continues from STATUS and the devlog.
+8. **Data safety.** No destructive operations on real data (`docs/safety.md`).
+9. **Language.** Repository text is English; talk to the user in the user's language (`AGENTS.md` §0).
 
-## M1 — Ядро и первое окно
+## M1: Core and first window
 
-| Задача | Gap | Содержание |
+| Task | Gap | Content |
 |---|---|---|
-| M1.1 | G-001 | Модель: logical/allocated size, `files`/`dirs` счётчики, mtime, атрибуты, флаг ошибки доступа; тесты, насыщение |
-| M1.2 | G-004 | Подключить зависимости (`rayon`, `serde`, `serde_json`, `tracing`; dev: `tempfile`, `proptest`); обновить таблицу в `docs/engineering.md`; `cargo deny check` |
-| M1.3 | G-003 | `cargo xtask fixtures`: детерминированный генератор деревьев (seed; 100k/1M/5M), hardlink/симлинк-цикл/пустые папки/юникод/длинные пути |
-| M1.4 | G-002 | Переносимый скан: `scan::start(root, opts) -> ScanHandle` (прогресс, отмена, ошибки на узлах, hardlink, reparse points, итеративный обход) |
-| M1.5 | G-002 | Интеграционные тесты скана на фикстурах; замер 100k/1M, запись в devlog; заполнить `perf/budgets.toml` значениями замеров |
-| M1.6 | G-007 | Last-resort guard (`catch_unwind`) вокруг скана и команд |
-| M1.7 | G-024 | ADR: хранение имён с невалидным UTF-16 (lossy + флаг) |
-| M1.8 | G-005 | Окно eframe: каркас приложения, статус-бар, запуск скана, тема из `Tokens` |
-| M1.9 | G-005 | Дерево каталогов с колонками, виртуализация, сортировка |
-| M1.10 | G-006 | Treemap: раскладка с кэшем по ревизии, рендер, hit-testing, подсветка, синхронизация выбора |
-| M1.11 | G-005 | Список расширений: агрегация, цвета, сортировка |
-| M1.12 | — | Скриншот, devlog, обновление паритета (строки 1,3,4,5,7–11,13,17–21,23, B11) |
+| M1.1 | G-001 | Model: logical/allocated size, `files`/`dirs` counters, mtime, attributes, access-error flag; tests, saturation |
+| M1.2 | G-004 | Add dependencies (`rayon`, `serde`, `serde_json`, `tracing`; dev: `tempfile`, `proptest`); update the table in `docs/engineering.md`; `cargo deny check` |
+| M1.3 | G-003 | `cargo xtask fixtures`: deterministic tree generator (seed; 100k/1M/5M), hardlinks/symlink cycle/empty folders/unicode/long paths |
+| M1.4 | G-002 | Portable scan: `scan::start(root, opts) -> ScanHandle` (progress, cancellation, errors on nodes, hardlinks, reparse points, iterative walk) |
+| M1.5 | G-002 | Scan integration tests on fixtures; measure 100k/1M, record in the devlog; fill `perf/budgets.toml` with the measured values |
+| M1.6 | G-007 | Last-resort guard (`catch_unwind`) around scans and commands |
+| M1.7 | G-024 | ADR: storing names with invalid UTF-16 (lossy + flag) |
+| M1.8 | G-005 | eframe window: app skeleton, status bar, scan launch, theme from `Tokens` |
+| M1.9 | G-005 | Directory tree with columns, virtualization, sorting |
+| M1.10 | G-006 | Treemap: layout cached by revision, rendering, hit-testing, highlight, selection sync |
+| M1.11 | G-005 | Extension list: aggregation, colours, sorting |
+| M1.12 | - | Screenshot, devlog, parity update (rows A1, A3, A4, A5, A7-A11, A13, A17-A21, A23, B11) |
 
-## M2 — Команды и управление (кратко)
+## M2: Commands and control (brief)
 
-M2.1 `CommandSpec` и реестр (`engine/src/cmd/*`); M2.2 перенос действий M1 в команды; M2.3 hostile-тест; M2.4 control-канал и ключ; M2.5 `ui.screenshot` offscreen; M2.6 CLI (`scan/info/run/commands`); M2.7 MCP; M2.8 настройки (serde) и аргументы запуска; M2.9 drive picker, flat list, top-N, зум, free space.
+M2.1 `CommandSpec` and registry (`engine/src/cmd/*`); M2.2 move M1 actions into commands; M2.3 hostile test; M2.4 control channel and key; M2.5 offscreen `ui.screenshot`; M2.6 CLI (`scan/info/run/commands`); M2.7 MCP; M2.8 settings (serde) and launch arguments; M2.9 drive picker, flat list, top-N, zoom, free space.
 
-## M3 — Быстрый MFT (кратко)
+## M3: Fast MFT (brief)
 
-M3.1 Win32 FFI-модуль (открытие тома, чтение блоков) — единственный unsafe; M3.2 разбор MFT-записи (fixup, атрибуты, data runs) + fuzz; M3.3 сборка дерева по parent-id; M3.4 откат при отсутствии прав; M3.5 замер на VHDX 1M файлов; M3.6 запрос админ-прав в UI.
+M3.1 Win32 FFI module (open the volume, read blocks), the only unsafe; M3.2 MFT record parsing (fixups, attributes, data runs) + fuzzing; M3.3 build the tree from parent ids; M3.4 fallback when rights are missing; M3.5 measure on a VHDX with 1M files; M3.6 administrator rights request in the UI.
 
-## M4–M7
+## M4-M7
 
-См. `docs/roadmap.md` и `docs/gaps.md`; детализация задач добавляется в этот файл при входе в веху.
+See `docs/roadmap.md` and `docs/gaps.md`; task detail is added to this file when a milestone is entered.
