@@ -5,7 +5,13 @@
 //!
 //! Status: skeleton (milestone M1).
 
+mod ext;
 mod guard;
+mod map;
+
+pub use map::{MapLayout, MapState, MapStateView, MapTile};
+
+pub use ext::{ExtStat, NO_EXT_COLOR, ext_color, extension_of};
 
 use dirustat_model::{SizeMode, Tree};
 use dirustat_scan::{ScanHandle, empty_tree};
@@ -45,15 +51,24 @@ impl std::error::Error for CommandError {}
 #[derive(Debug)]
 pub struct Session {
     tree: Tree,
+    /// Bumped whenever the tree is replaced (cache key for derived data).
+    revision: u64,
+    map: MapState,
 }
 
 impl Session {
     pub fn new() -> Self {
-        Self { tree: empty_tree("") }
+        Self { tree: empty_tree(""), revision: 0, map: MapState::new() }
     }
 
     pub fn tree(&self) -> &Tree {
         &self.tree
+    }
+
+    /// Per-extension statistics of the current tree, recomputed on every call (one iterative pass).
+    /// Callers that call it per frame should cache the result by `revision()`.
+    pub fn extension_stats(&self, mode: SizeMode) -> Vec<ExtStat> {
+        ext::extension_stats(&self.tree, mode)
     }
 
     /// Layout of the root's children inside `bounds` — a minimal model + treemap example.
@@ -80,6 +95,7 @@ impl Session {
             return Ok(false);
         }
         self.tree = outcome.tree;
+        self.tree_replaced();
         Ok(true)
     }
 

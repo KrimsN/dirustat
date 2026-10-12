@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-13 · revision 6. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-13 · revision 7. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -27,7 +27,6 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-021 | P2 | M6 | Linux/macOS: portable scan, platform services, CI matrix | CI green on three OSes |
 | G-022 | P2 | M6 | Packaging (MSI/portable zip/AppImage/dmg), signed releases, `release.yml` | release artifact |
 | G-023 | P3 | M7 | Localizations, AccessKit, user documentation | accessibility checklist |
-| G-024 | P1 | M1 | Storage strategy for names with invalid UTF-16 (lossy + flag): ADR | ADR + test |
 
 ## Closed
 
@@ -38,6 +37,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-004 | 2026-10-13 | M1.2: rayon, serde, serde_json, tracing, tempfile, proptest added; `cargo deny check` passes |
 | G-003 | 2026-10-13 | M1.3: `cargo xtask fixtures` (seeded splitmix64 plan, exact node count, hardlinks, symlink cycle, empty/unicode/long-path cases) |
 | G-007 | 2026-10-13 | M1.6: `engine::guard` (`catch_unwind`) around `Session::run` and `Session::finish_scan`; `CommandError::Panicked`; scan thread panic becomes `CommandError::Scan` |
+| G-024 | 2026-10-13 | M1.7: ADR 0008; names stored lossy (U+FFFD) with `NodeData::name_lossy`; `name_from_wide`, `Tree::add_node_from_wide` |
 
 ## Revision history
 
@@ -47,3 +47,4 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-13 · r4: G-004 closed (M1.2).
 - 2026-10-13 · r5: G-003 closed (M1.3).
 - 2026-10-13 · r6: G-007 closed (M1.6).
+- 2026-10-13 · r7: G-024 closed (M1.7); G-005/G-006 partially advanced (see devlog M1.8-M1.11).

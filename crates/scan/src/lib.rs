@@ -308,6 +308,7 @@ fn entry_from(name: String, meta: &fs::Metadata, cluster: u64) -> Entry {
         mtime: mtime_of(meta),
         attributes,
         error: false,
+        name_lossy: false,
     };
     let link_id = if kind == NodeKind::File { link_id_of(meta) } else { None };
     Entry { name, kind, data, link_id }

@@ -1,7 +1,16 @@
 //! L4: egui/eframe shell. Thin: reads state from `Session`, sends actions as commands.
 //! Colours and radii come only from `theme::Tokens`, never hard-coded. Nothing below L4 knows about egui.
-//!
-//! Status: skeleton (milestone M1 brings in egui/eframe/wgpu).
+
+mod app;
+pub mod ext_panel;
+pub mod map_panel;
+pub mod state;
+pub mod theme;
+pub mod tree_panel;
+
+pub use app::DirustatApp;
+pub use state::{PanelVisibility, ScanStatus, UiState};
+pub use theme::{ThemeKind, Tokens};
 
 use dirustat_control::PROTOCOL_VERSION;
 use dirustat_engine::Session;

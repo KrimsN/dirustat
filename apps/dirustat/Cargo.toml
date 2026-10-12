@@ -12,3 +12,4 @@ workspace = true
 [dependencies]
 dirustat-engine.workspace = true
 dirustat-ui.workspace = true
+eframe.workspace = true

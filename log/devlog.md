@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M1.7-M1.11 (logic + shell) · Claude + 4 parallel agents
+- Landed: M1.7 ADR 0008 + `name_lossy` flag + `name_from_wide` (model 7 -> 12 tests). M1.8 eframe/egui 0.36 shell: `Tokens` (dark/light), serde `UiState`, `DirustatApp` (menu, path bar, Scan/Stop, status bar), stub tree/map/ext panels, non-blocking scan polling, headless frame tests (ui 9 tests), `cargo run -p dirustat`. M1.10 logic: `treemap::{hit_test, layout_tree, hit_test_tiles}` (iterative, depth/tile/min-size caps) and `engine::MapLayout`/`MapState` cached by `Session::revision()`, selection (treemap 2 -> 7, engine 8 -> 18 tests). M1.11 logic: `engine::ext` extension stats and deterministic colours.
+- Numbers: `cargo xtask ci` green; 84 tests passing.
+- Pending human decision: `deny.toml` changes proposed by the UI agent (`BSL-1.0` allow, `Ubuntu-font-1.0` exception for `epaint_default_fonts`); not committed. `cargo deny check` fails until decided.
+- Still open: M1.9 tree panel, M1.10/M1.11 rendering in the UI, visual verification/screenshot (M1.12), scanner does not use `add_node_from_wide` yet, wasm target not installed locally, menus are not commands yet (M2).
+
 ## 2026-10-13 · M1.6 · Claude
 - Landed: `engine::guard::guarded` (private) wraps `Session::run` in `catch_unwind`; a panic becomes `CommandError::Panicked { what, message }` and is logged via `tracing::error!`. New `Session::finish_scan(handle)` joins a scan under the same guard: a scan-thread panic or failure becomes `CommandError::Scan`, a cancelled scan keeps the old tree, otherwise the new tree replaces it. The scan crate already caught worker panics per directory (M1.4).
 - Numbers: engine tests 2 -> 8 (str/String/opaque payloads, pass-through, session survives a panicking `test.panic` command, `finish_scan` replaces the tree).

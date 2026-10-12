@@ -52,6 +52,26 @@ pub struct NodeData {
     pub attributes: u32,
     /// The node could not be read completely (access denied, vanished mid-walk, ...).
     pub error: bool,
+    /// The stored name is lossy: the original contained invalid UTF-16 (lone surrogates) that
+    /// was replaced with U+FFFD (ADR 0008).
+    pub name_lossy: bool,
+}
+
+/// Decodes a UTF-16 name (NTFS/Win32) into a `String`. Unpaired surrogates become U+FFFD; the
+/// flag is `true` when any replacement happened (ADR 0008). Never fails.
+pub fn name_from_wide(wide: &[u16]) -> (String, bool) {
+    let mut out = String::with_capacity(wide.len());
+    let mut lossy = false;
+    for unit in char::decode_utf16(wide.iter().copied()) {
+        match unit {
+            Ok(c) => out.push(c),
+            Err(_) => {
+                out.push(char::REPLACEMENT_CHARACTER);
+                lossy = true;
+            }
+        }
+    }
+    (out, lossy)
 }
 
 impl NodeData {
@@ -191,6 +211,20 @@ impl Tree {
     /// Adds a child with equal logical and allocated size. Totals are valid after `aggregate`.
     pub fn add_child(&mut self, parent: NodeId, name: &str, kind: NodeKind, size: u64) -> Result<NodeId, ModelError> {
         self.add_node(parent, name, kind, NodeData::with_size(size))
+    }
+
+    /// Adds a child whose name is raw UTF-16. Invalid sequences become U+FFFD and
+    /// `NodeData::name_lossy` is set (ADR 0008); a `name_lossy` already set in `data` is kept.
+    pub fn add_node_from_wide(
+        &mut self,
+        parent: NodeId,
+        wide_name: &[u16],
+        kind: NodeKind,
+        mut data: NodeData,
+    ) -> Result<NodeId, ModelError> {
+        let (name, lossy) = name_from_wide(wide_name);
+        data.name_lossy |= lossy;
+        self.add_node(parent, &name, kind, data)
     }
 
     /// Adds a child with full scanner data. Totals are valid after `aggregate`.
@@ -356,6 +390,57 @@ mod tests {
         let node = t.get(id).unwrap();
         assert_eq!(node.name(), "файл ✓ 日本語.txt");
         assert_eq!((node.data().mtime, node.data().attributes), (Some(-1), 0x20));
+    }
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().collect()
+    }
+
+    #[test]
+    fn wide_valid_name_is_not_lossy() {
+        let (name, lossy) = name_from_wide(&wide("файл 😀.txt"));
+        assert_eq!((name.as_str(), lossy), ("файл 😀.txt", false));
+    }
+
+    #[test]
+    fn wide_lone_surrogates_are_replaced_and_flagged() {
+        let (name, lossy) = name_from_wide(&[0x61, 0xD800, 0x62, 0xDC00, 0xD83D]);
+        assert_eq!((name.as_str(), lossy), ("a\u{FFFD}b\u{FFFD}\u{FFFD}", true));
+        // A high surrogate followed by a non-low unit keeps the following character.
+        let (name, lossy) = name_from_wide(&[0xD800, 0x63]);
+        assert_eq!((name.as_str(), lossy), ("\u{FFFD}c", true));
+    }
+
+    #[test]
+    fn wide_empty_name() {
+        assert_eq!(name_from_wide(&[]), (String::new(), false));
+    }
+
+    #[test]
+    fn wide_long_name_and_flag_position() {
+        let mut units = vec![0x78u16; 40_000];
+        let (name, lossy) = name_from_wide(&units);
+        assert_eq!((name.len(), lossy), (40_000, false));
+        units.push(0xDFFF);
+        let (name, lossy) = name_from_wide(&units);
+        assert_eq!((name.chars().count(), lossy), (40_001, true));
+    }
+
+    #[test]
+    fn wide_flag_propagates_to_node_data() {
+        let mut t = Tree::new("r");
+        let bad = t.add_node_from_wide(t.root(), &[0x66, 0xD800], NodeKind::File, NodeData::with_size(5)).unwrap();
+        let good = t.add_node_from_wide(t.root(), &wide("ok"), NodeKind::File, NodeData::default()).unwrap();
+        let kept = NodeData { name_lossy: true, ..NodeData::default() };
+        let pre = t.add_node_from_wide(t.root(), &wide("pre"), NodeKind::File, kept).unwrap();
+        let bad = t.get(bad).unwrap();
+        assert_eq!((bad.name(), bad.data().name_lossy, bad.data().logical_size), ("f\u{FFFD}", true, 5));
+        assert!(!t.get(good).unwrap().data().name_lossy);
+        assert!(t.get(pre).unwrap().data().name_lossy);
+        assert_eq!(
+            t.add_node_from_wide(NodeId(999), &wide("x"), NodeKind::File, NodeData::default()),
+            Err(ModelError::UnknownNode)
+        );
     }
 
     #[test]

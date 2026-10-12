@@ -26,6 +26,8 @@ serde_json = "1"
 tracing = "0.1"
 tempfile = "3"
 proptest = "1"
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "wgpu", "accesskit"] }
+egui = { version = "0.36", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

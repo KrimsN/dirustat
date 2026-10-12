@@ -43,8 +43,10 @@ Every dependency is justified in the table below (add a row in the same change).
 | `tracing` 0.1 | scan, engine | structured diagnostics instead of print | MIT | accepted 2026-10-13 |
 | `tempfile` 3 (dev) | scan | synthetic trees for scan tests | MIT OR Apache-2.0 | accepted 2026-10-13 |
 | `proptest` 1 (dev) | model | property tests for invariants | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `eframe` 0.36 (wgpu, default_fonts, accesskit) | ui, apps/dirustat | native window and event loop on wgpu (ADR 0001); no webview | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `egui` 0.36 | ui, apps/dirustat | immediate-mode UI widgets; alternative: iced/slint (heavier, retained) | MIT OR Apache-2.0 | accepted 2026-10-13 |
 
-Planned (decided in an ADR when introduced): `eframe`/`egui` + `wgpu` (UI), `windows-sys`/`windows` (only `dirustat-ntfs` and platform services), `trash` (recycle bin), `regex` (search), `image` (PNG export).
+Planned (decided in an ADR when introduced): `windows-sys`/`windows` (only `dirustat-ntfs` and platform services), `trash` (recycle bin), `regex` (search), `image` (PNG export).
 
 ## Versioning and releases
 

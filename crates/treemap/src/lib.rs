@@ -104,6 +104,119 @@ fn to_rect(x: f64, y: f64, w: f64, h: f64) -> Rect {
     Rect { x: x as f32, y: y as f32, w: w as f32, h: h as f32 }
 }
 
+impl Rect {
+    /// Half-open containment: left/top edges belong to the rect, right/bottom edges do not, so
+    /// adjacent tiles never both contain a shared edge. NaN coordinates and empty rects contain nothing.
+    pub fn contains(&self, px: f32, py: f32) -> bool {
+        self.w > 0.0 && self.h > 0.0 && px >= self.x && py >= self.y && px < self.x + self.w && py < self.y + self.h
+    }
+}
+
+/// Index of the first rect containing the point, or `None`. For non-overlapping rects the answer is
+/// unique and edges are deterministic (see [`Rect::contains`]).
+pub fn hit_test(rects: &[Rect], px: f32, py: f32) -> Option<usize> {
+    rects.iter().position(|r| r.contains(px, py))
+}
+
+/// One laid-out tile of a hierarchical treemap.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Tile {
+    /// Caller-defined node handle (the root is the handle passed to [`layout_tree`]).
+    pub id: usize,
+    pub rect: Rect,
+    /// 0 for the root tile.
+    pub depth: u32,
+    /// True when the tile was not subdivided (no children, depth cap, too small, or tile cap hit).
+    pub leaf: bool,
+}
+
+/// Limits for [`layout_tree`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayoutOptions {
+    /// Tiles at this depth are not subdivided.
+    pub max_depth: u32,
+    /// Children whose rect is narrower or shorter than this are dropped (and not subdivided).
+    pub min_size: f32,
+    /// Hard cap on emitted tiles.
+    pub max_tiles: usize,
+}
+
+impl Default for LayoutOptions {
+    fn default() -> Self {
+        Self { max_depth: 64, min_size: 2.0, max_tiles: 50_000 }
+    }
+}
+
+/// Lays out a tree iteratively (no recursion). `children(id, out)` appends `(child id, weight)` for the
+/// children of `id`; zero weights are ignored. The result is in parent-before-children order; the first
+/// tile is the root. Children of a tile partition (a part of) its rect proportionally to weight.
+/// Empty or non-finite bounds yield no tiles.
+pub fn layout_tree<F>(root: usize, bounds: Rect, opts: LayoutOptions, mut children: F) -> Vec<Tile>
+where
+    F: FnMut(usize, &mut Vec<(usize, u64)>),
+{
+    let mut tiles: Vec<Tile> = Vec::new();
+    let valid = bounds.x.is_finite()
+        && bounds.y.is_finite()
+        && bounds.w.is_finite()
+        && bounds.h.is_finite()
+        && bounds.w > 0.0
+        && bounds.h > 0.0;
+    if !valid || opts.max_tiles == 0 {
+        return tiles;
+    }
+    tiles.push(Tile { id: root, rect: bounds, depth: 0, leaf: true });
+    // The stack holds indices into `tiles`.
+    let mut stack: Vec<usize> = vec![0];
+    let mut kids: Vec<(usize, u64)> = Vec::new();
+    let mut weights: Vec<u64> = Vec::new();
+    while let Some(ti) = stack.pop() {
+        let Some(tile) = tiles.get(ti).copied() else { continue };
+        if tile.depth >= opts.max_depth || tile.rect.w < opts.min_size || tile.rect.h < opts.min_size {
+            continue;
+        }
+        kids.clear();
+        children(tile.id, &mut kids);
+        kids.retain(|&(_, w)| w > 0);
+        if kids.is_empty() {
+            continue;
+        }
+        kids.sort_unstable_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        weights.clear();
+        weights.extend(kids.iter().map(|&(_, w)| w));
+        let rects = squarify(&weights, tile.rect);
+        let mut emitted = false;
+        for (&(id, _), rect) in kids.iter().zip(rects) {
+            if tiles.len() >= opts.max_tiles {
+                break;
+            }
+            // Keep only visible tiles; the negated comparison also rejects NaN.
+            if !(rect.w >= opts.min_size && rect.h >= opts.min_size) {
+                continue;
+            }
+            emitted = true;
+            tiles.push(Tile { id, rect, depth: tile.depth.saturating_add(1), leaf: true });
+            stack.push(tiles.len().saturating_sub(1));
+        }
+        if emitted && let Some(t) = tiles.get_mut(ti) {
+            t.leaf = false;
+        }
+    }
+    tiles
+}
+
+/// Deepest tile containing the point (ties: the later one). Parents contain their children, so a
+/// point in a gap left by dropped tiny children resolves to the parent.
+pub fn hit_test_tiles(tiles: &[Tile], px: f32, py: f32) -> Option<usize> {
+    let mut best: Option<(usize, u32)> = None;
+    for (i, t) in tiles.iter().enumerate() {
+        if t.rect.contains(px, py) && best.is_none_or(|(_, d)| t.depth >= d) {
+            best = Some((i, t.depth));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -127,5 +240,104 @@ mod tests {
         let nan = Rect { x: 0.0, y: 0.0, w: f32::NAN, h: 5.0 };
         assert_eq!(squarify(&[1], nan).len(), 1);
         assert_eq!(squarify(&[u64::MAX, u64::MAX], b).len(), 2);
+    }
+
+    fn bounds() -> Rect {
+        Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 }
+    }
+
+    #[test]
+    fn hit_test_edges_are_deterministic() {
+        let a = Rect { x: 0.0, y: 0.0, w: 10.0, h: 10.0 };
+        let c = Rect { x: 10.0, y: 0.0, w: 10.0, h: 10.0 };
+        assert_eq!(hit_test(&[a, c], 0.0, 0.0), Some(0));
+        assert_eq!(hit_test(&[a, c], 10.0, 5.0), Some(1));
+        assert_eq!(hit_test(&[a, c], 20.0, 5.0), None);
+        assert_eq!(hit_test(&[a, c], f32::NAN, 5.0), None);
+        assert_eq!(hit_test(&[Rect::default()], 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn hit_test_finds_exactly_one_rect_on_a_grid_of_points() {
+        let rects = squarify(&[40, 25, 20, 10, 5], bounds());
+        for xi in 0..80_u16 {
+            for yi in 0..60_u16 {
+                let (px, py) = (f32::from(xi) * 5.0 + 0.5, f32::from(yi) * 5.0 + 0.5);
+                let n = rects.iter().filter(|r| r.contains(px, py)).count();
+                assert_eq!(n, 1, "point {px},{py}");
+            }
+        }
+    }
+
+    // node 0 -> 1..=3 ; 1 -> 4..=5
+    fn small(id: usize, out: &mut Vec<(usize, u64)>) {
+        match id {
+            0 => out.extend([(1, 60), (2, 30), (3, 10)]),
+            1 => out.extend([(4, 40), (5, 20)]),
+            _ => {}
+        }
+    }
+
+    fn overlap(p: &Rect, q: &Rect) -> bool {
+        let ox = (p.x + p.w).min(q.x + q.w) - p.x.max(q.x);
+        let oy = (p.y + p.h).min(q.y + q.h) - p.y.max(q.y);
+        ox > 0.01 && oy > 0.01
+    }
+
+    #[test]
+    fn layout_tree_partitions_and_is_proportional() {
+        let tiles = layout_tree(0, bounds(), LayoutOptions::default(), small);
+        assert_eq!(tiles.len(), 6);
+        assert_eq!(tiles.first().map(|t| t.id), Some(0));
+        assert!(tiles.first().is_some_and(|t| !t.leaf));
+        let area = |id: usize| tiles.iter().find(|t| t.id == id).map_or(0.0, |t| t.rect.area());
+        assert!((area(1) / bounds().area() - 0.6).abs() < 0.01);
+        assert!((area(4) / area(1) - 40.0 / 60.0).abs() < 0.01);
+        let kids: f32 = [1, 2, 3].iter().map(|&i| area(i)).sum();
+        assert!((kids - bounds().area()).abs() < 1.0);
+        let leaves: Vec<&Tile> = tiles.iter().filter(|t| t.leaf).collect();
+        for (i, p) in leaves.iter().enumerate() {
+            for q in leaves.iter().skip(i + 1) {
+                assert!(!overlap(&p.rect, &q.rect), "overlap {p:?} {q:?}");
+            }
+        }
+        let inner = tiles.iter().find(|t| t.id == 4).unwrap();
+        let idx = hit_test_tiles(&tiles, inner.rect.x + 0.5, inner.rect.y + 0.5).unwrap();
+        assert_eq!(tiles[idx].id, 4);
+    }
+
+    #[test]
+    fn layout_tree_respects_caps_and_degenerate_input() {
+        let depth1 = LayoutOptions { max_depth: 1, ..LayoutOptions::default() };
+        assert_eq!(layout_tree(0, bounds(), depth1, small).len(), 4);
+        let cap = LayoutOptions { max_tiles: 3, ..LayoutOptions::default() };
+        assert_eq!(layout_tree(0, bounds(), cap, small).len(), 3);
+        let min = LayoutOptions { min_size: 1000.0, ..LayoutOptions::default() };
+        assert_eq!(layout_tree(0, bounds(), min, small).len(), 1);
+        let nan = Rect { x: 0.0, y: 0.0, w: f32::NAN, h: 5.0 };
+        let inf = Rect { x: 0.0, y: 0.0, w: f32::INFINITY, h: 5.0 };
+        for bad in [Rect::default(), nan, inf] {
+            assert!(layout_tree(0, bad, LayoutOptions::default(), small).is_empty());
+        }
+        let zero = layout_tree(0, bounds(), LayoutOptions::default(), |_, out| out.extend([(1, 0), (2, 0)]));
+        assert_eq!(zero.len(), 1);
+        assert!(zero.first().is_some_and(|t| t.leaf));
+        let huge = layout_tree(0, bounds(), LayoutOptions::default(), |id, out| {
+            if id == 0 {
+                out.extend([(1, u64::MAX), (2, u64::MAX)]);
+            }
+        });
+        assert_eq!(huge.len(), 3);
+    }
+
+    #[test]
+    fn layout_tree_deep_chain_does_not_recurse() {
+        let opts = LayoutOptions { max_depth: 100_000, min_size: 0.0, max_tiles: 100_000 };
+        let tiles = layout_tree(0, Rect { x: 0.0, y: 0.0, w: 1e6, h: 1e6 }, opts, |id, out| {
+            if id < 50_000 {
+                out.push((id + 1, 1));
+            }
+        });
+        assert_eq!(tiles.len(), 50_001);
     }
 }
