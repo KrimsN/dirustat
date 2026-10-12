@@ -11,3 +11,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

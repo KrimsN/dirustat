@@ -37,9 +37,14 @@ Every dependency is justified in the table below (add a row in the same change).
 
 | Dependency | Consumer crate | Why | Licence | Status |
 |---|---|---|---|---|
-| (no external ones yet) | - | the M0 skeleton uses only std | - | - |
+| `rayon` 1 | scan | work-stealing parallel directory walk (M1.4) | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `serde` 1 (derive) | model, engine, control | serializable state and control protocol | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `serde_json` 1 | engine, control | JSON control channel, settings | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `tracing` 0.1 | scan, engine | structured diagnostics instead of print | MIT | accepted 2026-10-13 |
+| `tempfile` 3 (dev) | scan | synthetic trees for scan tests | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `proptest` 1 (dev) | model | property tests for invariants | MIT OR Apache-2.0 | accepted 2026-10-13 |
 
-Planned (decided in an ADR when introduced): `eframe`/`egui` + `wgpu` (UI), `rayon` (parallel walk), `serde`/`serde_json` (state, control), `tracing`, `tempfile` (dev), `proptest` (dev), `windows-sys`/`windows` (only `dirustat-ntfs` and platform services), `trash` (recycle bin), `regex` (search), `image` (PNG export).
+Planned (decided in an ADR when introduced): `eframe`/`egui` + `wgpu` (UI), `windows-sys`/`windows` (only `dirustat-ntfs` and platform services), `trash` (recycle bin), `regex` (search), `image` (PNG export).
 
 ## Versioning and releases
 

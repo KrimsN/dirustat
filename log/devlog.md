@@ -2,6 +2,11 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M1.2 · Claude
+- Landed: workspace dependencies `rayon 1.12`, `serde 1.0`, `serde_json 1.0`, `tracing 0.1`; dev: `tempfile 3.27`, `proptest 1.12`; wired into model/scan/engine/control; rows in `docs/engineering.md`. Installed `cargo-deny` 0.20.2: `cargo deny check` passes (only a duplicate `syn` warning).
+- Human decision: dependency set confirmed by the user.
+- Still open: M1.3 fixtures; the `model` crate must still pass the wasm check once the target is installed (serde is wasm-safe).
+
 ## 2026-10-13 · M1.1 · Claude
 - Landed: model carries `NodeData` (logical/allocated size, mtime, attributes, error flag), `SizeMode` selector, subtree counters (`file_count`, `dir_count`, `error_count`), `Tree::add_node`, `mark_error`; all sums saturate. `engine` adapted (`total_size(SizeMode)`).
 - Numbers: model tests 3 -> 7.

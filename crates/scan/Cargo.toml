@@ -13,3 +13,8 @@ workspace = true
 [dependencies]
 dirustat-model.workspace = true
 dirustat-ntfs.workspace = true
+rayon.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
