@@ -37,6 +37,8 @@ Panels dock and hide (`view.*` commands); the layout is saved in settings. The w
 
 Everything is reachable from the keyboard (shortcuts from the command registry, a command palette on `Ctrl+Shift+P`), UI scaling, contrast at least WCAG AA, screen-reader support as far as egui/AccessKit allow.
 
+Shell-only commands (`ui.*`, `dirustat_ui::UI_COMMANDS`: panel toggles, theme, zoom, palette, quit) sit next to the engine registry; menus, shortcuts and the palette list both. `DirustatApp::ui_state_json` / `apply_ui_patch` back `ui.state` / `ui.set_state` (strict, atomic patch).
+
 ## Localization
 
 UI strings live in a catalog `crates/ui/locales/`; the source language is English, other languages are translations. Keys are English identifiers. Strings from other programs are never copied.

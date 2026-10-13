@@ -45,6 +45,7 @@ Every dependency is justified in the table below (add a row in the same change).
 | `proptest` 1 (dev) | model | property tests for invariants | MIT OR Apache-2.0 | accepted 2026-10-13 |
 | `eframe` 0.36 (wgpu, default_fonts, accesskit) | ui, apps/dirustat | native window and event loop on wgpu (ADR 0001); no webview | MIT OR Apache-2.0 | accepted 2026-10-13 |
 | `egui` 0.36 | ui, apps/dirustat | immediate-mode UI widgets; alternative: iced/slint (heavier, retained) | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `png` 0.18 | ui | encode window screenshots (`ui.screenshot`); already in the tree via eframe, pure Rust; alternative: `image` (heavier) | MIT OR Apache-2.0 | accepted 2026-10-13 |
 
 Planned (decided in an ADR when introduced): `windows-sys`/`windows` (only `dirustat-ntfs` and platform services), `trash` (recycle bin), `regex` (search), `image` (PNG export).
 

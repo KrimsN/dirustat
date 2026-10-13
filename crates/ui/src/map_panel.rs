@@ -82,7 +82,7 @@ fn cache_key(session: &Session, bounds: Rect) -> (u64, [u32; 2], bool) {
     (session.revision(), [bounds.w.to_bits(), bounds.h.to_bits()], session.map_size_mode() == SizeMode::Allocated)
 }
 
-/// Draws the panel. Clicking selects the tile under the pointer through `Session::select_at`.
+/// Draws the panel. Clicking selects the tile under the pointer through the `select.node` command.
 pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     let tokens = Tokens::for_kind(state.theme);
     let avail = ui.available_size();
@@ -206,7 +206,15 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
         });
     }
     if let Some((x, y)) = click {
-        session.select_at(x, y);
+        // Selection goes through the command registry; a click on empty space clears it.
+        match session.tile_at(x, y) {
+            Some(node) => {
+                let _ = session.execute("select.node", &serde_json::json!({ "id": node.index() }));
+            }
+            None => {
+                let _ = session.execute("select.clear", &serde_json::json!({}));
+            }
+        }
     }
 }
 

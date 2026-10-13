@@ -2,13 +2,19 @@
 //! Colours and radii come only from `theme::Tokens`, never hard-coded. Nothing below L4 knows about egui.
 
 mod app;
+pub mod commands;
+pub mod demo;
 pub mod ext_panel;
 pub mod map_panel;
+pub mod palette;
+pub mod screenshot;
 pub mod state;
 pub mod theme;
 pub mod tree_panel;
 
 pub use app::DirustatApp;
+pub use commands::{UI_COMMANDS, UiCommand, UiEffect};
+pub use screenshot::{Region, ScreenshotStatus};
 pub use state::{PanelVisibility, ScanStatus, UiState};
 pub use theme::{ThemeKind, Tokens};
 

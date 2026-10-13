@@ -19,7 +19,8 @@ dirustat-model.workspace = true
 egui.workspace = true
 eframe.workspace = true
 serde.workspace = true
+serde_json.workspace = true
+png = "0.18"
 
 [dev-dependencies]
-serde_json.workspace = true
 tempfile.workspace = true

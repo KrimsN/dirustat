@@ -513,7 +513,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
         toggle(state, id);
     }
     if let Some(id) = actions.select
-        && session.select_node(id)
+        && session.execute("select.node", &serde_json::json!({ "id": id.index() })).is_ok()
     {
         cache.last_selection = Some(id);
     }

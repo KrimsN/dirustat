@@ -37,6 +37,14 @@ cargo run --release -p dirustat -- --control 7981 --scan <test-folder>
 
 Control channel: JSON lines on `127.0.0.1:7981`; the window key lives in `%APPDATA%\dirustat\control-key.local-7981`. Methods and examples: `docs/control-protocol.md`. Screenshot: `ui.screenshot` → PNG → look at it.
 
+Screenshot without the control channel (synthetic demo tree, never a real disk):
+
+```sh
+cargo run --release -p dirustat -- --demo --screenshot docs/img/m1-main.png --exit-after-screenshot [--size 1200x800]
+```
+
+Exit code 1 if the PNG could not be written. In code: `DirustatApp::request_screenshot(path, region)` returns a ticket, `screenshot_status(ticket)` is polled (the window answers a frame or two later).
+
 Headless CLI:
 
 ```sh
