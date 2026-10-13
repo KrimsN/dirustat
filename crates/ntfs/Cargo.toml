@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 
 
+[features]
+# Exposes `testutil` (synthetic MFT record builders) to the tests of higher layers. Never enable in releases.
+testutil = []
+
 [dependencies]
 
 [dev-dependencies]

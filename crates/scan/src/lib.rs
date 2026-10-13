@@ -9,7 +9,13 @@
 //! Limits of the portable path: allocated size is the logical size rounded up to
 //! `ScanOptions::cluster_size`, sparse and compressed files are not detected, and hardlinks are
 //! deduplicated only where the platform exposes file identity through `std` (Unix). The NTFS fast
-//! path (`dirustat-ntfs`) is the exact source on Windows.
+//! path (`dirustat-ntfs`, module `mft`) is the exact source on Windows.
+//!
+//! Backend choice: when the root is a whole volume (`C:` / `C:\`) and `ScanOptions::prefer_fast_path` is
+//! set, [`start`] first tries the MFT path. Any failure (no administrator rights, not NTFS, damaged or
+//! fragmented `$MFT`, I/O error, even a panic) is logged and the portable walk runs instead; the outcome
+//! says which path produced the tree (`ScanOutcome::backend`) and why the fast path was abandoned
+//! (`ScanOutcome::fallback_reason`). Sub-folders of a volume always use the portable walk.
 
 use std::collections::HashSet;
 use std::fmt;
@@ -17,13 +23,17 @@ use std::fs;
 use std::io;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::UNIX_EPOCH;
 
 use dirustat_model::{NodeData, NodeId, NodeKind, Tree};
+
+mod mft;
+
+pub use mft::{MftError, MftLimits, MftScan, MftStats};
 
 /// Builds a tree with a single root and no disk walk — a skeleton for testing higher layers.
 pub fn empty_tree(root: &str) -> Tree {
@@ -44,12 +54,57 @@ pub struct ScanOptions {
     pub threads: Option<usize>,
     /// Allocation unit used to estimate allocated size (clamped to at least 1).
     pub cluster_size: u64,
+    /// Try the NTFS MFT fast path first when the root is a whole volume; fall back to the portable
+    /// walk on any failure.
+    pub prefer_fast_path: bool,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self { threads: None, cluster_size: 4096 }
+        Self { threads: None, cluster_size: 4096, prefer_fast_path: true }
     }
+}
+
+/// Which code path produced (or is producing) a tree.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScanBackend {
+    /// Directory walk through `std::fs`.
+    #[default]
+    Portable,
+    /// Direct read of the NTFS master file table.
+    Mft,
+}
+
+impl ScanBackend {
+    /// Stable machine-readable name (`portable` / `mft`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Portable => "portable",
+            Self::Mft => "mft",
+        }
+    }
+
+    fn to_raw(self) -> u8 {
+        match self {
+            Self::Portable => 0,
+            Self::Mft => 1,
+        }
+    }
+
+    fn from_raw(raw: u8) -> Self {
+        if raw == 1 { Self::Mft } else { Self::Portable }
+    }
+}
+
+/// The drive-letter volume (`C:`) when `path` names exactly a volume root (`C:`, `c:\`, `C:/`).
+pub fn volume_root_of(path: &str) -> Option<String> {
+    let mut chars = path.chars();
+    let letter = chars.next().filter(char::is_ascii_alphabetic)?;
+    if chars.next() != Some(':') {
+        return None;
+    }
+    let rest: String = chars.collect();
+    matches!(rest.as_str(), "" | "\\" | "/").then(|| format!("{}:", letter.to_ascii_uppercase()))
 }
 
 /// Errors that prevent a scan from starting or finishing.
@@ -86,6 +141,9 @@ pub struct Progress {
     /// Sum of logical sizes seen so far (saturating).
     pub bytes: u64,
     pub errors: u64,
+    /// The path that is running (or ran). `Mft` while the fast path is being tried; back to `Portable`
+    /// if it fell back.
+    pub backend: ScanBackend,
 }
 
 #[derive(Debug, Default)]
@@ -94,6 +152,37 @@ struct Counters {
     files: AtomicU64,
     bytes: AtomicU64,
     errors: AtomicU64,
+    backend: AtomicU8,
+    fallback_reason: Mutex<Option<String>>,
+}
+
+impl Counters {
+    /// Adds to the byte counter, saturating (hostile sizes must not wrap). Single writer per scan.
+    fn add_bytes(&self, n: u64) {
+        let total = self.bytes.load(Ordering::Relaxed).saturating_add(n);
+        self.bytes.store(total, Ordering::Relaxed);
+    }
+
+    /// Overwrites the progress with exact final figures.
+    fn store_totals(&self, dirs: u64, files: u64, bytes: u64, errors: u64) {
+        self.dirs.store(dirs, Ordering::Relaxed);
+        self.files.store(files, Ordering::Relaxed);
+        self.bytes.store(bytes, Ordering::Relaxed);
+        self.errors.store(errors, Ordering::Relaxed);
+    }
+
+    /// Clears the progress before another path starts over.
+    fn reset(&self) {
+        self.store_totals(0, 0, 0, 0);
+    }
+
+    fn set_backend(&self, backend: ScanBackend) {
+        self.backend.store(backend.to_raw(), Ordering::Relaxed);
+    }
+
+    fn set_fallback_reason(&self, reason: Option<String>) {
+        *self.fallback_reason.lock().unwrap_or_else(PoisonError::into_inner) = reason;
+    }
 }
 
 /// Result of a finished (or cancelled) scan. The tree is aggregated.
@@ -102,6 +191,16 @@ pub struct ScanOutcome {
     pub tree: Tree,
     /// `true` when the scan was cancelled; the tree is then partial.
     pub cancelled: bool,
+    /// The path that produced the tree.
+    pub backend: ScanBackend,
+    /// Why the MFT fast path was abandoned for the portable walk; `None` when it was not tried or worked.
+    pub fallback_reason: Option<String>,
+}
+
+impl ScanOutcome {
+    fn new(tree: Tree, cancelled: bool, backend: ScanBackend) -> Self {
+        Self { tree, cancelled, backend, fallback_reason: None }
+    }
 }
 
 /// Handle to a running scan.
@@ -128,7 +227,13 @@ impl ScanHandle {
             files: self.counters.files.load(Ordering::Relaxed),
             bytes: self.counters.bytes.load(Ordering::Relaxed),
             errors: self.counters.errors.load(Ordering::Relaxed),
+            backend: ScanBackend::from_raw(self.counters.backend.load(Ordering::Relaxed)),
         }
+    }
+
+    /// Why the fast path was abandoned, once known (set before the portable walk starts).
+    pub fn fallback_reason(&self) -> Option<String> {
+        self.counters.fallback_reason.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     /// Waits for the scan and returns its tree.
@@ -194,10 +299,48 @@ fn spawn_scan(root: &Path, opts: ScanOptions, check_in_thread: bool) -> Result<S
             if check_in_thread {
                 check_root(&root)?;
             }
-            Ok(run(&pool, &root, &opts, &cancel, &counters))
+            let volume = if opts.prefer_fast_path { volume_root_of(&root.to_string_lossy()) } else { None };
+            Ok(match volume {
+                Some(volume) => {
+                    let label = root.to_string_lossy().into_owned();
+                    let attempt = || mft::scan_volume(&volume, &label, &cancel, &counters);
+                    run_auto(&pool, &root, &opts, &cancel, &counters, Some(&attempt))
+                }
+                None => run_auto(&pool, &root, &opts, &cancel, &counters, None),
+            })
         })
     };
     Ok(ScanHandle { cancel, counters, thread })
+}
+
+/// The MFT attempt of [`run_auto`]; injectable so fallbacks are testable without a real volume.
+type FastAttempt<'a> = &'a dyn Fn() -> Result<mft::MftScan, MftError>;
+
+/// Runs the MFT attempt (when given) and falls back to the portable walk on any failure.
+fn run_auto(
+    pool: &rayon::ThreadPool,
+    root: &Path,
+    opts: &ScanOptions,
+    cancel: &Arc<AtomicBool>,
+    counters: &Arc<Counters>,
+    attempt: Option<FastAttempt<'_>>,
+) -> ScanOutcome {
+    let mut reason = None;
+    if let Some(attempt) = attempt {
+        counters.set_backend(ScanBackend::Mft);
+        match panic::catch_unwind(AssertUnwindSafe(attempt)) {
+            Ok(Ok(scan)) => return scan.outcome,
+            Ok(Err(err)) => reason = Some(err.to_string()),
+            Err(_) => reason = Some("MFT scan panicked".to_owned()),
+        }
+        tracing::warn!(reason = reason.as_deref(), "MFT fast path failed, falling back to the portable walk");
+        counters.reset();
+        counters.set_backend(ScanBackend::Portable);
+        counters.set_fallback_reason(reason.clone());
+    }
+    let mut outcome = run(pool, root, opts, cancel, counters);
+    outcome.fallback_reason = reason;
+    outcome
 }
 
 fn run(
@@ -237,7 +380,7 @@ fn run(
         }
     }
     tree.aggregate();
-    ScanOutcome { tree, cancelled: cancel.load(Ordering::Relaxed) }
+    ScanOutcome::new(tree, cancel.load(Ordering::Relaxed), ScanBackend::Portable)
 }
 
 /// Adds the entries of a listing to the tree; returns the sub-directories still to be read.
@@ -434,7 +577,7 @@ mod tests {
             std::thread::yield_now();
         }
         let progress = handle.progress();
-        assert_eq!(progress, Progress { dirs: 2, files: 1, bytes: 100, errors: 0 });
+        assert_eq!(progress, Progress { dirs: 2, files: 1, bytes: 100, errors: 0, backend: ScanBackend::Portable });
         handle.join().unwrap();
     }
 
@@ -539,3 +682,6 @@ mod tests {
         assert_eq!(round_up(5, 0), 5);
     }
 }
+
+#[cfg(test)]
+mod fallback_tests;

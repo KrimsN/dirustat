@@ -45,8 +45,15 @@ impl Session {
     pub fn state_json(&self) -> Value {
         let progress = self.scan.as_ref().map(|p| {
             let pr = p.handle.progress();
-            json!({ "dirs": pr.dirs, "files": pr.files, "bytes": pr.bytes, "errors": pr.errors })
+            json!({
+                "dirs": pr.dirs, "files": pr.files, "bytes": pr.bytes, "errors": pr.errors,
+                "backend": pr.backend.as_str(), "fallback_reason": p.handle.fallback_reason(),
+            })
         });
+        let last_scan = self
+            .last_scan
+            .as_ref()
+            .map(|l| json!({ "backend": l.backend.as_str(), "fallback_reason": l.fallback_reason }));
         let scan_root = self.scan.as_ref().map(|p| p.root.as_str());
         let view = self.map_state_view();
         json!({
@@ -56,6 +63,7 @@ impl Session {
             "scanning": self.is_scanning(),
             "scan_root": scan_root,
             "progress": progress,
+            "last_scan": last_scan,
             "selection": view.selected,
             "selection_name": view.selected_name,
             "size_mode": view.size_mode,
@@ -75,6 +83,7 @@ mod tests {
         assert_eq!(v["scanning"], false);
         assert_eq!(v["revision"], 0);
         assert!(v["progress"].is_null());
+        assert!(v["last_scan"].is_null());
         assert_eq!(v["size_mode"], "allocated");
     }
 

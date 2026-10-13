@@ -1,15 +1,21 @@
 //! Builders for synthetic MFT records, shared by the unit tests. They produce the real on-disk layout,
 //! including the update sequence array, so parsing is tested against bytes shaped like the real thing.
+//!
+//! Compiled for this crate's own tests and, behind the off-by-default `testutil` feature, for the dev
+//! dependencies of higher layers. It is test support only: it indexes and unwraps freely and must never be
+//! reachable from production code.
+
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
 use crate::runs::Run;
 
-pub(crate) const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
+pub const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 
 fn align8(n: usize) -> usize {
     n.div_ceil(8) * 8
 }
 
-pub(crate) fn utf16(s: &str) -> Vec<u16> {
+pub fn utf16(s: &str) -> Vec<u16> {
     s.encode_utf16().collect()
 }
 
@@ -20,7 +26,7 @@ fn put_utf16(out: &mut Vec<u8>, units: &[u16]) {
 }
 
 /// Builds a resident attribute.
-pub(crate) fn resident(ty: u32, name: &[u16], flags: u16, value: &[u8]) -> Vec<u8> {
+pub fn resident(ty: u32, name: &[u16], flags: u16, value: &[u8]) -> Vec<u8> {
     let name_off = 24usize;
     let value_off = align8(name_off + name.len() * 2);
     let total = align8(value_off + value.len());
@@ -40,7 +46,8 @@ pub(crate) fn resident(ty: u32, name: &[u16], flags: u16, value: &[u8]) -> Vec<u
     a
 }
 
-pub(crate) struct NonResident<'a> {
+#[derive(Debug)]
+pub struct NonResident<'a> {
     pub ty: u32,
     pub name: &'a [u16],
     pub flags: u16,
@@ -70,7 +77,7 @@ impl Default for NonResident<'_> {
     }
 }
 
-pub(crate) fn nonresident(n: &NonResident<'_>) -> Vec<u8> {
+pub fn nonresident(n: &NonResident<'_>) -> Vec<u8> {
     let header = if n.compressed_size.is_some() { 72 } else { 64 };
     let name_off = header;
     let runs_off = align8(name_off + n.name.len() * 2);
@@ -98,7 +105,7 @@ pub(crate) fn nonresident(n: &NonResident<'_>) -> Vec<u8> {
     a
 }
 
-pub(crate) fn standard_info(modified: u64, attributes: u32) -> Vec<u8> {
+pub fn standard_info(modified: u64, attributes: u32) -> Vec<u8> {
     let mut v = vec![0u8; 72];
     v[0..8].copy_from_slice(&(modified - 1).to_le_bytes());
     v[8..16].copy_from_slice(&modified.to_le_bytes());
@@ -108,7 +115,7 @@ pub(crate) fn standard_info(modified: u64, attributes: u32) -> Vec<u8> {
     resident(0x10, &[], 0, &v)
 }
 
-pub(crate) fn file_name(parent: u64, parent_seq: u16, namespace: u8, name: &[u16], real: u64, alloc: u64) -> Vec<u8> {
+pub fn file_name(parent: u64, parent_seq: u16, namespace: u8, name: &[u16], real: u64, alloc: u64) -> Vec<u8> {
     let mut v = vec![0u8; 66];
     let pref = parent | (u64::from(parent_seq) << 48);
     v[0..8].copy_from_slice(&pref.to_le_bytes());
@@ -122,7 +129,7 @@ pub(crate) fn file_name(parent: u64, parent_seq: u16, namespace: u8, name: &[u16
 }
 
 /// One `$ATTRIBUTE_LIST` entry.
-pub(crate) fn list_entry(ty: u32, named: bool, start_vcn: u64, segment: u64) -> Vec<u8> {
+pub fn list_entry(ty: u32, named: bool, start_vcn: u64, segment: u64) -> Vec<u8> {
     let mut e = vec![0u8; 32];
     e[0..4].copy_from_slice(&ty.to_le_bytes());
     e[4..6].copy_from_slice(&32u16.to_le_bytes());
@@ -149,7 +156,7 @@ fn min_signed(v: i64) -> usize {
 }
 
 /// Encodes runs (relative offsets, minimal field widths) plus the `0` terminator.
-pub(crate) fn encode_runs(runs: &[Run]) -> Vec<u8> {
+pub fn encode_runs(runs: &[Run]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut prev = 0i64;
     for run in runs {
@@ -175,7 +182,8 @@ pub(crate) fn encode_runs(runs: &[Run]) -> Vec<u8> {
 }
 
 /// Assembles a full record (with fixups applied to the on-disk form).
-pub(crate) struct RecordBuilder {
+#[derive(Debug)]
+pub struct RecordBuilder {
     pub record_size: usize,
     pub flags: u16,
     pub sequence: u16,
@@ -231,7 +239,7 @@ impl RecordBuilder {
 }
 
 /// Inverse of `apply_fixups`: stores each block trailer in the array and writes the sequence number.
-pub(crate) fn install_fixups(r: &mut [u8], stride: usize, usn: u16) {
+pub fn install_fixups(r: &mut [u8], stride: usize, usn: u16) {
     let usa_off = usize::from(u16::from_le_bytes([r[4], r[5]]));
     r[usa_off..usa_off + 2].copy_from_slice(&usn.to_le_bytes());
     for k in 1..=(r.len() / stride) {

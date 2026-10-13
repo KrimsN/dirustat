@@ -26,7 +26,7 @@ pub use settings::{
 pub use ext::{ExtStat, NO_EXT_COLOR, ext_color, extension_of};
 
 use dirustat_model::{SizeMode, Tree};
-use dirustat_scan::{ScanHandle, empty_tree};
+use dirustat_scan::{ScanBackend, ScanHandle, empty_tree};
 use dirustat_treemap::{Rect, squarify};
 use std::fmt;
 
@@ -88,9 +88,18 @@ pub struct Session {
     map: MapState,
     /// Background scan started by `scan.start`, not yet joined.
     scan: Option<PendingScan>,
+    /// How the last scan that replaced the tree ran (backend and fast-path fallback reason).
+    last_scan: Option<LastScan>,
     /// Persistent user settings (`settings.*` commands).
     settings: Settings,
     drives: drives::DrivesProvider,
+}
+
+/// Which backend produced the current tree and why the MFT fast path was abandoned, if it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LastScan {
+    backend: ScanBackend,
+    fallback_reason: Option<String>,
 }
 
 /// A running scan owned by the session.
@@ -107,6 +116,7 @@ impl Session {
             revision: 0,
             map: MapState::new(),
             scan: None,
+            last_scan: None,
             settings: Settings::default(),
             drives: drives::DrivesProvider(None),
         }
@@ -165,6 +175,7 @@ impl Session {
         if outcome.cancelled {
             return Ok(false);
         }
+        self.last_scan = Some(LastScan { backend: outcome.backend, fallback_reason: outcome.fallback_reason });
         self.tree = outcome.tree;
         self.tree_replaced();
         Ok(true)

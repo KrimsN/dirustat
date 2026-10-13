@@ -11,8 +11,8 @@ mod error;
 mod reader;
 mod record;
 mod runs;
-#[cfg(test)]
-mod testutil;
+#[cfg(any(test, feature = "testutil"))]
+pub mod testutil;
 mod volume;
 #[cfg(windows)]
 mod win32;

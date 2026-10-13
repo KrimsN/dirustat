@@ -68,7 +68,9 @@ impl Session {
         // The root is checked on the scan thread: `metadata` on a dead network path can block for
         // a long time and this runs under the session lock. A bad root surfaces when the scan is
         // polled (`session.poll` / `session.state`) as a scan error, and the session stays usable.
-        let handle = start_deferred(Path::new(path), ScanOptions::default())
+        // A whole-volume root tries the MFT fast path first and falls back to the portable walk on its own.
+        let opts = ScanOptions { prefer_fast_path: self.settings.prefer_fast_path, ..ScanOptions::default() };
+        let handle = start_deferred(Path::new(path), opts)
             .map_err(|e| CommandError::InvalidParams(format!("cannot scan {path:?}: {e}")))?;
         self.scan = Some(PendingScan { handle, root: path.to_owned() });
         Ok(())
@@ -122,6 +124,28 @@ mod tests {
         assert_eq!(st["scanning"], false);
         assert_eq!(st["revision"], 1);
         assert!(st["nodes"].as_u64().unwrap() >= 2);
+    }
+
+    #[test]
+    fn state_reports_the_backend_of_the_last_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        for prefer in [true, false] {
+            let mut s = Session::new();
+            s.execute("settings.set", &json!({"key": "scan.prefer_fast_path", "value": prefer})).unwrap();
+            assert!(s.state_json()["last_scan"].is_null());
+            s.execute("scan.start", &json!({"path": path})).unwrap();
+            let running = s.state_json();
+            if running["scanning"] == true {
+                assert!(running["progress"]["backend"].is_string());
+            }
+            assert!(poll_until_done(&mut s));
+            // A folder is never a volume root, so the portable walk runs and nothing fell back.
+            let last = &s.state_json()["last_scan"];
+            assert_eq!(last["backend"], "portable");
+            assert!(last["fallback_reason"].is_null());
+        }
     }
 
     #[test]

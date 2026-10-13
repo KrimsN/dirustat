@@ -840,6 +840,7 @@ version = "0.0.1"
 dependencies = [
  "dirustat-model",
  "dirustat-ntfs",
+ "proptest",
  "rayon",
  "tempfile",
  "tracing",
