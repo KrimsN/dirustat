@@ -10,6 +10,15 @@ repository.workspace = true
 
 [dependencies]
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
 # The only crate where unsafe is allowed (see docs/adr/0002-mft-unsafe-isolation.md).
 # Every unsafe block must carry a `// SAFETY:` comment. Other lints match the workspace.
 [lints.rust]
