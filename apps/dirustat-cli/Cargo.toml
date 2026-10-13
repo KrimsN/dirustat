@@ -1,5 +1,6 @@
 [package]
 name = "dirustat-cli"
+description = "Headless CLI: scan, info, run, commands, mcp"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,4 +11,10 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+dirustat-control.workspace = true
 dirustat-engine.workspace = true
+dirustat-model.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
