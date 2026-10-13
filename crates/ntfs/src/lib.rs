@@ -20,9 +20,9 @@ mod win32;
 pub use error::{ParseError, ParseLimits};
 pub use reader::{BlockSource, MemSource, MftGeometry, MftItem, MftReader, ReaderLimits};
 pub use record::{
-    ATTR_ATTRIBUTE_LIST, ATTR_DATA, ATTR_FILE_NAME, ATTR_STANDARD_INFORMATION, AttributeList, AttributeListEntry,
-    DataStream, FIXUP_STRIDE, FileName, FileRef, MftRecord, NamedStream, Namespace, StandardInfo, apply_fixups,
-    mft_extents, parse_raw_record, parse_record,
+    ATTR_ATTRIBUTE_LIST, ATTR_DATA, ATTR_FILE_NAME, ATTR_REPARSE_POINT, ATTR_STANDARD_INFORMATION, AttributeList,
+    AttributeListEntry, DataStream, FIXUP_STRIDE, FileName, FileRef, MftRecord, NamedStream, Namespace, StandardInfo,
+    apply_fixups, mft_extents, parse_raw_record, parse_record,
 };
 pub use runs::{Extent, Run, decode_data_runs, extents_from_runs};
 

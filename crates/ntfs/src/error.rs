@@ -37,6 +37,8 @@ pub enum ParseError {
     Incomplete,
     /// Sector, cluster or record size is not a sane power of two.
     BadGeometry,
+    /// An extent lies outside the volume, or the extents together are larger than the volume.
+    ExtentOutOfRange,
 }
 
 impl fmt::Display for ParseError {
@@ -58,6 +60,7 @@ impl fmt::Display for ParseError {
             Self::SizeOverflow => "size field is implausibly large",
             Self::Incomplete => "required data is not in this MFT record",
             Self::BadGeometry => "invalid sector, cluster or record size",
+            Self::ExtentOutOfRange => "MFT extents do not fit inside the volume",
         })
     }
 }

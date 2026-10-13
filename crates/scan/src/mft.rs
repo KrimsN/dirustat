@@ -22,8 +22,9 @@
 //! * A link whose parent is missing, not a directory, in a different generation (sequence mismatch) or
 //!   itself unreachable (parent cycles, self-parents) is attached below a synthetic `<orphaned>` directory
 //!   flagged `error`. Directories are descended into at most once, so cycles cannot loop.
-//! * Reparse points (symlinks, junctions, mount points) become `NodeKind::Link` and are never followed.
-//!   A directory link has size 0; a file link keeps the size recorded for it.
+//! * Symlinks and mount points (junctions), identified by their `$REPARSE_POINT` tag, become `NodeKind::Link`
+//!   and are never followed. Reparse directories with another or no tag are links too; other reparse files
+//!   (cloud placeholders, dedup) are regular files. A directory link has size 0.
 //! * Logical size is the unnamed `$DATA` size. Allocated size is the recorded allocation, or the stored
 //!   (compressed) size for compressed and sparse streams. Resident data lives inside the MFT record and
 //!   occupies no clusters, so its allocated size is 0 by design. Alternate data streams are not counted yet.
@@ -125,16 +126,20 @@ pub struct MftStats {
     pub duplicate_dirs: u64,
     /// Nodes that could not be added (node limit).
     pub node_errors: u64,
+    /// Files whose unnamed `$DATA` lives in an extension record that is not merged: shown with size 0.
+    pub undercounted_files: u64,
+    /// Names that contained path separators or other unsafe characters and were rewritten.
+    pub names_sanitized: u64,
 }
 
 /// Caps of the MFT pass. Every allocation driven by volume data is bounded by one of these.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MftLimits {
-    /// Entries kept; 2^27 covers every real volume (a 20 TB volume with tiny files has ~2^27 records).
+    /// Entries kept at most; the MFT size lowers it further. 2^25 (33M files) covers real volumes.
     pub max_entries: usize,
     /// Link names kept in total.
     pub max_links: usize,
-    /// UTF-16 units in the shared name pool (offsets are `u32`, 2^30 units = 2 GiB).
+    /// UTF-16 units in the shared name pool (offsets are `u32`; 2^28 units = 512 MiB).
     pub max_name_units: usize,
     /// Hard links read from one record. NTFS itself allows 1024.
     pub max_links_per_record: usize,
@@ -146,9 +151,9 @@ pub struct MftLimits {
 impl Default for MftLimits {
     fn default() -> Self {
         Self {
-            max_entries: 1 << 27,
-            max_links: 1 << 28,
-            max_name_units: 1 << 30,
+            max_entries: 1 << 25,
+            max_links: 1 << 26,
+            max_name_units: 1 << 28,
             max_links_per_record: 1024,
             min_corrupt_to_fail: 8,
         }
@@ -193,9 +198,12 @@ pub(crate) struct Entry {
     pub attributes: u32,
     pub logical: u64,
     pub allocated: u64,
-    pub mtime: Option<i64>,
+    /// Modification time in Unix seconds, [`NO_MTIME`] when unknown (keeps `Entry` small).
+    pub mtime: i64,
 }
 
+/// `Entry::mtime` value for "unknown".
+pub(crate) const NO_MTIME: i64 = i64::MIN;
 /// Parent reference value: no usable parent.
 pub(crate) const NO_PARENT: u32 = u32::MAX;
 /// Parent reference value: the parent is a metafile, the link belongs to a skipped system subtree.
@@ -259,6 +267,12 @@ pub(crate) fn scan_mft_with<S: BlockSource>(
     }
     let (tree, cancelled, stats) = build::build(collected, label, cancel, counters)?;
     tracing::info!(?stats, nodes = tree.len(), "MFT scan finished");
+    if stats.undercounted_files > 0 {
+        tracing::warn!(
+            files = stats.undercounted_files,
+            "MFT scan: files whose data lives in unmerged extension records are shown with size 0"
+        );
+    }
     Ok(MftScan { outcome: ScanOutcome::new(tree, cancelled, crate::ScanBackend::Mft), stats })
 }
 

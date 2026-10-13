@@ -8,7 +8,8 @@ use dirustat_ntfs::{
 };
 
 use super::{
-    Collected, Entry, EntryKind, FIRST_USER_RECORD, Link, MftError, MftLimits, NO_PARENT, ROOT_RECORD, SYSTEM_PARENT,
+    Collected, Entry, EntryKind, FIRST_USER_RECORD, Link, MftError, MftLimits, NO_MTIME, NO_PARENT, ROOT_RECORD,
+    SYSTEM_PARENT,
 };
 use crate::Counters;
 
@@ -18,8 +19,6 @@ const ATTR_REPARSE: u32 = 0x400;
 const FILETIME_UNIX_OFFSET_SECS: i64 = 11_644_473_600;
 /// FILETIME ticks (100 ns) per second.
 const TICKS_PER_SEC: u64 = 10_000_000;
-/// The cancel flag is read once per this many records (a power of two).
-const CANCEL_EVERY: u64 = 4096;
 
 /// FILETIME to Unix seconds; 0 (never set) and out-of-range values give `None`.
 pub(super) fn filetime_to_unix(filetime: u64) -> Option<i64> {
@@ -42,7 +41,8 @@ fn locate_mft<S: BlockSource>(source: &S, volume: &NtfsVolumeData) -> Result<(Ve
         return Err(ParseError::BadHeader.into());
     }
     let extents = mft_extents(&record0, volume.bytes_per_cluster)?;
-    let mut size = record0.logical_size();
+    // The MFT cannot be larger than the volume, nor than the valid length the driver reports (when known).
+    let mut size = record0.logical_size().min(volume.total_bytes);
     if volume.mft_valid_data_length > 0 {
         size = size.min(volume.mft_valid_data_length);
     }
@@ -65,19 +65,24 @@ pub(super) fn collect<S: BlockSource>(
         parse: ParseLimits { decode_runs: false, ..ParseLimits::default() },
         ..ReaderLimits::default()
     };
-    let reader = MftReader::new(&source, geometry, extents, mft_size, reader_limits)?;
+    // Extents are cross-checked against the volume size, which also caps the record count.
+    let mut reader =
+        MftReader::new(&source, geometry, extents, mft_size, reader_limits)?.bounded_by(volume.total_bytes)?;
+    let caps = Caps::derive(limits, mft_size, volume.bytes_per_file_record);
     let mut c = Collected::default();
-    for item in reader {
-        if c.stats.records_seen.is_multiple_of(CANCEL_EVERY) && cancel.load(Ordering::Relaxed) {
-            c.cancelled = true;
-            return Ok(c);
-        }
+    // The reader polls the flag before every chunk and inside runs of unused slots, so cancellation
+    // does not wait for a whole chunk of records or a long stretch of zeroes.
+    while let Some(item) = reader.next_cancellable(&mut || cancel.load(Ordering::Relaxed)) {
         let item = item?;
         c.stats.records_seen = c.stats.records_seen.saturating_add(1);
         match item.record {
-            Ok(record) => keep(&mut c, item.number, &record, limits, counters)?,
+            Ok(record) => keep(&mut c, item.number, &record, limits, &caps, counters)?,
             Err(_) => c.stats.corrupt = c.stats.corrupt.saturating_add(1),
         }
+    }
+    if reader.was_stopped() {
+        c.cancelled = true;
+        return Ok(c);
     }
     if c.stats.corrupt >= limits.min_corrupt_to_fail && c.stats.corrupt.saturating_mul(4) > c.stats.records_seen {
         return Err(MftError::TooManyCorrupt { corrupt: c.stats.corrupt, seen: c.stats.records_seen });
@@ -85,9 +90,53 @@ pub(super) fn collect<S: BlockSource>(
     Ok(c)
 }
 
+/// Allocation caps derived from the size of the MFT itself: it cannot hold more entries than records,
+/// and the fixed hard limits only matter for forged sizes.
+pub(super) struct Caps {
+    pub entries: usize,
+    pub links: usize,
+    pub name_units: usize,
+}
+
+impl Caps {
+    pub fn derive(limits: &MftLimits, mft_size: u64, record_size: u32) -> Self {
+        let records = mft_size / u64::from(record_size.max(1));
+        let records = usize::try_from(records).unwrap_or(usize::MAX);
+        // Typical volumes have well under two names per record; 8 leaves room for hardlink-heavy trees.
+        let links = limits.max_links.min(records.saturating_mul(MAX_LINKS_PER_RECORD_AVG));
+        Self {
+            entries: limits.max_entries.min(records),
+            links,
+            // A name has at most 255 UTF-16 units.
+            name_units: limits.max_name_units.min(links.saturating_mul(255)),
+        }
+    }
+}
+
+/// Average number of link names per MFT record that a volume may legitimately reach.
+const MAX_LINKS_PER_RECORD_AVG: usize = 8;
+
+/// Grows `v` so `extra` more items fit, failing with a typed error instead of aborting on OOM.
+fn reserve_for<T>(v: &mut Vec<T>, extra: usize, what: &'static str) -> Result<(), MftError> {
+    if v.capacity().saturating_sub(v.len()) >= extra {
+        return Ok(());
+    }
+    v.try_reserve(extra.max(v.len() / 2).max(1024)).map_err(|_| MftError::TooLarge(what))
+}
+
+/// Symlink and mount point (junction) reparse tags.
+const TAG_SYMLINK: u32 = 0xA000_000C;
+const TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+/// Symlinks and junctions are links. Other reparse points (cloud placeholders, dedup, WIM...) keep
+/// their real contents, so files stay files; an unknown reparse *directory* is still never descended.
 fn classify(record: &MftRecord, attributes: u32) -> EntryKind {
     if attributes & ATTR_REPARSE != 0 {
-        EntryKind::Link
+        match record.reparse_tag {
+            Some(TAG_SYMLINK | TAG_MOUNT_POINT) => EntryKind::Link,
+            _ if record.is_directory => EntryKind::Link,
+            _ => EntryKind::File,
+        }
     } else if record.is_directory {
         EntryKind::Dir
     } else {
@@ -116,6 +165,7 @@ fn keep(
     number: u64,
     record: &MftRecord,
     limits: &MftLimits,
+    caps: &Caps,
     counters: &Counters,
 ) -> Result<(), MftError> {
     if !record.in_use {
@@ -149,21 +199,24 @@ fn keep(
     let take = names.len().min(limits.max_links_per_record);
     c.stats.links_dropped =
         c.stats.links_dropped.saturating_add(u64::try_from(names.len().saturating_sub(take)).unwrap_or(u64::MAX));
-    if c.entries.len() >= limits.max_entries {
+    if c.entries.len() >= caps.entries {
         return Err(MftError::TooLarge("record"));
     }
-    if c.links.len().saturating_add(take) > limits.max_links {
+    if c.links.len().saturating_add(take) > caps.links {
         return Err(MftError::TooLarge("link"));
     }
+    reserve_for(&mut c.entries, 1, "record")?;
+    reserve_for(&mut c.links, take, "link")?;
     let owner = u32::try_from(c.entries.len()).map_err(|_| MftError::TooLarge("record"))?;
     let link_start = u32::try_from(c.links.len()).map_err(|_| MftError::TooLarge("link"))?;
     let mut stored = 0u16;
     for name in names.iter().take(take) {
         let Ok(name_len) = u16::try_from(name.name.len()) else { continue };
         let pool_end = c.names.len().saturating_add(name.name.len());
-        if pool_end > limits.max_name_units {
+        if pool_end > caps.name_units {
             return Err(MftError::TooLarge("name pool"));
         }
+        reserve_for(&mut c.names, name.name.len(), "name pool")?;
         let name_offset = u32::try_from(c.names.len()).map_err(|_| MftError::TooLarge("name pool"))?;
         c.names.extend_from_slice(&name.name);
         c.links.push(Link {
@@ -179,7 +232,11 @@ fn keep(
     let kind = classify(record, attributes);
     let (logical, allocated) = sizes_of(record, kind);
     // The unnamed `$DATA` of a fragmented file may live in an extension record that is not merged yet.
+    // (`DataStream`s that start past VCN 0 are ignored by the parser for the same reason.)
     let data_missing = kind == EntryKind::File && record.data.is_none() && record.has_attribute_list();
+    if data_missing {
+        c.stats.undercounted_files = c.stats.undercounted_files.saturating_add(1);
+    }
     c.entries.push(Entry {
         number,
         sequence: record.sequence,
@@ -190,7 +247,7 @@ fn keep(
         attributes,
         logical,
         allocated,
-        mtime: record.standard_info.and_then(|s| filetime_to_unix(s.modified)),
+        mtime: record.standard_info.and_then(|s| filetime_to_unix(s.modified)).unwrap_or(NO_MTIME),
     });
     c.stats.entries = c.stats.entries.saturating_add(1);
     c.stats.links = c.stats.links.saturating_add(u64::from(stored));

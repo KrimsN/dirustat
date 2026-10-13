@@ -480,3 +480,29 @@ proptest! {
         prop_assert_eq!(r.logical_size(), size);
     }
 }
+
+#[test]
+fn data_piece_with_nonzero_start_vcn_is_not_the_file_data() {
+    let rec =
+        RecordBuilder::file().attr(file_name(5, 5, 1, &utf16("frag.bin"), 0, 0)).attr(nonresident(&NonResident {
+            start_vcn: 100,
+            allocated: 4096,
+            size: 4096,
+            initialized: 4096,
+            runs: &encode_runs(&[Run { lcn: Some(10), len: 1 }]),
+            ..NonResident::default()
+        }));
+    assert!(parse_built(&rec).unwrap().data.is_none());
+}
+
+#[test]
+fn resident_reparse_tag_is_parsed() {
+    let mut value = 0xA000_000Cu32.to_le_bytes().to_vec();
+    value.extend_from_slice(&[0; 4]);
+    let rec = sample_file().attr(resident(0xC0, &[], 0, &value));
+    assert_eq!(parse_built(&rec).unwrap().reparse_tag, Some(0xA000_000C));
+    assert_eq!(parse_built(&sample_file()).unwrap().reparse_tag, None);
+    // A truncated value gives no tag instead of an error.
+    let short = sample_file().attr(resident(0xC0, &[], 0, &[1, 2]));
+    assert_eq!(parse_built(&short).unwrap().reparse_tag, None);
+}

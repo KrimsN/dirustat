@@ -12,6 +12,7 @@ pub const ATTR_STANDARD_INFORMATION: u32 = 0x10;
 pub const ATTR_ATTRIBUTE_LIST: u32 = 0x20;
 pub const ATTR_FILE_NAME: u32 = 0x30;
 pub const ATTR_DATA: u32 = 0x80;
+pub const ATTR_REPARSE_POINT: u32 = 0xC0;
 const ATTR_END: u32 = 0xFFFF_FFFF;
 
 /// Record header flag: the record is in use.
@@ -194,6 +195,8 @@ pub struct MftRecord {
     pub named_stream_count: usize,
     /// `$ATTRIBUTE_LIST` is present: further attributes may live in extension records.
     pub attribute_list: Option<AttributeList>,
+    /// Reparse tag from a resident `$REPARSE_POINT` (0xA000000C symlink, 0xA0000003 mount point/junction).
+    pub reparse_tag: Option<u32>,
 }
 
 impl MftRecord {
@@ -315,6 +318,7 @@ pub fn parse_record(bytes: &[u8], limits: &ParseLimits) -> Result<MftRecord, Par
         named_streams: Vec::new(),
         named_stream_count: 0,
         attribute_list: None,
+        reparse_tag: None,
     };
 
     let mut pos = first_attr;
@@ -400,6 +404,9 @@ fn parse_attribute(ty: u32, bytes: &[u8], limits: &ParseLimits, record: &mut Mft
             }
         }
         ATTR_DATA => parse_data(&attr, limits, record)?,
+        ATTR_REPARSE_POINT if !attr.nonresident && record.reparse_tag.is_none() => {
+            record.reparse_tag = le_u32(attr.resident_value()?, 0);
+        }
         _ => {}
     }
     Ok(())
@@ -520,7 +527,9 @@ fn parse_data(attr: &Attr<'_>, limits: &ParseLimits, record: &mut MftRecord) -> 
                 resident: !attr.nonresident,
             });
         }
-    } else if record.data.is_none() {
+    } else if record.data.is_none() && stream.start_vcn == 0 {
+        // A piece that starts past VCN 0 is a continuation of a fragmented attribute: it says nothing
+        // about the file size, so it must not stand in for the whole stream.
         record.data = Some(stream);
     }
     Ok(())

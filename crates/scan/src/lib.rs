@@ -265,15 +265,26 @@ struct Listing {
 /// Starts a scan of `root` on a background thread. The root is checked first, so a missing or
 /// non-directory root is reported at once.
 pub fn start(root: &Path, opts: ScanOptions) -> Result<ScanHandle, ScanError> {
-    check_root(root)?;
-    spawn_scan(root, opts, false)
+    let root = normalize_root(root);
+    check_root(&root)?;
+    spawn_scan(&root, opts, false)
 }
 
 /// Like [`start`] but returns immediately without touching the filesystem: the root check runs on
 /// the scan thread and its failure is reported by [`ScanHandle::join`]. For callers that hold a
 /// lock while starting a scan, because a dead network path can block `metadata` for a long time.
 pub fn start_deferred(root: &Path, opts: ScanOptions) -> Result<ScanHandle, ScanError> {
-    spawn_scan(root, opts, true)
+    spawn_scan(&normalize_root(root), opts, true)
+}
+
+/// A bare drive (`C:`) means "the current directory of drive C" to the OS; a scan of a volume root must mean the
+/// root itself, so a bare drive, a drive with a forward slash and a drive with a backslash all become
+/// the drive with a trailing backslash. Other paths are returned unchanged.
+fn normalize_root(root: &Path) -> PathBuf {
+    match volume_root_of(&root.to_string_lossy()) {
+        Some(volume) => PathBuf::from(format!("{volume}\\")),
+        None => root.to_path_buf(),
+    }
 }
 
 fn check_root(root: &Path) -> Result<(), ScanError> {

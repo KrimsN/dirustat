@@ -283,32 +283,6 @@ fn allocated_size_follows_compression_sparseness_and_residency() {
 }
 
 #[test]
-fn reparse_points_are_links_and_never_followed() {
-    let mut img = Img::new();
-    let junction = reparse_dir(41, 5, "junction");
-    img.put(41, junction);
-    img.small(42, 41, "behind-the-junction.txt", 9);
-    let mut symlink = with_data(record(43, false, 5, "symlink.lnk"), 20, 4_096);
-    symlink.attrs[0] = standard_info(filetime(SAMPLE_MTIME), 0x420);
-    img.put(43, symlink);
-    let out = ok(&img);
-    let tree = &out.outcome.tree;
-    let j = tree.get(find(tree, tree.root(), "junction").unwrap()).unwrap();
-    assert_eq!(j.kind(), NodeKind::Link);
-    assert_eq!(tree.children(find(tree, tree.root(), "junction").unwrap()).count(), 0);
-    let s = tree.get(find(tree, tree.root(), "symlink.lnk").unwrap()).unwrap();
-    assert_eq!((s.kind(), s.data().logical_size), (NodeKind::Link, 20));
-    // The child of the junction cannot be placed: it is an orphan, not a hidden descendant.
-    assert!(path(tree, &["<orphaned>", "behind-the-junction.txt"]).is_some());
-}
-
-fn reparse_dir(number: u32, parent: u32, name: &str) -> dirustat_ntfs::testutil::RecordBuilder {
-    let mut b = record(number, true, parent, name);
-    b.attrs[0] = standard_info(filetime(SAMPLE_MTIME), 0x410);
-    b
-}
-
-#[test]
 fn hostile_sizes_saturate_instead_of_wrapping() {
     let mut img = Img::new();
     let max = i64::MAX as u64;
@@ -354,7 +328,7 @@ fn cancellation_during_the_build_keeps_a_valid_partial_tree() {
     cancel.store(true, Ordering::Relaxed);
     let (tree, cancelled, _) = build::build(collected, "V:", &cancel, &counters).unwrap();
     assert!(cancelled);
-    assert!(tree.len() > 1 && tree.len() < 10_000, "{}", tree.len());
+    assert!(tree.len() < 10_000, "{}", tree.len());
     let root = tree.get(tree.root()).unwrap();
     assert_eq!(root.dir_count() + root.file_count(), u64::try_from(tree.len()).unwrap());
 }
@@ -594,4 +568,147 @@ proptest! {
         }
         let _ = scan_image(&src, &vol);
     }
+}
+
+// ---- review fixes -------------------------------------------------------------------------------
+
+const TAG_SYMLINK: u32 = 0xA000_000C;
+const TAG_MOUNT_POINT: u32 = 0xA000_0003;
+const TAG_CLOUD: u32 = 0x9000_001A;
+
+fn reparse(
+    number: u32,
+    dir: bool,
+    parent: u32,
+    name: &str,
+    tag: Option<u32>,
+) -> dirustat_ntfs::testutil::RecordBuilder {
+    let mut b = record(number, dir, parent, name);
+    b.attrs[0] = standard_info(filetime(SAMPLE_MTIME), if dir { 0x410 } else { 0x420 });
+    if let Some(tag) = tag {
+        let mut value = tag.to_le_bytes().to_vec();
+        value.extend_from_slice(&[0; 4]);
+        b.attrs.push(dirustat_ntfs::testutil::resident(0xC0, &[], 0, &value));
+    }
+    b
+}
+
+#[test]
+fn only_symlinks_and_junctions_are_links_and_nothing_is_followed() {
+    let mut img = Img::new();
+    img.put(41, reparse(41, true, 5, "junction", Some(TAG_MOUNT_POINT)));
+    img.small(42, 41, "behind-the-junction.txt", 9);
+    img.put(43, with_data(reparse(43, false, 5, "symlink.lnk", Some(TAG_SYMLINK)), 20, 4_096));
+    // A cloud placeholder file keeps its content: it is a regular file.
+    img.put(44, with_data(reparse(44, false, 5, "cloud.docx", Some(TAG_CLOUD)), 5_000, 8_192));
+    // A reparse file without a readable tag is a regular file too.
+    img.put(45, with_data(reparse(45, false, 5, "untagged.bin", None), 7, 4_096));
+    // Reparse directories with an unknown or missing tag are never descended into.
+    img.put(46, reparse(46, true, 5, "cloud-dir", Some(TAG_CLOUD)));
+    img.put(47, reparse(47, true, 5, "untagged-dir", None));
+    let out = ok(&img);
+    let tree = &out.outcome.tree;
+    let kind = |name: &str| tree.get(find(tree, tree.root(), name).unwrap()).unwrap().kind();
+    assert_eq!(kind("junction"), NodeKind::Link);
+    assert_eq!(kind("symlink.lnk"), NodeKind::Link);
+    assert_eq!(kind("cloud.docx"), NodeKind::File);
+    assert_eq!(kind("untagged.bin"), NodeKind::File);
+    assert_eq!(kind("cloud-dir"), NodeKind::Link);
+    assert_eq!(kind("untagged-dir"), NodeKind::Link);
+    assert_eq!(tree.children(find(tree, tree.root(), "junction").unwrap()).count(), 0);
+    let d = *tree.get(find(tree, tree.root(), "cloud.docx").unwrap()).unwrap().data();
+    assert_eq!((d.logical_size, d.allocated_size), (5_000, 8_192));
+    // The child of the junction cannot be placed: it is an orphan, not a hidden descendant.
+    assert!(path(tree, &["<orphaned>", "behind-the-junction.txt"]).is_some());
+}
+
+#[test]
+fn data_continuation_pieces_do_not_stand_in_for_the_file() {
+    let mut img = Img::new();
+    let piece = nonresident(&NonResident {
+        start_vcn: 64,
+        size: 1 << 20,
+        allocated: 1 << 20,
+        initialized: 1 << 20,
+        runs: &encode_runs(&[Run { lcn: Some(10), len: 4 }]),
+        ..NonResident::default()
+    });
+    let mut b = record(40, false, 5, "fragmented.bin").attr(piece);
+    b.attrs.push(dirustat_ntfs::testutil::resident(
+        0x20,
+        &[],
+        0,
+        &dirustat_ntfs::testutil::list_entry(0x80, false, 0, 99),
+    ));
+    img.put(40, b);
+    let out = ok(&img);
+    let tree = &out.outcome.tree;
+    let node = tree.get(path(tree, &["fragmented.bin"]).unwrap()).unwrap();
+    assert!(node.data().error);
+    assert_eq!(node.data().logical_size, 0);
+    assert_eq!(out.stats.undercounted_files, 1);
+}
+
+#[test]
+fn hostile_names_cannot_traverse_a_path() {
+    let mut img = Img::new();
+    img.dir(30, 5, "..\u{5c}..\u{5c}Windows");
+    img.small(31, 30, "a/b", 1);
+    img.small(32, 5, "..", 1);
+    img.small(33, 5, ".", 1);
+    img.small(34, 5, "C:evil", 1);
+    img.small(35, 5, "nul\0char\u{1}", 1);
+    img.small(36, 5, "fine.txt", 1);
+    let out = ok(&img);
+    let tree = &out.outcome.tree;
+    // Every node name is a single safe path component.
+    let mut stack = vec![(tree.root(), String::new())];
+    let mut seen = 0;
+    while let Some((id, prefix)) = stack.pop() {
+        for child in tree.children(id) {
+            let node = tree.get(child).unwrap();
+            let name = node.name();
+            assert!(!name.is_empty() && name != "." && name != "..", "{name:?}");
+            assert!(!name.contains(['/', '\u{5c}', ':']) && !name.chars().any(char::is_control), "{name:?}");
+            let joined = format!("{prefix}/{name}");
+            assert!(
+                std::path::Path::new(&joined).components().all(|c| !matches!(c, std::path::Component::ParentDir)),
+                "{joined}"
+            );
+            seen += 1;
+            stack.push((child, joined));
+        }
+    }
+    assert_eq!(seen, 6 + 1);
+    assert_eq!(out.stats.names_sanitized, 6);
+    let d = *tree.get(find(tree, tree.root(), "fine.txt").unwrap()).unwrap().data();
+    assert!(!d.name_lossy);
+    let d = *tree.get(find(tree, tree.root(), "_..").unwrap()).unwrap().data();
+    assert!(d.name_lossy);
+}
+
+#[test]
+fn allocation_caps_follow_the_mft_size() {
+    let caps = collect::Caps::derive(&MftLimits::default(), 10 * 1024, 1024);
+    assert_eq!((caps.entries, caps.links), (10, 80));
+    assert_eq!(caps.name_units, 80 * 255);
+    // The fixed limits still win for a forged, enormous MFT size.
+    let caps = collect::Caps::derive(&MftLimits::default(), u64::MAX, 1024);
+    assert_eq!(caps.entries, MftLimits::default().max_entries);
+    assert_eq!(caps.links, MftLimits::default().max_links);
+    assert_eq!(caps.name_units, MftLimits::default().max_name_units);
+    assert_eq!(collect::Caps::derive(&MftLimits::default(), 0, 0).entries, 0);
+}
+
+#[test]
+fn forged_extents_larger_than_the_volume_are_rejected() {
+    let (src, mut vol) = sample().finish();
+    // The volume claims to end before the MFT does.
+    vol.total_bytes = 2 * u64::try_from(CLUSTER).unwrap();
+    assert_eq!(scan_image(&src, &vol).err(), Some(MftError::Parse(ParseError::ExtentOutOfRange)));
+    // A record 0 whose run list claims far more clusters than the volume has.
+    let (mut src, vol) = sample().finish();
+    let rec0 = Img::record0(1 << 20, 1 << 20, &[Run { lcn: Some(1), len: 1 << 20 }]);
+    src.0[record_at(0)..record_at(0) + rec0.len()].copy_from_slice(&rec0);
+    assert_eq!(scan_image(&src, &vol).err(), Some(MftError::Parse(ParseError::ExtentOutOfRange)));
 }

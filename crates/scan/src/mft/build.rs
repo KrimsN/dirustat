@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use dirustat_model::{ModelError, NodeData, NodeId, NodeKind, Tree};
 
 use super::{
-    ATTR_DIRECTORY, Collected, Entry, EntryKind, Link, MftError, MftStats, NO_PARENT, ORPHAN_DIR, ROOT_RECORD,
-    SYSTEM_PARENT,
+    ATTR_DIRECTORY, Collected, Entry, EntryKind, Link, MftError, MftStats, NO_MTIME, NO_PARENT, ORPHAN_DIR,
+    ROOT_RECORD, SYSTEM_PARENT,
 };
 use crate::Counters;
 
@@ -69,11 +69,21 @@ pub(super) fn build(
         .and_then(|i| u32::try_from(i).ok())
         .filter(|&i| entries.get(usize_of(i)).is_some_and(|e| e.kind == EntryKind::Dir))
         .ok_or(MftError::NoRoot)?;
-    for link in &mut links {
+    let cancelled_result = |stats: MftStats| {
+        let mut tree = Tree::new(label);
+        tree.aggregate();
+        Ok((tree, true, stats))
+    };
+    for (i, link) in links.iter_mut().enumerate() {
+        if polled(i, cancel) {
+            return cancelled_result(stats);
+        }
         link.parent = resolve_parent(&entries, link.parent, link.parent_sequence);
     }
-    let (child_start, child_links) = group_children(entries.len(), &links, root_entry)?;
-    let state = vec![0u8; entries.len()];
+    let Some((child_start, child_links)) = group_children(entries.len(), &links, root_entry, cancel)? else {
+        return cancelled_result(stats);
+    };
+    let state = zeroed(entries.len(), 0u8, "state")?;
     let mut b = Builder {
         entries,
         links,
@@ -104,16 +114,61 @@ pub(super) fn build(
     Ok((b.tree, cancelled, b.stats))
 }
 
+/// Rewrites a name from the volume so joining it to a path can never leave the folder: path separators,
+/// `:` and control characters become `_`, and `.`, `..` and the empty name get a `_` prefix. `None` when the
+/// name is already safe (the common case allocates nothing).
+fn safe_name(units: &[u16]) -> Option<Vec<u16>> {
+    let unsafe_unit = |u: u16| matches!(u, 0x2F | 0x5C | 0x3A) || u < 0x20 || u == 0x7F;
+    let dots = matches!(units, [] | [0x2E] | [0x2E, 0x2E]);
+    if !dots && !units.iter().copied().any(unsafe_unit) {
+        return None;
+    }
+    let mut out = Vec::with_capacity(units.len().saturating_add(1));
+    if dots {
+        out.push(0x5F);
+    }
+    out.extend(units.iter().map(|&u| if unsafe_unit(u) { 0x5F } else { u }));
+    Some(out)
+}
+
+/// True every `CANCEL_EVERY` iterations when the cancel flag is set.
+fn polled(iteration: usize, cancel: &AtomicBool) -> bool {
+    iteration.is_multiple_of(usize::try_from(CANCEL_EVERY).unwrap_or(4096)) && cancel.load(Ordering::Relaxed)
+}
+
+/// A zero-initialised vector that reports allocation failure as an error instead of aborting.
+fn zeroed<T: Clone>(len: usize, value: T, what: &'static str) -> Result<Vec<T>, MftError> {
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).map_err(|_| MftError::TooLarge(what))?;
+    v.resize(len, value);
+    Ok(v)
+}
+
 fn usize_of(i: u32) -> usize {
     usize::try_from(i).unwrap_or(usize::MAX)
 }
 
 /// Counting sort of the resolved links by parent entry. The root's own links are left out.
-fn group_children(entry_count: usize, links: &[Link], root_entry: u32) -> Result<(Vec<u32>, Vec<u32>), MftError> {
-    let mut start = vec![0u32; entry_count.saturating_add(1)];
+/// Children index: `(start, grouped)`.
+type ChildIndex = (Vec<u32>, Vec<u32>);
+
+/// `Ok(None)` means the scan was cancelled meanwhile.
+fn group_children(
+    entry_count: usize,
+    links: &[Link],
+    root_entry: u32,
+    cancel: &AtomicBool,
+) -> Result<Option<ChildIndex>, MftError> {
+    let mut start = zeroed(entry_count.saturating_add(1), 0u32, "link index")?;
     let mut total = 0u32;
     let attached = |l: &Link| l.owner != root_entry && usize_of(l.parent) < entry_count;
-    for link in links.iter().filter(|l| attached(l)) {
+    for (i, link) in links.iter().enumerate() {
+        if polled(i, cancel) {
+            return Ok(None);
+        }
+        if !attached(link) {
+            continue;
+        }
         if let Some(slot) = start.get_mut(usize_of(link.parent).saturating_add(1)) {
             *slot = slot.saturating_add(1);
         }
@@ -125,15 +180,21 @@ fn group_children(entry_count: usize, links: &[Link], root_entry: u32) -> Result
         *slot = acc;
     }
     let mut cursor = start.clone();
-    let mut grouped = vec![0u32; usize_of(total)];
-    for (index, link) in links.iter().enumerate().filter(|(_, l)| attached(l)) {
+    let mut grouped = zeroed(usize_of(total), 0u32, "link index")?;
+    for (index, link) in links.iter().enumerate() {
+        if polled(index, cancel) {
+            return Ok(None);
+        }
+        if !attached(link) {
+            continue;
+        }
         let Some(pos) = cursor.get_mut(usize_of(link.parent)) else { continue };
         if let Some(dst) = grouped.get_mut(usize_of(*pos)) {
             *dst = u32::try_from(index).map_err(|_| MftError::TooLarge("link"))?;
         }
         *pos = pos.saturating_add(1);
     }
-    Ok((start, grouped))
+    Ok(Some((start, grouped)))
 }
 
 impl Builder {
@@ -149,9 +210,12 @@ impl Builder {
         stack.push((self.tree.root(), self.root_entry));
         self.drain(&mut stack, cancel)?;
         // Pass 2: system subtrees (children of metafiles) are skipped without making nodes.
-        self.skip_system_subtrees();
+        self.skip_system_subtrees(cancel)?;
         // Pass 3: links whose parent cannot be used go below `<orphaned>`.
         for index in 0..self.links.len() {
+            if polled(index, cancel) {
+                return Err(Stop::Cancelled);
+            }
             let Some(&link) = self.links.get(index) else { continue };
             if link.parent != NO_PARENT || link.owner == self.root_entry {
                 continue;
@@ -166,6 +230,9 @@ impl Builder {
         }
         // Pass 4: whatever is still unreachable sits in a parent cycle (or below one).
         for entry in 0..self.entries.len() {
+            if polled(entry, cancel) {
+                return Err(Stop::Cancelled);
+            }
             let Some(&e) = self.entries.get(entry) else { continue };
             if self.state.get(entry).copied().unwrap_or(REACHED) & REACHED != 0 || e.link_count == 0 {
                 continue;
@@ -207,14 +274,22 @@ impl Builder {
     }
 
     /// Marks every entry below a metafile as handled, without creating nodes.
-    fn skip_system_subtrees(&mut self) {
+    fn skip_system_subtrees(&mut self, cancel: &AtomicBool) -> Result<(), Stop> {
         let mut pending: Vec<u32> = Vec::new();
-        for link in &self.links {
+        for (i, link) in self.links.iter().enumerate() {
+            if polled(i, cancel) {
+                return Err(Stop::Cancelled);
+            }
             if link.parent == SYSTEM_PARENT && link.owner != self.root_entry {
                 pending.push(link.owner);
             }
         }
+        let mut handled = 0usize;
         while let Some(entry) = pending.pop() {
+            handled += 1;
+            if polled(handled, cancel) {
+                return Err(Stop::Cancelled);
+            }
             let already = self.state.get(usize_of(entry)).is_some_and(|s| s & REACHED != 0);
             if already {
                 continue;
@@ -226,6 +301,7 @@ impl Builder {
                 pending.extend(owner);
             }
         }
+        Ok(())
     }
 
     /// Creates the children of every directory on the stack, depth-first, until it is empty.
@@ -272,13 +348,20 @@ impl Builder {
         let data = NodeData {
             logical_size: logical,
             allocated_size: allocated,
-            mtime: entry.mtime,
+            mtime: (entry.mtime != NO_MTIME).then_some(entry.mtime),
             attributes,
             error: entry.error,
             name_lossy: false,
         };
         let start = usize_of(link.name_offset);
-        let name = self.names.get(start..start.saturating_add(usize::from(link.name_len))).unwrap_or(&[]);
+        let raw = self.names.get(start..start.saturating_add(usize::from(link.name_len))).unwrap_or(&[]);
+        let safe = safe_name(raw);
+        let mut data = data;
+        if safe.is_some() {
+            data.name_lossy = true;
+            self.stats.names_sanitized = self.stats.names_sanitized.saturating_add(1);
+        }
+        let name = safe.as_deref().unwrap_or(raw);
         match self.tree.add_node_from_wide(parent, name, entry.kind.node_kind(), data) {
             Ok(id) => {
                 if entry.kind == EntryKind::Dir {

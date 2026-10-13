@@ -193,3 +193,61 @@ fn mem_source_bounds() {
     assert_eq!(m.read_at(u64::MAX, 2), Err(VolumeError::InvalidRange));
     assert_eq!(m.read_at(1, usize::MAX), Err(VolumeError::InvalidRange));
 }
+
+#[test]
+fn bounded_by_rejects_extents_outside_or_larger_than_the_volume() {
+    let (src, extents, size) = image(12);
+    let total = 16 * CLUSTER as u64;
+    // The real layout fits.
+    let ok = MftReader::new(&src, geometry(), extents.clone(), size, ReaderLimits::default()).unwrap();
+    assert!(ok.bounded_by(total).is_ok());
+    // A volume that ends before the second fragment.
+    let r = MftReader::new(&src, geometry(), extents, size, ReaderLimits::default()).unwrap();
+    assert_eq!(r.bounded_by(5 * CLUSTER as u64).err(), Some(ParseError::ExtentOutOfRange));
+    // Forged: two overlapping extents that together claim more than the volume holds.
+    let overlap = vec![Extent { vcn: 0, lcn: 1, clusters: 10 }, Extent { vcn: 10, lcn: 1, clusters: 10 }];
+    let r = MftReader::new(&src, geometry(), overlap, size, ReaderLimits::default()).unwrap();
+    assert_eq!(r.bounded_by(16 * CLUSTER as u64).err(), Some(ParseError::ExtentOutOfRange));
+    // Forged: one gigantic extent.
+    let huge = vec![Extent { vcn: 0, lcn: 1, clusters: 1 << 30 }];
+    let r = MftReader::new(&src, geometry(), huge, size, ReaderLimits::default()).unwrap();
+    assert_eq!(r.bounded_by(16 * CLUSTER as u64).err(), Some(ParseError::ExtentOutOfRange));
+}
+
+#[test]
+fn bounded_by_caps_the_record_count() {
+    let (src, extents, size) = image(12);
+    let r = MftReader::new(&src, geometry(), extents, size, ReaderLimits::default()).unwrap();
+    // Room for only 4 records on the volume: at most 4 are produced.
+    let r = r.bounded_by(4 * RECORD as u64 + 16 * CLUSTER as u64 - 4 * RECORD as u64).unwrap();
+    assert!(r.count() <= 12);
+}
+
+#[test]
+fn stop_callback_ends_iteration_between_chunks_and_inside_empty_runs() {
+    let (src, extents, size) = image(12);
+    let mut reader = MftReader::new(&src, geometry(), extents.clone(), size, ReaderLimits::default()).unwrap();
+    assert!(reader.next_cancellable(&mut || true).is_none());
+    assert!(reader.was_stopped());
+    assert!(reader.next().is_none());
+    // A stop that never fires behaves like `next`.
+    let mut reader = MftReader::new(&src, geometry(), extents, size, ReaderLimits::default()).unwrap();
+    let mut n = 0;
+    while reader.next_cancellable(&mut || false).is_some() {
+        n += 1;
+    }
+    assert_eq!((n, reader.was_stopped()), (11, false));
+    // A long run of zero-filled slots polls the callback without any chunk boundary.
+    let slots = 3 * 4096;
+    let zero_src = MemSource(vec![0u8; slots * RECORD]);
+    let ext = vec![Extent { vcn: 0, lcn: 0, clusters: (slots * RECORD / CLUSTER) as u64 }];
+    let limits = ReaderLimits { chunk_bytes: slots * RECORD, ..ReaderLimits::default() };
+    let mut reader = MftReader::new(&zero_src, geometry(), ext, (slots * RECORD) as u64, limits).unwrap();
+    let mut polls = 0;
+    let out = reader.next_cancellable(&mut || {
+        polls += 1;
+        polls > 1
+    });
+    assert!(out.is_none() && reader.was_stopped());
+    assert!(reader.skipped_empty() <= 4096 + 1);
+}

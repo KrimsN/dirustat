@@ -108,6 +108,7 @@ pub struct MftReader<S> {
     next_number: u64,
     skipped_empty: u64,
     done: bool,
+    stopped: bool,
 }
 
 impl<S: BlockSource> MftReader<S> {
@@ -142,7 +143,27 @@ impl<S: BlockSource> MftReader<S> {
             next_number: 0,
             skipped_empty: 0,
             done: false,
+            stopped: false,
         })
+    }
+
+    /// Cross-checks the extents against the size of the volume they claim to live on: every extent must end
+    /// inside `total_bytes`, the extents together may not be larger than the volume (forged or overlapping
+    /// run lists), and the number of records is capped by what fits in the volume.
+    pub fn bounded_by(mut self, total_bytes: u64) -> Result<Self, ParseError> {
+        let bpc = self.geometry.bytes_per_cluster;
+        let mut sum = 0u64;
+        for e in &self.extents {
+            let offset = e.byte_offset(bpc).ok_or(ParseError::RunOverflow)?;
+            let len = e.byte_len(bpc).ok_or(ParseError::RunOverflow)?;
+            let end = offset.checked_add(len).ok_or(ParseError::RunOverflow)?;
+            sum = sum.checked_add(len).ok_or(ParseError::RunOverflow)?;
+            if end > total_bytes || sum > total_bytes {
+                return Err(ParseError::ExtentOutOfRange);
+            }
+        }
+        self.max_records = self.max_records.min(total_bytes / u64::from(self.geometry.bytes_per_record));
+        Ok(self)
     }
 
     /// Zero-filled (never used) record slots skipped so far.
@@ -185,6 +206,23 @@ impl<S: BlockSource> Iterator for MftReader<S> {
     type Item = Result<MftItem, VolumeError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        self.next_cancellable(&mut || false)
+    }
+}
+
+/// Zero-filled slots skipped between two polls of the stop callback.
+const STOP_POLL_SLOTS: u64 = 4096;
+
+impl<S: BlockSource> MftReader<S> {
+    /// Whether the iteration ended because `stop` returned true.
+    pub fn was_stopped(&self) -> bool {
+        self.stopped
+    }
+
+    /// Like `next`, but polls `stop` before every chunk read and every 4096 skipped empty slots, so a long run
+    /// of unused records or a slow disk cannot delay cancellation. When it returns true the iteration ends.
+    pub fn next_cancellable(&mut self, stop: &mut dyn FnMut() -> bool) -> Option<<Self as Iterator>::Item> {
+        let mut skipped_run = 0u64;
         let record_size = usize::try_from(self.geometry.bytes_per_record).ok()?;
         loop {
             if self.done || self.next_number >= self.max_records {
@@ -198,13 +236,31 @@ impl<S: BlockSource> Iterator for MftReader<S> {
                 self.next_number += 1;
                 if slot.iter().all(|&b| b == 0) {
                     self.skipped_empty += 1;
+                    skipped_run += 1;
+                    if skipped_run.is_multiple_of(STOP_POLL_SLOTS) && stop() {
+                        self.stopped = true;
+                        self.done = true;
+                        return None;
+                    }
                     continue;
                 }
                 let record = parse_raw_record(slot, &self.limits.parse);
                 return Some(Ok(MftItem { number, record }));
             }
+            if stop() {
+                self.stopped = true;
+                self.done = true;
+                return None;
+            }
             match self.refill() {
-                Ok(true) => {}
+                Ok(true) => {
+                    // A read can take long; look again before spending time on the new chunk.
+                    if stop() {
+                        self.stopped = true;
+                        self.done = true;
+                        return None;
+                    }
+                }
                 Ok(false) => {
                     self.done = true;
                     return None;

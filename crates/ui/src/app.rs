@@ -10,10 +10,11 @@ use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
 use crate::{ext_panel, map_panel, tree_panel};
 use dirustat_control::{SharedSession, lock_session, share};
-use dirustat_engine::{CommandInfo, Session};
+use dirustat_engine::{CommandInfo, FastPathStatus, Session};
 use dirustat_model::SizeMode;
 use serde_json::{Value, json};
 use std::sync::MutexGuard;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::Duration;
 
 /// How often the UI repaints while a scan runs.
@@ -32,6 +33,8 @@ pub struct DirustatApp {
     applied_zoom: Option<u16>,
     shots: Screenshots,
     quit_requested: bool,
+    /// Result of the fast-path probe running on a helper thread (opening a volume can block).
+    probe: Option<Receiver<(String, FastPathStatus)>>,
 }
 
 /// A menu item: label, shortcut and state of one command.
@@ -62,6 +65,7 @@ impl DirustatApp {
             applied_zoom: None,
             shots: Screenshots::default(),
             quit_requested: false,
+            probe: None,
         }
     }
 
@@ -156,10 +160,39 @@ impl DirustatApp {
     }
 
     /// Probes the fast path once per scan start (never per frame) and sets the status-bar hint.
+    ///
+    /// Opening a raw volume can block, so the probe runs on a short helper thread and its result is
+    /// picked up by [`Self::poll_probe`] on a later frame. The hint is cleared at once and set only if the
+    /// probe says administrator rights are missing.
     fn refresh_elevation_hint(&mut self, prefer_fast: bool) {
-        let volume = dirustat_engine::volume_root_of(self.state.path_text.trim()).filter(|_| prefer_fast);
-        let status = volume.as_deref().map(dirustat_engine::fast_path_status);
-        self.state.set_elevation_hint(volume.as_deref(), status.as_ref());
+        self.state.set_elevation_hint(None, None);
+        self.probe = None;
+        let Some(volume) = dirustat_engine::volume_root_of(self.state.path_text.trim()).filter(|_| prefer_fast) else {
+            return;
+        };
+        let (tx, rx) = mpsc::channel();
+        let spawned = std::thread::Builder::new().name("fast-path-probe".to_owned()).spawn(move || {
+            let status = dirustat_engine::fast_path_status(&volume);
+            // The receiver is gone when a newer probe replaced this one; nothing to report then.
+            let _ = tx.send((volume, status));
+        });
+        if spawned.is_ok() {
+            self.probe = Some(rx);
+        }
+    }
+
+    /// Applies a finished probe, if any, without blocking.
+    fn poll_probe(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.probe else { return };
+        match rx.try_recv() {
+            Ok((volume, status)) => {
+                self.state.set_elevation_hint(Some(&volume), Some(&status));
+                self.probe = None;
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => ctx.request_repaint_after(SCAN_REPAINT),
+            Err(TryRecvError::Disconnected) => self.probe = None,
+        }
     }
 
     /// Parameters for a command invoked without a form (menu, shortcut, palette, button).
@@ -198,6 +231,7 @@ impl DirustatApp {
 
     /// Follows the session's scan without blocking: progress while it runs, status when it ends.
     fn poll_scan(&mut self, ctx: &egui::Context) {
+        self.poll_probe(ctx);
         let mut session = lock_session(&self.session);
         if session.is_scanning() {
             let errors = Self::progress_into_status(&mut self.state, &session);
@@ -720,6 +754,31 @@ mod tests {
         assert_eq!(json["elevation_hint"], "C:");
         assert_eq!(json["elevation_help_open"], true);
         assert!(app.apply_ui_patch(&json!({"elevation_hint": "D:"})).is_err());
+    }
+
+    #[test]
+    fn volume_probe_runs_off_the_ui_thread_and_is_polled() {
+        let mut app = DirustatApp::new();
+        let ctx = egui::Context::default();
+        app.state_mut().elevation_hint = Some("stale".to_owned());
+        app.state_mut().path_text = "C:\\".to_owned();
+        app.refresh_elevation_hint(true);
+        // The stale hint is cleared at once and a probe is pending (no blocking `Volume::open` here).
+        assert_eq!(app.state().elevation_hint, None);
+        assert!(app.probe.is_some());
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        while app.probe.is_some() {
+            app.poll_probe(&ctx);
+            assert!(std::time::Instant::now() < deadline, "probe never finished");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Whatever the machine says, the hint is either unset or names the probed volume.
+        assert!(matches!(app.state().elevation_hint.as_deref(), None | Some("C:")));
+        // A newer refresh for a non-volume path drops a pending probe.
+        app.refresh_elevation_hint(true);
+        app.state_mut().path_text = "folder".to_owned();
+        app.refresh_elevation_hint(true);
+        assert!(app.probe.is_none());
     }
 
     #[test]

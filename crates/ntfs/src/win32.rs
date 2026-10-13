@@ -24,8 +24,10 @@ use crate::volume::{RawVolumeData, VolumeError};
 #[derive(Debug)]
 pub(crate) struct RawHandle(HANDLE);
 
-// SAFETY: a Win32 file handle is a process-wide kernel object id, not tied to a thread. Reads go
-// through `ReadFile` with an explicit offset, so no per-handle state is shared between threads.
+// SAFETY: a Win32 file handle is a process-wide kernel object id, not tied to a thread, so moving the
+// owner to another thread is sound. Every read passes an explicit offset; the handle's file pointer is
+// advanced by `ReadFile` but its value is never relied upon. The type is deliberately not `Sync`:
+// concurrent use from several threads through a shared reference is not promised.
 unsafe impl Send for RawHandle {}
 
 fn map_error(code: u32) -> VolumeError {

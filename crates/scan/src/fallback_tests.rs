@@ -201,3 +201,14 @@ fn real_volume_scan_uses_the_mft() {
     assert_eq!(out.backend, ScanBackend::Mft, "fallback reason: {:?}", out.fallback_reason);
     assert!(out.tree.len() > 1000);
 }
+
+#[test]
+fn bare_drive_names_are_normalised_to_the_volume_root() {
+    // `C:` alone would scan the current directory of drive C; it must mean `C:\`.
+    for given in ["C:", "c:", "C:\u{5c}", "c:/"] {
+        assert_eq!(normalize_root(Path::new(given)), PathBuf::from("C:\u{5c}"), "{given}");
+    }
+    for same in ["C:\u{5c}Users", "relative", "/tmp", "CC:", ""] {
+        assert_eq!(normalize_root(Path::new(same)), PathBuf::from(same), "{same}");
+    }
+}

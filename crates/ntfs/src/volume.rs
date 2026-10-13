@@ -107,15 +107,22 @@ pub(crate) fn validate_volume_data(raw: &RawVolumeData) -> Result<NtfsVolumeData
     let sectors = u64::try_from(raw.number_sectors).map_err(|_| VolumeError::Malformed)?;
     let total_bytes =
         sectors.checked_mul(u64::from(raw.bytes_per_sector)).filter(|&b| b > 0).ok_or(VolumeError::Malformed)?;
+    let total_clusters = u64::try_from(raw.total_clusters).map_err(|_| VolumeError::Malformed)?;
+    let mft_start_lcn = u64::try_from(raw.mft_start_lcn).map_err(|_| VolumeError::Malformed)?;
+    // The cluster count must fit in the volume and the MFT must start inside it.
+    let clusters_bytes = total_clusters.checked_mul(u64::from(raw.bytes_per_cluster));
+    if total_clusters == 0 || mft_start_lcn >= total_clusters || clusters_bytes.is_none_or(|b| b > total_bytes) {
+        return Err(VolumeError::Malformed);
+    }
     Ok(NtfsVolumeData {
         volume_serial_number: raw.volume_serial_number as u64,
         bytes_per_sector: raw.bytes_per_sector,
         bytes_per_cluster: raw.bytes_per_cluster,
         bytes_per_file_record: raw.bytes_per_file_record_segment,
-        total_clusters: u64::try_from(raw.total_clusters).map_err(|_| VolumeError::Malformed)?,
+        total_clusters,
         total_bytes,
         mft_valid_data_length: u64::try_from(raw.mft_valid_data_length).map_err(|_| VolumeError::Malformed)?,
-        mft_start_lcn: u64::try_from(raw.mft_start_lcn).map_err(|_| VolumeError::Malformed)?,
+        mft_start_lcn,
     })
 }
 
@@ -266,7 +273,7 @@ mod tests {
 
     #[test]
     fn geometry_validation_rejects_hostile_values() {
-        let cases: [fn(&mut RawVolumeData); 9] = [
+        let cases: [fn(&mut RawVolumeData); 13] = [
             |r| r.bytes_per_sector = 0,
             |r| r.bytes_per_sector = 513,
             |r| r.bytes_per_sector = 1 << 20,
@@ -276,6 +283,10 @@ mod tests {
             |r| r.number_sectors = -1,
             |r| r.number_sectors = 0,
             |r| r.mft_start_lcn = -1,
+            |r| r.mft_start_lcn = i64::MAX,
+            |r| r.mft_start_lcn = 256,
+            |r| r.total_clusters = 0,
+            |r| r.total_clusters = 257,
         ];
         for mutate in cases {
             let mut r = raw();
@@ -293,8 +304,8 @@ mod tests {
         assert_eq!(validate_volume_data(&r), Err(VolumeError::Malformed));
         let mut r = raw();
         r.mft_start_lcn = i64::MAX;
-        let d = validate_volume_data(&r);
-        assert_eq!(d.map(|d| d.mft_offset()), Ok(None));
+        // An MFT start outside the volume is rejected.
+        assert_eq!(validate_volume_data(&r), Err(VolumeError::Malformed));
     }
 
     #[test]
