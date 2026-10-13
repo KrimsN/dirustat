@@ -1,13 +1,30 @@
 //! L0: fast NTFS MFT parsing (the "WizTree-style" path).
 //!
-//! Status: M3.1 — safe read-only volume access (`Volume`) over an isolated Win32 FFI module. MFT record
-//! parsing, fixups and data runs arrive in M3.2. This crate is the only place in the workspace where
-//! `unsafe` is allowed (ADR 0002): the FFI lives in `win32.rs` (Windows only), everything else is safe
-//! code. On other platforms every volume operation reports `VolumeError::Unsupported`.
+//! Status: M3.1 — safe read-only volume access (`Volume`) over an isolated Win32 FFI module; M3.2 — safe
+//! MFT record parsing (`apply_fixups`, `parse_record`, `decode_data_runs`, `mft_extents`) and the chunked
+//! `MftReader`. This crate is the only place in the workspace where `unsafe` is allowed (ADR 0002): the FFI
+//! lives in `win32.rs` (Windows only), everything else is safe code. On other platforms every volume
+//! operation reports `VolumeError::Unsupported`, but the parsers work everywhere (and are fuzzable).
 
+mod bytes;
+mod error;
+mod reader;
+mod record;
+mod runs;
+#[cfg(test)]
+mod testutil;
 mod volume;
 #[cfg(windows)]
 mod win32;
+
+pub use error::{ParseError, ParseLimits};
+pub use reader::{BlockSource, MemSource, MftGeometry, MftItem, MftReader, ReaderLimits};
+pub use record::{
+    ATTR_ATTRIBUTE_LIST, ATTR_DATA, ATTR_FILE_NAME, ATTR_STANDARD_INFORMATION, AttributeList, AttributeListEntry,
+    DataStream, FIXUP_STRIDE, FileName, FileRef, MftRecord, NamedStream, Namespace, StandardInfo, apply_fixups,
+    mft_extents, parse_raw_record, parse_record,
+};
+pub use runs::{Extent, Run, decode_data_runs, extents_from_runs};
 
 pub use volume::{MAX_READ_BYTES, NtfsVolumeData, Volume, VolumeError, check_read_range, volume_path};
 

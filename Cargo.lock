@@ -809,6 +809,7 @@ name = "dirustat-engine"
 version = "0.0.1"
 dependencies = [
  "dirustat-model",
+ "dirustat-ntfs",
  "dirustat-scan",
  "dirustat-treemap",
  "serde",
@@ -829,6 +830,7 @@ dependencies = [
 name = "dirustat-ntfs"
 version = "0.0.1"
 dependencies = [
+ "proptest",
  "windows-sys 0.61.2",
 ]
 

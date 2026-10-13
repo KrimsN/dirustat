@@ -91,7 +91,7 @@ impl NtfsVolumeData {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-fn is_pow2_in(value: u32, min: u32, max: u32) -> bool {
+pub(crate) fn is_pow2_in(value: u32, min: u32, max: u32) -> bool {
     value.is_power_of_two() && (min..=max).contains(&value)
 }
 

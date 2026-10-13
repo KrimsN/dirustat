@@ -16,7 +16,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-028 | P2 | M2 | Menus cover only File/Edit/View | remaining groups from the registry appear in the menu bar |
 | G-029 | P1 | M1 | Keyboard navigation in the tree panel | arrow/Home/End/Enter navigation with tests |
 | G-030 | P2 | M0 | `wasm-core` check is skipped locally (target `wasm32-unknown-unknown` not installed) | `cargo xtask ci` runs the wasm check on this machine |
-| G-012 | P1 | M3 | `dirustat-ntfs`: Win32 FFI (isolated unsafe), MFT reading, record parsing, fixups, data runs | fuzz target, round-trip, budget ≤ 3 s per 1M. **Progress:** M3.1 volume FFI + geometry validation done (2026-10-13); record parsing, fixups, data runs, fuzz open |
+| G-012 | P1 | M3 | `dirustat-ntfs`: Win32 FFI (isolated unsafe), MFT reading, record parsing, fixups, data runs | fuzz target, round-trip, budget ≤ 3 s per 1M. **Progress:** M3.1 volume FFI + geometry validation done; M3.2 safe record parsing, fixups, data runs, `MftReader`, proptests and `crates/ntfs/fuzz` targets done (2026-10-13); open: real-volume MFT read with extension records (`$ATTRIBUTE_LIST`), 1M-record budget measurement |
 | G-013 | P1 | M3 | Transparent fallback MFT → portable scan, administrator rights request | tests + manual check |
 | G-014 | P1 | M4 | Platform services: recycle bin, file manager, properties, free space | `PlatformServices` + Windows implementation |
 | G-015 | P0 | M4 | Destructive commands per `docs/safety.md` (confirm, dry-run, protected paths, journal) | tests for refusal without confirm and for protected paths |
