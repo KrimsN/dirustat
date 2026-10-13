@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-13 · revision 10 · M3.1 landed (G-012 partly: volume FFI done, record parsing open); M2 landed; G-005, G-006, G-008, G-009, G-010 closed; G-011 reduced; G-025-G-030 added. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-13 · revision 11 · M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review); M2 landed; G-005, G-006, G-008, G-009, G-010 closed; G-011 reduced; G-025-G-030 added. Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -16,8 +16,15 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-028 | P2 | M2 | Menus cover only File/Edit/View | remaining groups from the registry appear in the menu bar |
 | G-029 | P1 | M1 | Keyboard navigation in the tree panel | arrow/Home/End/Enter navigation with tests |
 | G-030 | P2 | M0 | `wasm-core` check is skipped locally (target `wasm32-unknown-unknown` not installed) | `cargo xtask ci` runs the wasm check on this machine |
-| G-012 | P1 | M3 | `dirustat-ntfs`: Win32 FFI (isolated unsafe), MFT reading, record parsing, fixups, data runs | fuzz target, round-trip, budget ≤ 3 s per 1M. **Progress:** M3.1 volume FFI + geometry validation done; M3.2 safe record parsing, fixups, data runs, `MftReader`, proptests and `crates/ntfs/fuzz` targets done (2026-10-13); open: real-volume MFT read with extension records (`$ATTRIBUTE_LIST`), 1M-record budget measurement |
-| G-013 | P1 | M3 | Transparent fallback MFT → portable scan, administrator rights request | tests + manual check |
+| G-012 | P1 | M3 | `dirustat-ntfs`: Win32 FFI (isolated unsafe), MFT reading, record parsing, fixups, data runs | fuzz target, round-trip, budget ≤ 3 s per 1M. **Done (2026-10-13):** volume FFI (M3.1), safe record parser, fixups, data runs, `MftReader`, proptests, fuzz targets (M3.2), tree from MFT records (M3.3), review fixes. **Remaining:** verification on a real volume (elevated `cargo test -p dirustat-ntfs -- --ignored` and `cargo test -p dirustat-scan -- --ignored`), budget ≤ 3 s per 1M measured (M3.5, VHDX with 1M files), merging extension records (`$ATTRIBUTE_LIST`), a fuzz target for the whole `MftReader` image (see G-036), alternate data stream sizes |
+| G-013 | P1 | M3 | Transparent fallback MFT → portable scan, administrator rights request | tests + manual check. **Done (2026-10-13):** fallback MFT → portable with `fallback_reason`, `scan.fast_path_status`, status-bar hint (M3.4, M3.6). **Remaining:** real elevation (manifest / `runas` relaunch) in M6 packaging; manual check on a real non-elevated run |
+| G-031 | P2 | M3 | A late I/O failure during the MFT pass wastes the whole pass | per-chunk corrupt marking: an unreadable chunk marks its records as errors and the pass continues; regression test |
+| G-032 | P2 | M3 | The orphan pass can create duplicate nodes when parent links form a cycle | each record attached at most once; test with a cyclic parent fixture |
+| G-033 | P2 | M3 | Allocated size of sparse data is wrong when `compression_unit == 0` | sparse files report allocated size from data runs; test with a sparse image |
+| G-034 | P2 | M3 | `link_names` is O(n²) on records with many hard-link names | linear or bounded implementation; measured on a hostile record |
+| G-035 | P2 | M3 | Progress is frozen during the tree build phase after the MFT read | progress counters advance while building; test |
+| G-036 | P2 | M3 | No fuzz target for the whole MFT image (`MftReader` + builder) | `crates/ntfs/fuzz` target added and run without crashes |
+| G-037 | P3 | M3 | The UI does not show `fallback_reason` (only the elevation hint) | reason visible in the status bar or about window; screenshot |
 | G-014 | P1 | M4 | Platform services: recycle bin, file manager, properties, free space | `PlatformServices` + Windows implementation |
 | G-015 | P0 | M4 | Destructive commands per `docs/safety.md` (confirm, dry-run, protected paths, journal) | tests for refusal without confirm and for protected paths |
 | G-016 | P2 | M4 | Search (substring/wildcard/regex), filters, scan exclusions | tests + hostile patterns |
@@ -57,3 +64,4 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-13 · r8: G-005/G-006 progress notes updated after M1.9-M1.11 panels; both stay open pending a screenshot.
 - 2026-10-13 · r9: after M2, closed G-005, G-006, G-008, G-009, G-010; G-011 narrowed to the UI remainder; added G-025-G-030 from review follow-ups.
 - 2026-10-13 · r10: M3.1 landed; G-012 stays open (progress note).
+- 2026-10-13 · r11: M3.2-M3.6 and review fixes landed; G-012/G-013 narrowed (both stay open); added G-031-G-037 (review deferrals).

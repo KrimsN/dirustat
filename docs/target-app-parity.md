@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-13 · revision 4 · WinDirStat done 7/34 (partial 11), WizTree done 0/12 (partial 3). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-13 · revision 5 · WinDirStat done 7/34 (partial 11), WizTree done 0/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -47,8 +47,8 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 
 | # | Feature | Command / area | Milestone | Status |
 |---|---|---|---|---|
-| 1 | Scan through the MFT | `scan.start` (backend `mft`) | M3 | missing |
-| 2 | Ask for administrator rights and fall back to a normal scan | `scan.elevate` | M3 | partial 2026-10-13 (awareness only: `scan.fast_path_status`, status-bar hint, `ui.relaunch_elevated_help`; real elevation left for M6 packaging) |
+| 1 | Scan through the MFT | `scan.start` (backend `mft`) | M3 | partial 2026-10-13 (safe record parser, MFT reader and tree builder with transparent fallback, covered by tests on synthetic images; not verified on a real volume, no extension-record merging, budget ≤ 3 s per 1M not measured) |
+| 2 | Ask for administrator rights and fall back to a normal scan | `scan.elevate` | M3 | partial 2026-10-13 (transparent fallback MFT → portable with a reason in `session.state`; awareness only: `scan.fast_path_status`, status-bar hint, `ui.relaunch_elevated_help`; real elevation left for M6 packaging) |
 | 3 | Flat list of all files | `view.file_list` | M2 | missing |
 | 4 | Top largest files | `list.largest_files` | M2 | partial (engine command with tests, callable from CLI/control/MCP; no UI panel; O(n) per call, see G-025) |
 | 5 | Search with wildcard/regex | `search.find` (mode) | M4 | missing |
@@ -69,8 +69,8 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 | Metric | Value |
 |---|---|
 | WinDirStat, `done` | 7 / 34 (partial 11) |
-| WizTree, `done` | 0 / 12 (partial 3) |
-| MFT scan speed (1M files) | not measured |
+| WizTree, `done` | 0 / 12 (partial 5) |
+| MFT scan speed (1M files) | not measured (needs an elevated run on a real volume, M3.5) |
 
 ## Revision history
 
@@ -78,3 +78,4 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 - 2026-10-13 · r2: translated to English.
 - 2026-10-13 · r3: after M1.7-M1.11, rows A1, A3, A4, A5, A7-A10, A13, A17, A18, A20-A23, B11 moved to `partial`; none is `done` because there is no screenshot verification (`ui.screenshot` arrives in M2.5), the actions are not commands yet (M2.2), and cushion shading, keyboard navigation and some columns are missing.
 - 2026-10-13 · r4: after M2, screenshot `docs/img/m1-main.png` exists and actions are registered commands. A1, A3, A10, A11, A13, A21, A33 moved to `done`; A34, B4, B10 moved to `partial`. Other partial rows stay partial (no commands for tree/ext actions, no keyboard navigation, no cushion, no UI for largest files/drives).
+- 2026-10-13 · r5: after M3.2-M3.6, B1 moved to `partial` (parser, tree builder and fallback tested on synthetic images only). Recounted from rows: WizTree partial rows are B1, B2, B4, B10, B11 = 5 (the previous header said 3, which missed B2 and B4/B10 bookkeeping). WinDirStat unchanged (7 done, 11 partial).

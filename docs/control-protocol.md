@@ -1,6 +1,6 @@
 # Control protocol and MCP
 
-> Status: 2026-10-13 · revision 2 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
+> Status: 2026-10-13 · revision 3 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
 
 Goal: any action a human can take is available to an agent; the app can be launched, scan a test folder, run commands and take a screenshot without a mouse or keyboard.
 
@@ -40,6 +40,7 @@ Rules:
 - `engine.execute` of `scan.start` with a UNC path (two leading slashes or backslashes, including the extended UNC form) is refused with `invalid_params` over control. `scan.start` returns at once: a missing or non-directory root is reported when the scan is polled (`session.poll`/`session.state`) as `invalid_params`.
 - `engine.execute` of `scan.fast_path_status` (`{volume?}`, default the system drive) probes a volume read-only and returns `{volume, available, reason, needs_admin, preferred}`; `reason` is one of `available`, `not_windows`, `access_denied`, `not_ntfs`, `not_found`, `invalid_name`, `malformed`, `io_error`. A bad volume name is a `reason`, not an error. It never elevates (ADR 0002). Setting `scan.prefer_fast_path` (bool, default true) is changed with `settings.set`.
 - `ui.relaunch_elevated_help` (UI command, run through the bridge) only toggles an explanation window (`ui.state`: `elevation_help_open`); `ui.state.elevation_hint` holds the volume whose scan root lacked administrator rights. No elevation is performed; a manifest or `runas` relaunch is left for packaging (M6).
+- `session.state` scan fields: `progress` is `null` when no scan runs, else `{dirs, files, bytes, errors, backend, fallback_reason}`. `backend` is `portable` or `mft`; `fallback_reason` is a string when the fast path was tried and the scan fell back to the portable walk, otherwise `null`. `last_scan` is `null` until a scan finishes, then `{backend, fallback_reason}` of the most recent finished scan.
 - `ControlClient` drops its connection after any I/O error or timeout (the next call reconnects) and rejects a response whose `id` differs from the request.
 
 ## MCP
@@ -63,3 +64,7 @@ dirustat-cli run --scan <folder> --cmd 'export.csv={"path":"out.csv"}'
 ## Channel security
 
 Loopback only, mandatory key, request size limit, rate limit; destructive commands follow `docs/safety.md`. The channel is off by default.
+
+## Revision history
+
+- 2026-10-13 · r3: documented `session.state` fields `progress.backend`, `progress.fallback_reason`, `last_scan{backend,fallback_reason}` (M3.4). Earlier revisions (r1, r2) predate this section.
