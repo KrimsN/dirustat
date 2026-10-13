@@ -2,6 +2,11 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M3.5 (partial) · human run + Claude
+- Verified on a real volume (elevated shell, debug build): `cargo test -p dirustat-ntfs -- --ignored` passes (`reads_the_ntfs_boot_sector`: the boot sector of `C:` carries the `NTFS    ` signature). `cargo test -p dirustat-scan -- --ignored`: `real_volume_scan_uses_the_mft` passes, i.e. a scan of `C:\` ran on the MFT backend without fallback and produced more than 1000 nodes; it took 26.15 s in a debug build on a real system volume (not a budget measurement).
+- Not an issue: `scan_matches_reference_walk_on_fixture` fails under `--ignored` unless `DIRUSTAT_FIXTURE` points at a generated fixture (M1.5 behaviour).
+- Still open: the exit criterion (1M files <= 3 s, release build, VHDX fixture) is not measured; G-012 stays open for that, extension-record merging and ADS sizes.
+
 ## 2026-10-13 · M3.2-M3.6 + review fixes · Claude
 - Landed: M3.2 safe MFT record parser in `dirustat-ntfs` (fixups, `$STANDARD_INFORMATION`/`$FILE_NAME`/`$DATA`, data runs, hostile-input limits), `MftReader`, proptests, `crates/ntfs/fuzz` targets. M3.3 tree built from MFT records by parent ids. M3.4 transparent fallback to the portable scan; the scan reports `backend` and `fallback_reason`. M3.6 `scan.fast_path_status`, `scan.prefer_fast_path` setting, administrator-rights hint in the UI. Never-crash review fixes: root normalisation, allocation caps, name sanitising, geometry checks, cancellation. `session.state` gained `progress.backend`, `progress.fallback_reason` and `last_scan{backend,fallback_reason}` (documented in `docs/control-protocol.md`).
 - Numbers: `cargo test --workspace` = 381 passed, 3 ignored; ntfs 69 (+1 ignored), scan 57 (+1 ignored), engine 76, ui 57. Parity: WizTree B1 moved to partial (WinDirStat 7/34 done, 11 partial; WizTree 0/12 done, 5 partial, recounted from rows).
