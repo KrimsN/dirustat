@@ -16,7 +16,9 @@ Goal: any action a human can take is available to an agent; the app can be launc
 {"id":2,"ok":false,"error":{"code":"invalid_params","message":"path is empty"}}
 ```
 
-Stable error codes: `unknown_command`, `invalid_params`, `unsupported`, `confirmation_required`, `not_enabled`, `internal`.
+Stable error codes: `unknown_command`, `invalid_params`, `unsupported`, `confirmation_required`, `not_enabled`, `internal`; transport level: `unknown_method`, `bad_request` (malformed JSON or envelope), `unauthorized` (missing/wrong key), `too_large` (request over 1 MiB closes the connection; response over 8 MiB), `rate_limited` (200 requests/s per connection).
+
+Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `ControlServer::start(port, key_dir, session, bridge)`, `UiBridge` for `ui.*`/`app.quit` (headless: `unsupported`). `session.state` accepts `path` as a JSON pointer (`/selection`). `session.tree` takes `node` (id), `depth` (max 8), `limit` (max 1000), `offset` (pages the children of `node`), `mode` (`allocated`|`logical`); children are sorted by size, largest first.
 
 ## Methods
 
