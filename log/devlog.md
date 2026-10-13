@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M3.1 · Claude
+- Landed: `dirustat-ntfs` volume access. `win32.rs` (the only `unsafe`, each block with `// SAFETY:`): `CreateFileW` read-only open of `\.\X:`, `FSCTL_GET_NTFS_VOLUME_DATA`, positional `ReadFile`, `CloseHandle` on drop. Safe `volume.rs`: `volume_path` (drive letters only), `validate_volume_data` (power-of-two sector/cluster/record sizes, no negatives, checked multiplication), `check_read_range` (sector-aligned, non-empty, <= 64 MiB, inside the volume), `Volume::{open,data,read_at}`, `VolumeError` with a distinct `AccessDenied`. `probe()` returns `Available` only for an openable NTFS volume; `probe_detailed()` gives the reason. Dependency `windows-sys` 0.61 (already in the tree), row added to `docs/engineering.md`.
+- Numbers: ntfs tests 1 -> 8 (+1 ignored); `cargo xtask ci` and `cargo deny check` green.
+- Verified: without administrator rights `Volume::open("C:")` returns `AccessDenied` (the ignored boot-sector test fails with exactly that).
+- Still open: reading real bytes needs an elevated run of `cargo test -p dirustat-ntfs -- --ignored` (human step); M3.2 record parsing + fuzz target; `scan` does not use the fast path yet.
+
 ## 2026-10-13 · M2.1-M2.9 · Claude
 - Landed: M2.1 `CommandSpec` registry; commands `scan.start/cancel`, `select.node/clear`, `view.size_mode`, `session.state/poll`, `settings.get/set/reset`, `tree.children`, `tree.path`, `list.largest_files`, `list.drives`. M2.3 `hostile_params_never_panic` over the registry. M2.2 menus and command palette (Ctrl+Shift+P) built from the registry, `ui.*` shell commands. M2.4 control channel (TCP 127.0.0.1, key file via getrandom, limits), `UiBridge` wired in `apps/dirustat` with `--control`. M2.5 `ui.screenshot` (flags `--demo --screenshot --exit-after-screenshot`), screenshot `docs/img/m1-main.png`. M2.6 CLI (`commands`, `scan`, `info`, `run`, `mcp`, `--timeout`). M2.7 MCP stdio server and `mcp --connect`. M2.8 Settings (serde, atomic save, corrupt-file handling) and `LaunchArgs`. M2.9 engine side only: top-N largest files, paged children, drives provider (default empty).
 - Numbers: 255 tests pass in `cargo test --workspace`. Parity: WinDirStat 7/34 done (11 partial), WizTree 0/12 done (3 partial).

@@ -1,6 +1,6 @@
 # Roadmap
 
-> Status: 2026-10-13 · revision 4 · **Current focus: M3** (fast MFT: `dirustat-ntfs`, fallback, administrator rights). M1 and M2 are done; next task M3.1 Win32 FFI module in `dirustat-ntfs`.
+> Status: 2026-10-13 · revision 5 · **Current focus: M3** (fast MFT: `dirustat-ntfs`, fallback, administrator rights). M1 and M2 are done; M3.1 (Win32 FFI volume access) is done; next task M3.2 MFT record parsing.
 
 | Milestone | Result | Main gaps | Estimate |
 |---|---|---|---|
@@ -29,3 +29,4 @@
 - 2026-10-13 · r2: translated to English.
 - 2026-10-13 · r3: current focus updated after M1.7-M1.11 (M1 exit criterion "screenshot in devlog" still open).
 - 2026-10-13 · r4: M1 and M2 marked done; current focus moved to M3.
+- 2026-10-13 · r5: M3.1 done; next M3.2.

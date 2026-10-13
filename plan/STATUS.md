@@ -3,9 +3,10 @@
 > A snapshot for hand-off between agent sessions. Overwrite at the end of every session (it is not a journal; the journal is `log/devlog.md`).
 
 - **Updated:** 2026-10-13
-- **Milestone:** M1 and M2 done. Starting M3 "Fast MFT". M2 delivered the command registry, menus and palette, control channel, `ui.screenshot` (`docs/img/m1-main.png`), CLI, MCP, settings and launch args; 255 tests pass (`cargo test --workspace`).
+- **Milestone:** M1 and M2 done. M3 "Fast MFT" in progress (M3.1 done). M2 delivered the command registry, menus and palette, control channel, `ui.screenshot` (`docs/img/m1-main.png`), CLI, MCP, settings and launch args; 255 tests pass (`cargo test --workspace`).
 - **Tree:** green at the last full run reported by the implementing agents (`cargo xtask ci`: fmt, clippy `-D warnings`, tests, layers; wasm-core is skipped when the target is not installed, G-030)
-- **Next task:** M3.1 Win32 FFI module in `dirustat-ntfs` (isolated unsafe, ADR 0002; G-012). Then MFT record parsing, fixups, data runs, fuzz target.
+- **Next task:** M3.2 MFT record parsing in `dirustat-ntfs` (safe code: fixups, attributes `$STANDARD_INFORMATION`/`$FILE_NAME`/`$DATA`, data runs, hostile-input limits) with a fuzz target and a property test. Then M3.3 tree from parent ids, M3.4 fallback.
+- **M3.1 result:** `Volume::open/data/read_at` (`crates/ntfs/src/volume.rs`: validated geometry, aligned and capped reads) over `win32.rs` (the only `unsafe`). `probe()` returns `Available` only when the volume opens as NTFS. The real read test `reads_the_ntfs_boot_sector` is `#[ignore]` and needs an elevated shell (`cargo test -p dirustat-ntfs -- --ignored`); run here without admin it returns `AccessDenied` as expected, so reading real bytes is not yet verified.
 - **Open leftovers (not blocking M3):** G-011 (drive picker UI, flat list, free-space UI), G-025 (O(n) `tree.children` / `list.largest_files` under the session lock), G-026 (`info --timeout`), G-027 (screenshot encode on the UI thread), G-028 (menus only File/Edit/View), G-029 (tree keyboard navigation), G-030 (wasm check), G-002 (cold-cache scan slowness, `xtask perf`)
 - **Blockers:** none
 - **Waiting for a human decision:**
