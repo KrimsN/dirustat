@@ -153,7 +153,15 @@ impl Session {
     /// Waits for a scan and, unless it was cancelled, makes its tree current. A panic in the scan
     /// thread is reported as an error and the previous tree is kept.
     pub fn finish_scan(&mut self, handle: ScanHandle) -> Result<bool, CommandError> {
-        let outcome = guard::guarded("scan", || handle.join().map_err(|err| CommandError::Scan(err.to_string())))?;
+        let outcome = guard::guarded("scan", || {
+            handle.join().map_err(|err| match err {
+                // A bad root is the caller's mistake, found on the scan thread (see `start_scan`).
+                dirustat_scan::ScanError::Root(_) | dirustat_scan::ScanError::NotADirectory => {
+                    CommandError::InvalidParams(format!("cannot scan: {err}"))
+                }
+                other => CommandError::Scan(other.to_string()),
+            })
+        })?;
         if outcome.cancelled {
             return Ok(false);
         }

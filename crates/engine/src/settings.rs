@@ -3,7 +3,9 @@
 //!
 //! Loading never fails: a missing file gives defaults silently, a corrupt, oversized or unreadable
 //! file gives defaults plus a warning (and a best-effort `.bad` copy of the corrupt file, so a later
-//! save cannot destroy it). Saving is atomic: write a temp file next to the target, then rename.
+//! save cannot destroy it; earlier copies are never overwritten, see [`MAX_BAD_COPIES`]). Saving is
+//! atomic: write a uniquely named temp file next to the target, then rename. A file written by a
+//! newer version is never overwritten.
 
 use dirustat_model::SizeMode;
 use serde::{Deserialize, Serialize};
@@ -18,6 +20,9 @@ pub const SETTINGS_VERSION: u32 = 1;
 pub const MAX_RECENT_PATHS: usize = 20;
 /// Longest accepted remembered path, in bytes.
 pub const MAX_PATH_LEN: usize = 4096;
+/// How many `.bad` copies of corrupt files are kept (`.bad`, `.bad.1`, ...). When all names are
+/// taken nothing is copied, so no earlier evidence is ever overwritten.
+pub const MAX_BAD_COPIES: u32 = 9;
 /// Settings files larger than this are not read.
 pub const MAX_SETTINGS_BYTES: u64 = 1024 * 1024;
 
@@ -182,10 +187,8 @@ impl Settings {
                 LoadOutcome { settings, warning }
             }
             Err(e) => {
-                let mut backup = path.as_os_str().to_owned();
-                backup.push(".bad");
                 // Best effort: keep the corrupt file so a later save cannot destroy it.
-                let _ = fs::copy(path, PathBuf::from(backup));
+                backup_corrupt(path);
                 defaults(Some(format!("corrupt settings file {}: {e}", path.display())))
             }
         }
@@ -200,24 +203,82 @@ impl Settings {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             fs::create_dir_all(dir).map_err(|e| err("cannot create directory for", e))?;
         }
-        let mut tmp_name = path.as_os_str().to_owned();
-        tmp_name.push(format!(".{}.tmp", std::process::id()));
-        let tmp = PathBuf::from(tmp_name);
-        let written = (|| {
-            let mut f = fs::File::create(&tmp)?;
-            f.write_all(&json)?;
-            f.sync_all()
-        })();
-        if let Err(e) = written {
-            let _ = fs::remove_file(&tmp);
-            return Err(err("cannot write", e));
+        if let Some(found) = existing_version(path)
+            && found > u64::from(SETTINGS_VERSION)
+        {
+            return Err(SettingsError(format!(
+                "refusing to overwrite {}: it was written by a newer version (schema {found}, ours {SETTINGS_VERSION})",
+                path.display()
+            )));
         }
+        let tmp = write_temp(path, &json).map_err(|e| err("cannot write", e))?;
         if let Err(e) = fs::rename(&tmp, path) {
             let _ = fs::remove_file(&tmp);
             return Err(err("cannot replace", e));
         }
         Ok(())
     }
+}
+
+/// Schema version recorded in the file at `path`, if it is a readable settings file.
+fn existing_version(path: &Path) -> Option<u64> {
+    let file = fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SETTINGS_BYTES.saturating_add(1)).read_to_end(&mut bytes).ok()?;
+    if u64::try_from(bytes.len()).map_or(true, |n| n > MAX_SETTINGS_BYTES) {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()?.get("version")?.as_u64()
+}
+
+/// Copies the corrupt `path` to the first free `<path>.bad[.N]`; gives up silently when all
+/// [`MAX_BAD_COPIES`] names are taken. Uses `create_new`, so an existing copy is never replaced.
+fn backup_corrupt(path: &Path) {
+    let Ok(src) = fs::File::open(path) else { return };
+    let mut bytes = Vec::new();
+    if src.take(MAX_SETTINGS_BYTES).read_to_end(&mut bytes).is_err() {
+        return;
+    }
+    for n in 0..MAX_BAD_COPIES {
+        let mut name = path.as_os_str().to_owned();
+        name.push(if n == 0 { ".bad".to_owned() } else { format!(".bad.{n}") });
+        match fs::OpenOptions::new().write(true).create_new(true).open(PathBuf::from(name)) {
+            Ok(mut f) => {
+                let _ = f.write_all(&bytes);
+                return;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return,
+        }
+    }
+}
+
+/// Writes `bytes` to a new uniquely named file next to `path` (pid, clock and a counter in the
+/// name, opened with `create_new` so an existing file is never reused) and returns its path.
+fn write_temp(path: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let mut last = None;
+    for _ in 0..8 {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut name = path.as_os_str().to_owned();
+        name.push(format!(".{}-{nanos}-{n}.tmp", std::process::id()));
+        let tmp = PathBuf::from(name);
+        match fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+                    drop(f);
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                return Ok(tmp);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no temp name available")))
 }
 
 /// Per-OS settings directory (`%APPDATA%\dirustat`, `~/Library/Application Support/diRUSTat`,
@@ -275,8 +336,56 @@ mod tests {
             let out = Settings::load_from(&path);
             assert_eq!(out.settings, Settings::default());
             assert!(out.warning.is_some());
-            assert_eq!(fs::read(dir.path().join("settings.json.bad")).unwrap(), junk);
         }
+        // Every corrupt version is kept under its own name; the first copy is never overwritten.
+        assert_eq!(fs::read(dir.path().join("settings.json.bad")).unwrap(), b"{not json");
+        assert_eq!(fs::read(dir.path().join("settings.json.bad.1")).unwrap(), b"\xff\xfe\x00");
+        assert_eq!(fs::read(dir.path().join("settings.json.bad.4")).unwrap(), b"{\"size_mode\": 5}");
+    }
+
+    #[test]
+    fn bad_copies_are_capped_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        for i in 0..(MAX_BAD_COPIES + 5) {
+            fs::write(&path, format!("{{broken {i}")).unwrap();
+            let _ = Settings::load_from(&path);
+        }
+        let copies = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains(".bad"))
+            .count();
+        assert_eq!(copies, MAX_BAD_COPIES as usize);
+        assert_eq!(fs::read(dir.path().join("settings.json.bad")).unwrap(), b"{broken 0");
+    }
+
+    #[test]
+    fn saving_over_a_newer_schema_is_refused_and_keeps_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let newer = br#"{"version":99,"size_mode":"logical","future_key":[1,2,3]}"#;
+        fs::write(&path, newer).unwrap();
+        let err = Settings::default().save_to(&path).unwrap_err();
+        assert!(err.0.contains("newer version"), "{err}");
+        assert_eq!(fs::read(&path).unwrap(), newer);
+        // Same or older versions are replaced normally.
+        fs::write(&path, br#"{"version":1}"#).unwrap();
+        assert!(Settings::default().save_to(&path).is_ok());
+    }
+
+    #[test]
+    fn temp_names_do_not_collide_and_leave_nothing_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let a = write_temp(&path, b"a").unwrap();
+        let b = write_temp(&path, b"b").unwrap();
+        assert_ne!(a, b);
+        assert_eq!(fs::read(&a).unwrap(), b"a");
+        assert!(a.to_string_lossy().contains(&std::process::id().to_string()));
+        let before = fs::read_dir(dir.path()).unwrap().count();
+        Settings::default().save_to(&path).unwrap();
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), before + 1);
     }
 
     #[test]

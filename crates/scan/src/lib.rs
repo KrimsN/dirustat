@@ -109,7 +109,7 @@ pub struct ScanOutcome {
 pub struct ScanHandle {
     cancel: Arc<AtomicBool>,
     counters: Arc<Counters>,
-    thread: JoinHandle<ScanOutcome>,
+    thread: JoinHandle<Result<ScanOutcome, ScanError>>,
 }
 
 impl ScanHandle {
@@ -133,7 +133,7 @@ impl ScanHandle {
 
     /// Waits for the scan and returns its tree.
     pub fn join(self) -> Result<ScanOutcome, ScanError> {
-        self.thread.join().map_err(|_| ScanError::Panicked)
+        self.thread.join().map_err(|_| ScanError::Panicked)?
     }
 }
 
@@ -157,12 +157,29 @@ struct Listing {
     error: bool,
 }
 
-/// Starts a scan of `root` on a background thread.
+/// Starts a scan of `root` on a background thread. The root is checked first, so a missing or
+/// non-directory root is reported at once.
 pub fn start(root: &Path, opts: ScanOptions) -> Result<ScanHandle, ScanError> {
+    check_root(root)?;
+    spawn_scan(root, opts, false)
+}
+
+/// Like [`start`] but returns immediately without touching the filesystem: the root check runs on
+/// the scan thread and its failure is reported by [`ScanHandle::join`]. For callers that hold a
+/// lock while starting a scan, because a dead network path can block `metadata` for a long time.
+pub fn start_deferred(root: &Path, opts: ScanOptions) -> Result<ScanHandle, ScanError> {
+    spawn_scan(root, opts, true)
+}
+
+fn check_root(root: &Path) -> Result<(), ScanError> {
     let meta = fs::metadata(root).map_err(ScanError::Root)?;
     if !meta.is_dir() {
         return Err(ScanError::NotADirectory);
     }
+    Ok(())
+}
+
+fn spawn_scan(root: &Path, opts: ScanOptions, check_in_thread: bool) -> Result<ScanHandle, ScanError> {
     let mut builder = rayon::ThreadPoolBuilder::new();
     if let Some(n) = opts.threads {
         builder = builder.num_threads(n.max(1));
@@ -173,7 +190,12 @@ pub fn start(root: &Path, opts: ScanOptions) -> Result<ScanHandle, ScanError> {
     let root = root.to_path_buf();
     let thread = {
         let (cancel, counters) = (Arc::clone(&cancel), Arc::clone(&counters));
-        std::thread::spawn(move || run(&pool, &root, &opts, &cancel, &counters))
+        std::thread::spawn(move || {
+            if check_in_thread {
+                check_root(&root)?;
+            }
+            Ok(run(&pool, &root, &opts, &cancel, &counters))
+        })
     };
     Ok(ScanHandle { cancel, counters, thread })
 }
@@ -414,6 +436,19 @@ mod tests {
         let progress = handle.progress();
         assert_eq!(progress, Progress { dirs: 2, files: 1, bytes: 100, errors: 0 });
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn deferred_start_reports_a_bad_root_through_join() {
+        let tmp = tempfile::tempdir().unwrap();
+        let handle = start_deferred(&tmp.path().join("nope"), ScanOptions::default()).unwrap();
+        assert!(matches!(handle.join(), Err(ScanError::Root(_))));
+        let file = tmp.path().join("f");
+        write(&file, 1);
+        let handle = start_deferred(&file, ScanOptions::default()).unwrap();
+        assert!(matches!(handle.join(), Err(ScanError::NotADirectory)));
+        let handle = start_deferred(tmp.path(), ScanOptions::default()).unwrap();
+        assert!(handle.join().is_ok());
     }
 
     #[test]

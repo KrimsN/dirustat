@@ -10,8 +10,8 @@ use std::fs;
 use std::io::{self, BufReader, Write};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -20,11 +20,44 @@ pub const MAX_CONNECTIONS: usize = 16;
 /// Requests allowed per connection per [`RATE_WINDOW`].
 pub const RATE_LIMIT: u32 = 200;
 pub const RATE_WINDOW: Duration = Duration::from_secs(1);
+/// Requests allowed per [`RATE_WINDOW`] across all connections together, so many connections
+/// cannot multiply the per-connection budget.
+pub const GLOBAL_RATE_LIMIT: u32 = 1000;
+/// A connection must send a request carrying the right key within this time of connecting;
+/// idle or wrong-key peers give their slot back.
+pub const PRE_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
 /// A request line must arrive within this time of the previous response (idle and slow-drip bound).
 pub const LINE_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
 const READ_POLL: Duration = Duration::from_millis(500);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Tunable limits of a [`ControlServer`] (tests use small ones).
+#[derive(Clone, Copy, Debug)]
+pub struct ServerLimits {
+    pub max_connections: usize,
+    pub conn_rate: u32,
+    pub global_rate: u32,
+    pub pre_auth_timeout: Duration,
+}
+
+impl Default for ServerLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: MAX_CONNECTIONS,
+            conn_rate: RATE_LIMIT,
+            global_rate: GLOBAL_RATE_LIMIT,
+            pre_auth_timeout: PRE_AUTH_TIMEOUT,
+        }
+    }
+}
+
+/// State shared by all connection threads.
+#[derive(Debug)]
+struct Shared {
+    limits: ServerLimits,
+    global: Mutex<RateLimiter>,
+}
 
 /// Fixed-window request counter.
 #[derive(Debug)]
@@ -68,17 +101,33 @@ impl ControlServer {
     /// Binds `127.0.0.1:port` (0 = any free port), generates a key and writes it to
     /// `control-key.local-<port>` in `key_dir`, then serves in background threads.
     pub fn start(port: u16, key_dir: &Path, session: SharedSession, bridge: Arc<dyn UiBridge>) -> io::Result<Self> {
+        Self::start_with_limits(port, key_dir, session, bridge, ServerLimits::default())
+    }
+
+    /// Like [`Self::start`] with explicit limits. Fails (and starts nothing) when the OS random
+    /// source or the key file is unavailable: the channel is never run without a strong key.
+    pub fn start_with_limits(
+        port: u16,
+        key_dir: &Path,
+        session: SharedSession,
+        bridge: Arc<dyn UiBridge>,
+        limits: ServerLimits,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
-        let key = generate_key();
+        let key = generate_key()?;
         let key_path = write_key_file(key_dir, port, &key)?;
         let dispatcher = Dispatcher::new(session, bridge).with_key(key.clone());
         let stop = Arc::new(AtomicBool::new(false));
         let accept_stop = Arc::clone(&stop);
+        let shared = Arc::new(Shared {
+            limits,
+            global: Mutex::new(RateLimiter::new(limits.global_rate, RATE_WINDOW, Instant::now())),
+        });
         let spawned = thread::Builder::new()
             .name("dirustat-control-accept".to_owned())
-            .spawn(move || accept_loop(&listener, &dispatcher, &accept_stop));
+            .spawn(move || accept_loop(&listener, &dispatcher, &accept_stop, &shared));
         let thread = match spawned {
             Ok(t) => t,
             Err(e) => {
@@ -122,18 +171,19 @@ impl Drop for ControlServer {
     }
 }
 
-fn accept_loop(listener: &TcpListener, dispatcher: &Dispatcher, stop: &Arc<AtomicBool>) {
+fn accept_loop(listener: &TcpListener, dispatcher: &Dispatcher, stop: &Arc<AtomicBool>, shared: &Arc<Shared>) {
     let active = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, peer)) => {
-                if !peer.ip().is_loopback() || active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
+                if !peer.ip().is_loopback() || active.load(Ordering::SeqCst) >= shared.limits.max_connections {
                     continue;
                 }
                 active.fetch_add(1, Ordering::SeqCst);
                 let (d, s, a) = (dispatcher.clone(), Arc::clone(stop), Arc::clone(&active));
+                let sh = Arc::clone(shared);
                 let spawned = thread::Builder::new().name("dirustat-control-conn".to_owned()).spawn(move || {
-                    serve_connection(stream, &d, &s);
+                    serve_connection(stream, &d, &s, &sh);
                     a.fetch_sub(1, Ordering::SeqCst);
                 });
                 if spawned.is_err() {
@@ -160,7 +210,7 @@ fn error_line(err: &ControlError) -> String {
     json!({ "id": null, "ok": false, "error": { "code": err.code(), "message": err.message() } }).to_string()
 }
 
-fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBool) {
+fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBool, shared: &Shared) {
     if stream.set_nonblocking(false).is_err()
         || stream.set_read_timeout(Some(READ_POLL)).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
@@ -169,9 +219,11 @@ fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBoo
     }
     let Ok(mut writer) = stream.try_clone() else { return };
     let mut reader = BufReader::new(stream);
-    let mut limiter = RateLimiter::new(RATE_LIMIT, RATE_WINDOW, Instant::now());
+    let mut limiter = RateLimiter::new(shared.limits.conn_rate, RATE_WINDOW, Instant::now());
     let mut buf = Vec::new();
-    let mut deadline = Instant::now() + LINE_TIMEOUT;
+    // Until a request carries the right key the whole connection lives on this short deadline.
+    let mut authed = false;
+    let mut deadline = Instant::now() + shared.limits.pre_auth_timeout;
     while !stop.load(Ordering::SeqCst) {
         match read_line_bounded(&mut reader, MAX_REQUEST_BYTES, &mut buf, Some(deadline)) {
             Ok(LineRead::Eof) => return,
@@ -181,14 +233,17 @@ fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBoo
                 return;
             }
             Ok(LineRead::Line) => {
-                let response = answer(dispatcher, &buf, &mut limiter);
+                let (response, ok) = answer(dispatcher, &buf, &mut limiter, &shared.global);
+                authed |= ok;
                 buf.clear();
                 if let Some(response) = response
                     && write_line(&mut writer, &response).is_err()
                 {
                     return;
                 }
-                deadline = Instant::now() + LINE_TIMEOUT;
+                if authed {
+                    deadline = Instant::now() + LINE_TIMEOUT;
+                }
             }
             // Poll timeout: partial data stays in `buf`; the deadline bounds slow peers.
             Err(e) if is_timeout(&e) && Instant::now() < deadline => {}
@@ -197,16 +252,27 @@ fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBoo
     }
 }
 
-fn answer(dispatcher: &Dispatcher, line: &[u8], limiter: &mut RateLimiter) -> Option<String> {
+/// Answers one line; the flag is true when the request passed the key check.
+fn answer(
+    dispatcher: &Dispatcher,
+    line: &[u8],
+    limiter: &mut RateLimiter,
+    global: &Mutex<RateLimiter>,
+) -> (Option<String>, bool) {
     if line.iter().all(u8::is_ascii_whitespace) {
-        return None;
+        return (None, false);
     }
-    if !limiter.allow(Instant::now()) {
-        return Some(error_line(&ControlError::new(error::RATE_LIMITED, "too many requests")));
+    let now = Instant::now();
+    let global_ok = global.lock().unwrap_or_else(PoisonError::into_inner).allow(now);
+    if !global_ok || !limiter.allow(now) {
+        return (Some(error_line(&ControlError::new(error::RATE_LIMITED, "too many requests"))), false);
     }
     match std::str::from_utf8(line) {
-        Ok(text) => Some(dispatcher.handle_line(text)),
-        Err(_) => Some(error_line(&ControlError::new(error::BAD_REQUEST, "request is not valid UTF-8"))),
+        Ok(text) => {
+            let (response, ok) = dispatcher.handle_line_checked(text);
+            (Some(response), ok)
+        }
+        Err(_) => (Some(error_line(&ControlError::new(error::BAD_REQUEST, "request is not valid UTF-8"))), false),
     }
 }
 
@@ -325,6 +391,94 @@ mod tests {
             }
         }
         assert!(limited > 0);
+    }
+
+    fn start_limited(limits: ServerLimits) -> (ControlServer, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let server =
+            ControlServer::start_with_limits(0, dir.path(), share(Session::new()), Arc::new(NullBridge), limits)
+                .unwrap();
+        (server, dir)
+    }
+
+    fn ping(port: u16, key: &str) -> Value {
+        Conn::open(port).ask(&json!({"id": 1, "key": key, "method": "session.state"}))
+    }
+
+    #[test]
+    fn idle_unauthenticated_connections_free_their_slots() {
+        let limits = ServerLimits {
+            max_connections: 3,
+            pre_auth_timeout: Duration::from_millis(300),
+            ..ServerLimits::default()
+        };
+        let (server, _dir) = start_limited(limits);
+        // Fill every slot with silent connections.
+        let idle: Vec<TcpStream> =
+            (0..3).map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).unwrap()).collect();
+        thread::sleep(Duration::from_millis(1200));
+        // The idle peers were dropped by the server, so a real client gets in.
+        assert_eq!(ping(server.port(), server.key())["ok"], true);
+        drop(idle);
+    }
+
+    #[test]
+    fn wrong_key_does_not_extend_the_pre_auth_deadline() {
+        let limits = ServerLimits { pre_auth_timeout: Duration::from_millis(400), ..ServerLimits::default() };
+        let (server, _dir) = start_limited(limits);
+        let mut c = Conn::open(server.port());
+        let started = Instant::now();
+        let mut closed = false;
+        while started.elapsed() < Duration::from_secs(5) {
+            if c.writer.write_all(b"{\"id\":1,\"key\":\"bad\",\"method\":\"session.state\"}\n").is_err() {
+                closed = true;
+                break;
+            }
+            let mut line = String::new();
+            if c.reader.read_line(&mut line).unwrap_or(0) == 0 {
+                closed = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert!(closed, "a peer that never authenticates must be disconnected");
+    }
+
+    #[test]
+    fn authenticated_connection_survives_past_the_pre_auth_deadline() {
+        let limits = ServerLimits { pre_auth_timeout: Duration::from_millis(300), ..ServerLimits::default() };
+        let (server, _dir) = start_limited(limits);
+        let mut c = Conn::open(server.port());
+        assert_eq!(c.ask(&json!({"id": 1, "key": server.key(), "method": "session.state"}))["ok"], true);
+        thread::sleep(Duration::from_millis(900));
+        assert_eq!(c.ask(&json!({"id": 2, "key": server.key(), "method": "session.state"}))["ok"], true);
+    }
+
+    #[test]
+    fn global_rate_limit_applies_across_connections() {
+        let limits = ServerLimits { global_rate: 5, ..ServerLimits::default() };
+        let (server, _dir) = start_limited(limits);
+        let mut limited = 0;
+        // Each connection stays far below the per-connection budget; together they exceed 5.
+        for _ in 0..12 {
+            if ping(server.port(), server.key())["error"]["code"] == "rate_limited" {
+                limited += 1;
+            }
+        }
+        assert!(limited > 0);
+    }
+
+    #[test]
+    fn mid_line_close_frees_the_slot() {
+        let limits = ServerLimits { max_connections: 2, ..ServerLimits::default() };
+        let (server, _dir) = start_limited(limits);
+        for _ in 0..6 {
+            let mut s = TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).unwrap();
+            s.write_all(b"{\"id\":1,\"key\":\"").unwrap();
+            drop(s);
+        }
+        thread::sleep(Duration::from_millis(300));
+        assert_eq!(ping(server.port(), server.key())["ok"], true);
     }
 
     #[test]

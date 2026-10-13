@@ -2,7 +2,7 @@
 
 use super::{CommandSpec, no_params, parse_params};
 use crate::{CommandError, PendingScan, Session};
-use dirustat_scan::{ScanOptions, start};
+use dirustat_scan::{ScanOptions, start_deferred};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -65,7 +65,10 @@ impl Session {
         if path.is_empty() {
             return Err(CommandError::InvalidParams("path is empty".to_owned()));
         }
-        let handle = start(Path::new(path), ScanOptions::default())
+        // The root is checked on the scan thread: `metadata` on a dead network path can block for
+        // a long time and this runs under the session lock. A bad root surfaces when the scan is
+        // polled (`session.poll` / `session.state`) as a scan error, and the session stays usable.
+        let handle = start_deferred(Path::new(path), ScanOptions::default())
             .map_err(|e| CommandError::InvalidParams(format!("cannot scan {path:?}: {e}")))?;
         self.scan = Some(PendingScan { handle, root: path.to_owned() });
         Ok(())
@@ -150,11 +153,27 @@ mod tests {
         std::fs::write(&file, b"x").unwrap();
         let missing = dir.path().join("missing");
         let mut s = Session::new();
-        for path in ["".to_owned(), file.to_string_lossy().into_owned(), missing.to_string_lossy().into_owned()] {
-            let err = s.execute("scan.start", &json!({"path": path})).unwrap_err();
-            assert_eq!(err.code(), "invalid_params", "{path}");
-        }
+        let err = s.execute("scan.start", &json!({"path": ""})).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
         assert!(!s.is_scanning());
+        // Missing and non-directory roots are found by the scan thread: `scan.start` returns at once
+        // and the error is reported by polling, after which the session is idle and unchanged.
+        for path in [file.to_string_lossy().into_owned(), missing.to_string_lossy().into_owned()] {
+            assert!(s.execute("scan.start", &json!({"path": path})).is_ok(), "{path}");
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let err = loop {
+                match s.execute("session.poll", &json!({})) {
+                    Err(e) => break e,
+                    Ok(_) => {
+                        assert!(Instant::now() < deadline, "bad root was never reported");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            };
+            assert_eq!(err.code(), "invalid_params", "{path}");
+            assert!(!s.is_scanning());
+            assert_eq!(s.state_json()["nodes"], 1);
+        }
         assert_eq!(s.execute("scan.start", &json!({})).unwrap_err().code(), "invalid_params");
         assert_eq!(s.execute("scan.cancel", &json!({})).unwrap_err().code(), "not_enabled");
     }

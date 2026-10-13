@@ -5,7 +5,7 @@
 
 use crate::commands::{self, UI_COMMANDS, UiEffect};
 use crate::palette::{self, PaletteEntry};
-use crate::screenshot::{Region, ScreenshotStatus, Screenshots};
+use crate::screenshot::{Region, SaveOptions, ScreenshotStatus, Screenshots};
 use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
 use crate::{ext_panel, map_panel, tree_panel};
@@ -98,9 +98,20 @@ impl DirustatApp {
         self.state.apply_patch(patch)
     }
 
-    /// Queues a window screenshot (`ui.screenshot`); poll with [`Self::screenshot_status`].
+    /// Queues a trusted window screenshot (the app's own `--screenshot` flag: overwrites and
+    /// creates directories); poll with [`Self::screenshot_status`].
     pub fn request_screenshot(&mut self, path: &str, region: Option<Region>) -> Result<u64, String> {
         self.shots.request(path, region)
+    }
+
+    /// Queues a screenshot with explicit write rules (`ui.screenshot` from the control channel).
+    pub fn request_screenshot_with(
+        &mut self,
+        path: &str,
+        region: Option<Region>,
+        options: SaveOptions,
+    ) -> Result<u64, String> {
+        self.shots.request_with(path, region, options)
     }
 
     pub fn screenshot_status(&self, ticket: u64) -> Option<ScreenshotStatus> {

@@ -3,17 +3,29 @@
 //! The request is asynchronous: `request` returns a ticket, the app sends the viewport command on
 //! its next frame, the backend answers with `Event::Screenshot` a frame or two later, and the
 //! result is polled with `status`. Nothing here blocks or panics on hostile input.
+//!
+//! Writing is conservative because the path can come from a remote control call: an existing file
+//! is refused unless `overwrite` is set, missing directories are not created (except for the
+//! app's own trusted `--screenshot` flag) and the bytes land through a temp file plus rename.
 
 use egui::ColorImage;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 /// Pixels per side above which a capture is rejected instead of encoded.
 const MAX_SIDE: usize = 16_384;
+/// Total pixels above which a capture is rejected (64 MP is about 256 MB of RGBA); bounds memory
+/// for the encoder even when both sides are individually below [`MAX_SIDE`].
+const MAX_PIXELS: usize = 64_000_000;
+/// A request that gets no capture event within this time fails, so lost events cannot occupy the
+/// in-flight slots forever.
+const REQUEST_TTL: Duration = Duration::from_secs(60);
 /// Finished results kept for polling.
 const MAX_FINISHED: usize = 16;
 /// Requests allowed in flight.
 const MAX_PENDING: usize = 8;
+const TIMEOUT_MESSAGE: &str = "timeout: no capture arrived";
 
 /// Region of the window in points (egui logical pixels).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -34,38 +46,100 @@ pub enum ScreenshotStatus {
     Failed { message: String },
 }
 
+/// How a capture is written to disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SaveOptions {
+    /// Replace an existing file. Without it an existing path is an error.
+    pub overwrite: bool,
+    /// Create missing parent directories. Only trusted callers (the app's own `--screenshot`
+    /// flag) set this; the control channel never creates directories.
+    pub create_dirs: bool,
+}
+
+impl SaveOptions {
+    /// Options for the control channel: no directory creation, overwrite only when asked.
+    pub fn controlled(overwrite: bool) -> Self {
+        Self { overwrite, create_dirs: false }
+    }
+
+    /// Options for the user's own command line: overwrite and create directories.
+    pub fn trusted() -> Self {
+        Self { overwrite: true, create_dirs: true }
+    }
+}
+
 #[derive(Debug)]
 struct Entry {
     ticket: u64,
     path: PathBuf,
     region: Option<Region>,
+    options: SaveOptions,
+    deadline: Instant,
     sent: bool,
     status: ScreenshotStatus,
 }
 
 /// Queue of screenshot requests, owned by the app.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Screenshots {
     next: u64,
+    ttl: Duration,
     entries: Vec<Entry>,
 }
 
+impl Default for Screenshots {
+    fn default() -> Self {
+        Self::with_ttl(REQUEST_TTL)
+    }
+}
+
 impl Screenshots {
-    /// Queues a capture of the whole window (or `region`) into `path` (must end in `.png`).
+    /// Queue with an explicit request lifetime (tests use short ones).
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self { next: 0, ttl, entries: Vec::new() }
+    }
+
+    /// Queues a trusted capture (overwrites, creates directories); see [`SaveOptions::trusted`].
     pub fn request(&mut self, path: &str, region: Option<Region>) -> Result<u64, String> {
+        self.request_with(path, region, SaveOptions::trusted())
+    }
+
+    /// Fails pending requests whose deadline has passed.
+    pub fn expire(&mut self, now: Instant) {
+        for e in self.entries.iter_mut().filter(|e| e.status == ScreenshotStatus::Pending && now >= e.deadline) {
+            e.status = ScreenshotStatus::Failed { message: TIMEOUT_MESSAGE.to_owned() };
+        }
+    }
+
+    /// Queues a capture of the whole window (or `region`) into `path` (must end in `.png`).
+    pub fn request_with(&mut self, path: &str, region: Option<Region>, options: SaveOptions) -> Result<u64, String> {
         let path = validate_path(path)?;
+        if !options.overwrite && std::fs::symlink_metadata(&path).is_ok() {
+            return Err(format!("{} exists; pass overwrite: true to replace it", path.display()));
+        }
         if let Some(r) = region
             && !(r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite() && r.w > 0.0 && r.h > 0.0)
         {
             return Err("region must be finite with positive width and height".to_owned());
         }
+        let now = Instant::now();
+        self.expire(now);
         let pending = self.entries.iter().filter(|e| e.status == ScreenshotStatus::Pending).count();
         if pending >= MAX_PENDING {
             return Err("too many screenshots in flight".to_owned());
         }
         self.next = self.next.saturating_add(1);
         let ticket = self.next;
-        self.entries.push(Entry { ticket, path, region, sent: false, status: ScreenshotStatus::Pending });
+        let deadline = now + self.ttl;
+        self.entries.push(Entry {
+            ticket,
+            path,
+            region,
+            options,
+            deadline,
+            sent: false,
+            status: ScreenshotStatus::Pending,
+        });
         let finished = self.entries.iter().filter(|e| e.status != ScreenshotStatus::Pending).count();
         if finished > MAX_FINISHED {
             let mut drop_n = finished.saturating_sub(MAX_FINISHED);
@@ -82,7 +156,11 @@ impl Screenshots {
 
     /// Current status of a ticket; `None` for unknown or expired tickets.
     pub fn status(&self, ticket: u64) -> Option<ScreenshotStatus> {
-        self.entries.iter().find(|e| e.ticket == ticket).map(|e| e.status.clone())
+        let e = self.entries.iter().find(|e| e.ticket == ticket)?;
+        if e.status == ScreenshotStatus::Pending && Instant::now() >= e.deadline {
+            return Some(ScreenshotStatus::Failed { message: TIMEOUT_MESSAGE.to_owned() });
+        }
+        Some(e.status.clone())
     }
 
     pub fn has_pending(&self) -> bool {
@@ -91,6 +169,7 @@ impl Screenshots {
 
     /// Sends the viewport command for requests not sent yet and consumes finished captures.
     pub fn pump(&mut self, ctx: &egui::Context) {
+        self.expire(Instant::now());
         for e in self.entries.iter_mut().filter(|e| !e.sent && e.status == ScreenshotStatus::Pending) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::new(e.ticket)));
             e.sent = true;
@@ -119,7 +198,7 @@ impl Screenshots {
     /// Stores a captured image for `ticket` (also the entry point for tests).
     pub fn finish(&mut self, ticket: u64, image: &ColorImage, pixels_per_point: f32) {
         let Some(e) = self.entries.iter_mut().find(|e| e.ticket == ticket) else { return };
-        e.status = match save_png(&e.path, image, e.region, pixels_per_point) {
+        e.status = match save_png(&e.path, image, e.region, pixels_per_point, e.options) {
             Ok((width, height)) => {
                 ScreenshotStatus::Done { path: e.path.to_string_lossy().into_owned(), width, height }
             }
@@ -159,6 +238,11 @@ fn pixel_rect(size: [usize; 2], region: Option<Region>, ppp: f32) -> Result<(usi
     Ok((x0, y0, w, h))
 }
 
+/// True if a `w` x `h` image is non-empty and within the side and total pixel caps.
+fn dims_ok(w: usize, h: usize) -> bool {
+    w > 0 && h > 0 && w <= MAX_SIDE && h <= MAX_SIDE && w.saturating_mul(h) <= MAX_PIXELS
+}
+
 /// Encodes (a region of) `image` as RGBA PNG bytes; returns the bytes and the pixel size.
 pub fn encode_png(
     image: &ColorImage,
@@ -166,7 +250,7 @@ pub fn encode_png(
     pixels_per_point: f32,
 ) -> Result<(Vec<u8>, u32, u32), String> {
     let [iw, ih] = image.size;
-    if iw == 0 || ih == 0 || iw > MAX_SIDE || ih > MAX_SIDE || image.pixels.len() != iw.saturating_mul(ih) {
+    if !dims_ok(iw, ih) || image.pixels.len() != iw.saturating_mul(ih) {
         return Err("captured image has an unusable size".to_owned());
     }
     let (x0, y0, w, h) = pixel_rect(image.size, region, pixels_per_point)?;
@@ -191,18 +275,53 @@ pub fn encode_png(
 }
 
 /// Saves (a region of) `image` as a PNG file; returns the pixel size written.
+///
+/// The bytes go to a temp file next to the target and are renamed into place, so readers never see
+/// a half-written PNG and a symlink at the target is replaced, not followed.
 pub fn save_png(
     path: &Path,
     image: &ColorImage,
     region: Option<Region>,
     pixels_per_point: f32,
+    options: SaveOptions,
 ) -> Result<(u32, u32), String> {
     let (bytes, w, h) = encode_png(image, region, pixels_per_point)?;
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    if options.create_dirs {
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
-    std::fs::write(path, bytes).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    if !options.overwrite && std::fs::symlink_metadata(path).is_ok() {
+        return Err(format!("{} exists; pass overwrite: true to replace it", path.display()));
+    }
+    let tmp = write_temp(dir, &bytes).map_err(|e| format!("cannot write in {}: {e}", dir.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("cannot write {}: {e}", path.display()));
+    }
     Ok((w, h))
+}
+
+/// Writes `bytes` to a fresh uniquely named file in `dir` (never reusing an existing one).
+fn write_temp(dir: &Path, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    use std::io::Write;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let mut last = None;
+    for attempt in 0_u32..8 {
+        let tmp = dir.join(format!(".dirustat-shot-{}-{nanos}-{attempt}.tmp", std::process::id()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(bytes).and_then(|()| f.flush()) {
+                    drop(f);
+                    let _ = std::fs::remove_file(&tmp);
+                    return Err(e);
+                }
+                return Ok(tmp);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(e),
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::other("no temp name available")))
 }
 
 #[cfg(test)]
@@ -272,6 +391,68 @@ mod tests {
         assert!(!s.has_pending());
         assert_eq!(s.status(999), None);
         s.finish(999, &image(1, 1), 1.0);
+    }
+
+    #[test]
+    fn existing_file_is_refused_unless_overwrite_and_no_temp_files_remain() {
+        let Ok(dir) = tempfile::tempdir() else { return };
+        let path = dir.path().join("keep.png");
+        assert!(std::fs::write(&path, b"precious").is_ok());
+        let p = path.to_string_lossy().into_owned();
+        let mut s = Screenshots::default();
+        assert!(s.request_with(&p, None, SaveOptions::controlled(false)).is_err());
+        // Even if the file appears after the request, the save step refuses.
+        let other = dir.path().join("late.png");
+        let Ok(t) = s.request_with(&other.to_string_lossy(), None, SaveOptions::controlled(false)) else { return };
+        assert!(std::fs::write(&other, b"late").is_ok());
+        s.finish(t, &image(4, 4), 1.0);
+        assert!(matches!(s.status(t), Some(ScreenshotStatus::Failed { .. })));
+        assert_eq!(std::fs::read(&other).unwrap_or_default(), b"late");
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), b"precious");
+        let Ok(t) = s.request_with(&p, None, SaveOptions::controlled(true)) else { return };
+        s.finish(t, &image(4, 4), 1.0);
+        assert!(matches!(s.status(t), Some(ScreenshotStatus::Done { .. })));
+        assert_ne!(std::fs::read(&path).unwrap_or_default(), b"precious");
+        let leftovers = std::fs::read_dir(dir.path()).map_or(0, |d| {
+            d.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count()
+        });
+        assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn controlled_requests_do_not_create_directories() {
+        let Ok(dir) = tempfile::tempdir() else { return };
+        let path = dir.path().join("missing").join("deeper").join("x.png");
+        let mut s = Screenshots::default();
+        let Ok(t) = s.request_with(&path.to_string_lossy(), None, SaveOptions::controlled(false)) else { return };
+        s.finish(t, &image(4, 4), 1.0);
+        assert!(matches!(s.status(t), Some(ScreenshotStatus::Failed { .. })));
+        assert!(!dir.path().join("missing").exists());
+    }
+
+    #[test]
+    fn pixel_cap_applies_to_the_total() {
+        assert!(dims_ok(8000, 8000));
+        assert!(!dims_ok(8001, 8000));
+        assert!(!dims_ok(MAX_SIDE, MAX_SIDE));
+        assert!(!dims_ok(0, 5));
+        let big = ColorImage { size: [10_000, 7_000], source_size: egui::Vec2::ZERO, pixels: Vec::new() };
+        assert!(encode_png(&big, None, 1.0).is_err());
+    }
+
+    #[test]
+    fn stale_pending_requests_expire_and_free_their_slot() {
+        let mut s = Screenshots::with_ttl(Duration::ZERO);
+        let mut tickets = Vec::new();
+        for _ in 0..MAX_PENDING {
+            tickets.extend(s.request("x.png", None).ok());
+        }
+        // Without the deadline this would stay "too many screenshots in flight" forever.
+        assert!(s.request("x.png", None).is_ok());
+        assert!(matches!(
+            tickets.first().and_then(|t| s.status(*t)),
+            Some(ScreenshotStatus::Failed { message }) if message.starts_with("timeout")
+        ));
     }
 
     #[test]

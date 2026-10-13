@@ -1,49 +1,28 @@
 //! The window key: generation, the per-OS default directory and the `control-key.local-<port>` file.
 
-use std::collections::hash_map::RandomState;
 use std::fs;
-use std::hash::{BuildHasher, Hasher};
-use std::io::{self, Read, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Key length in random bytes (hex-encoded to twice as many characters).
 const KEY_BYTES: usize = 32;
 
-/// Generates a fresh key (64 hex characters). Uses `/dev/urandom` where it exists; otherwise the
-/// OS-seeded `RandomState` hasher mixed with the clock, pid and a counter. The key only guards a
-/// loopback socket against other local processes that cannot read the key file.
-pub fn generate_key() -> String {
+/// Generates a fresh key (64 hex characters) from the OS random generator (`getrandom`). It fails
+/// closed: if the OS cannot provide randomness there is no weaker fallback, the caller gets an
+/// error and must not start the control channel.
+pub fn generate_key() -> io::Result<String> {
+    generate_key_with(|bytes| getrandom::fill(bytes).map_err(|e| io::Error::other(format!("OS random source: {e}"))))
+}
+
+/// [`generate_key`] with an injectable randomness source (tests simulate a failing RNG).
+fn generate_key_with(fill: impl FnOnce(&mut [u8]) -> io::Result<()>) -> io::Result<String> {
     let mut bytes = [0_u8; KEY_BYTES];
-    if !fill_from_os(&mut bytes) {
-        fill_from_hasher(&mut bytes);
-    }
+    fill(&mut bytes)?;
     let mut out = String::with_capacity(KEY_BYTES.saturating_mul(2));
     for b in bytes {
         out.push_str(&format!("{b:02x}"));
     }
-    out
-}
-
-fn fill_from_os(bytes: &mut [u8]) -> bool {
-    fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(bytes)).is_ok()
-}
-
-fn fill_from_hasher(bytes: &mut [u8]) {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    for chunk in bytes.chunks_mut(8) {
-        // `RandomState::new` draws its keys from the OS random source.
-        let mut hasher = RandomState::new().build_hasher();
-        hasher.write_u128(nanos);
-        hasher.write_u32(std::process::id());
-        hasher.write_u64(COUNTER.fetch_add(1, Ordering::Relaxed));
-        let word = hasher.finish().to_le_bytes();
-        for (dst, src) in chunk.iter_mut().zip(word) {
-            *dst = src;
-        }
-    }
+    Ok(out)
 }
 
 /// File name of the key for a control port.
@@ -65,19 +44,37 @@ pub fn default_key_dir() -> Option<PathBuf> {
 }
 
 /// Writes the key file (owner-only permissions on Unix) and returns its path.
+///
+/// A leftover file (for example from a crashed run, or one planted by another process) is removed
+/// first and the new one is created exclusively (`create_new`), so the key is never written
+/// through an existing file or link and the file always has the intended permissions.
 pub fn write_key_file(dir: &Path, port: u16, key: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(dir)?;
     let path = dir.join(key_file_name(port));
+    match fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
     let mut file = options.open(&path)?;
-    file.write_all(key.as_bytes())?;
-    file.flush()?;
+    let written = file.write_all(key.as_bytes()).and_then(|()| file.flush());
+    if let Err(e) = written {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return Err(e);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    }
     Ok(path)
 }
 
@@ -93,14 +90,32 @@ mod tests {
 
     #[test]
     fn keys_are_hex_and_distinct() {
-        let a = generate_key();
-        let b = generate_key();
+        let a = generate_key().unwrap();
+        let b = generate_key().unwrap();
         assert_eq!(a.len(), 64);
         assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(a, b);
-        let mut bytes = [0_u8; 32];
-        fill_from_hasher(&mut bytes);
-        assert!(bytes.iter().any(|b| *b != 0));
+    }
+
+    #[test]
+    fn failing_rng_fails_closed() {
+        let r = generate_key_with(|_| Err(io::Error::other("no entropy")));
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn stale_key_file_is_replaced_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join(key_file_name(77));
+        fs::write(&stale, "old-key-that-is-much-longer-than-the-new-one").unwrap();
+        let path = write_key_file(dir.path(), 77, "new").unwrap();
+        assert_eq!(fs::read_to_string(path).unwrap(), "new");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.path().join(key_file_name(77))).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
     }
 
     #[test]

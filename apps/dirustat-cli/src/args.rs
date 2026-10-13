@@ -10,18 +10,23 @@ dirustat-cli: headless diRUSTat
 
 USAGE:
     dirustat-cli commands [--json]
-    dirustat-cli scan <folder> [--json <out.json>] [--size-mode logical|allocated] [--top <N>]
+    dirustat-cli scan <folder> [--json <out.json>] [--size-mode logical|allocated] [--top <N>] [--timeout <secs>]
     dirustat-cli info <folder>
-    dirustat-cli run [--scan <folder>] --cmd 'id={json params}'... [--confirm]
+    dirustat-cli run [--scan <folder>] --cmd 'id={json params}'... [--confirm] [--timeout <secs>]
     dirustat-cli mcp [--connect <127.0.0.1:port>]
     dirustat-cli --help
 
 EXIT CODES:
-    0 ok, 1 command error (stable error code on stderr), 2 usage error
+    0 ok, 1 command error or scan timeout (stable error code on stderr), 2 usage error
+
+--timeout bounds the total time spent waiting for scans; on expiry the scan is cancelled and the
+exit code is 1.
 ";
 
 /// Upper bound for `--top`; larger values are clamped.
 pub const MAX_TOP: usize = 100_000;
+/// Upper bound for `--timeout`, in seconds (one week).
+pub const MAX_TIMEOUT_SECS: u64 = 7 * 24 * 3600;
 /// Default for `--top`.
 pub const DEFAULT_TOP: usize = 20;
 
@@ -30,9 +35,9 @@ pub const DEFAULT_TOP: usize = 20;
 pub enum Cli {
     Help,
     Commands { json: bool },
-    Scan { folder: String, json_out: Option<String>, size_mode: SizeMode, top: usize },
+    Scan { folder: String, json_out: Option<String>, size_mode: SizeMode, top: usize, timeout: Option<u64> },
     Info { folder: String },
-    Run { scan: Option<String>, cmds: Vec<CmdCall>, confirm: bool },
+    Run { scan: Option<String>, cmds: Vec<CmdCall>, confirm: bool, timeout: Option<u64> },
     Mcp { connect: Option<String> },
 }
 
@@ -120,6 +125,14 @@ fn non_empty<'a>(name: &str, v: &'a str) -> Result<&'a str, UsageError> {
     if v.is_empty() { usage(format!("{name} value must not be empty")) } else { Ok(v) }
 }
 
+/// Parses a `--timeout` value: whole seconds, 1..=[`MAX_TIMEOUT_SECS`].
+fn parse_timeout(v: &str) -> Result<u64, UsageError> {
+    match v.parse::<u64>() {
+        Ok(n) if (1..=MAX_TIMEOUT_SECS).contains(&n) => Ok(n),
+        _ => usage(format!("--timeout needs whole seconds in 1..={MAX_TIMEOUT_SECS}, got {v:?}")),
+    }
+}
+
 fn parse_commands(args: &[&str]) -> Result<Cli, UsageError> {
     let mut json = false;
     for a in args {
@@ -147,6 +160,7 @@ fn parse_scan(args: &[&str]) -> Result<Cli, UsageError> {
     let mut json_out = None;
     let mut size_mode = SizeMode::default();
     let mut top = DEFAULT_TOP;
+    let mut timeout = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let (name, inline) = split_opt(arg);
@@ -166,11 +180,12 @@ fn parse_scan(args: &[&str]) -> Result<Cli, UsageError> {
                     Err(_) => return usage(format!("--top needs a non-negative integer, got {v:?}")),
                 };
             }
+            "--timeout" => timeout = Some(parse_timeout(value(name, inline, &mut it)?)?),
             _ => parse_folder(&mut folder, arg)?,
         }
     }
     match folder {
-        Some(folder) => Ok(Cli::Scan { folder, json_out, size_mode, top }),
+        Some(folder) => Ok(Cli::Scan { folder, json_out, size_mode, top, timeout }),
         None => usage("scan needs a folder"),
     }
 }
@@ -205,6 +220,7 @@ fn parse_run(args: &[&str]) -> Result<Cli, UsageError> {
     let mut scan = None;
     let mut cmds = Vec::new();
     let mut confirm = false;
+    let mut timeout = None;
     let mut it = args.iter();
     while let Some(arg) = it.next() {
         let (name, inline) = split_opt(arg);
@@ -212,13 +228,14 @@ fn parse_run(args: &[&str]) -> Result<Cli, UsageError> {
             "--scan" => scan = Some(non_empty(name, value(name, inline, &mut it)?)?.to_owned()),
             "--cmd" => cmds.push(parse_cmd(value(name, inline, &mut it)?)?),
             "--confirm" if inline.is_none() => confirm = true,
+            "--timeout" => timeout = Some(parse_timeout(value(name, inline, &mut it)?)?),
             _ => return usage(format!("unexpected argument for run: {arg}")),
         }
     }
     if cmds.is_empty() && scan.is_none() {
         return usage("run needs at least one --cmd (or --scan)");
     }
-    Ok(Cli::Run { scan, cmds, confirm })
+    Ok(Cli::Run { scan, cmds, confirm, timeout })
 }
 
 #[cfg(test)]
@@ -256,7 +273,8 @@ mod tests {
                 folder: "/tmp/x".into(),
                 json_out: Some("o.json".into()),
                 size_mode: SizeMode::Logical,
-                top: 5
+                top: 5,
+                timeout: None
             }
         );
     }
@@ -285,6 +303,20 @@ mod tests {
     }
 
     #[test]
+    fn timeout_option_is_parsed_and_bounded() {
+        assert!(matches!(p(&["scan", "d", "--timeout", "30"]), Ok(Cli::Scan { timeout: Some(30), .. })));
+        assert!(matches!(p(&["scan", "d", "--timeout=1"]), Ok(Cli::Scan { timeout: Some(1), .. })));
+        assert!(matches!(p(&["run", "--scan", "d", "--timeout", "5"]), Ok(Cli::Run { timeout: Some(5), .. })));
+        assert!(matches!(p(&["scan", "d"]), Ok(Cli::Scan { timeout: None, .. })));
+        for bad in ["0", "-1", "x", "", "1.5", "604801", "99999999999999999999"] {
+            assert!(p(&["scan", "d", "--timeout", bad]).is_err(), "{bad:?}");
+            assert!(p(&["run", "--scan", "d", "--timeout", bad]).is_err(), "{bad:?}");
+        }
+        assert!(p(&["scan", "d", "--timeout"]).is_err());
+        assert!(p(&["info", "d", "--timeout", "5"]).is_err());
+    }
+
+    #[test]
     fn info_needs_one_folder() {
         assert_eq!(p(&["info", "d"]), Ok(Cli::Info { folder: "d".into() }));
         assert!(p(&["info"]).is_err());
@@ -303,7 +335,8 @@ mod tests {
                     CmdCall { id: "select.node".into(), params: json!({"id": 1}) },
                     CmdCall { id: "session.state".into(), params: Value::Null },
                 ],
-                confirm: true
+                confirm: true,
+                timeout: None
             }
         );
     }

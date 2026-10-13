@@ -9,6 +9,10 @@ use serde_json::{Value, json};
 pub const MAX_DEPTH: u32 = 8;
 /// Most descendant nodes returned by one call.
 pub const MAX_LIMIT: usize = 1000;
+/// Most nodes one call may examine (children collected for sorting, children counted). The
+/// session mutex is held meanwhile, so this bounds how long a huge directory can stall other
+/// callers; past it the answer is marked `truncated` and `visit_capped`.
+pub const MAX_VISITED: usize = 50_000;
 const DEFAULT_DEPTH: u32 = 1;
 const DEFAULT_LIMIT: usize = 100;
 
@@ -42,9 +46,14 @@ pub fn session_tree(tree: &Tree, params: &Value) -> Result<Value, ControlError> 
             find_node(tree, index).ok_or_else(|| ControlError::invalid_params(format!("no node with id {index}")))?
         }
     };
-    let mut ctx = Ctx { tree, mode, budget: limit, truncated: false };
+    let mut ctx = Ctx { tree, mode, budget: limit, visit: MAX_VISITED, truncated: false, visit_capped: false };
     let mut node = ctx.render(id, depth, offset);
-    let total_children = tree.children(id).count();
+    // A lower bound when the visit budget ran out (`visit_capped`).
+    let total_children = tree.children(id).take(MAX_VISITED).count();
+    if total_children >= MAX_VISITED {
+        ctx.visit_capped = true;
+        ctx.truncated = true;
+    }
     if let Some(obj) = node.as_object_mut() {
         obj.insert("total_children".to_owned(), json!(total_children));
     }
@@ -55,6 +64,7 @@ pub fn session_tree(tree: &Tree, params: &Value) -> Result<Value, ControlError> 
         "limit": limit,
         "depth": depth,
         "truncated": ctx.truncated,
+        "visit_capped": ctx.visit_capped,
         "node": node,
     }))
 }
@@ -67,20 +77,9 @@ fn clamp_usize(v: Option<u64>, default: usize, max: usize) -> usize {
     v.map_or(default, |v| usize::try_from(v).unwrap_or(max).min(max))
 }
 
-/// Finds the node whose arena index is `index` with an iterative walk (ids cannot be forged).
+/// Resolves an arena index to a node id in O(1).
 pub fn find_node(tree: &Tree, index: u64) -> Option<NodeId> {
-    let index = usize::try_from(index).ok()?;
-    if index >= tree.len() {
-        return None;
-    }
-    let mut stack = vec![tree.root()];
-    while let Some(node) = stack.pop() {
-        if node.index() == index {
-            return Some(node);
-        }
-        stack.extend(tree.children(node));
-    }
-    None
+    tree.node_at(usize::try_from(index).ok()?)
 }
 
 struct Ctx<'a> {
@@ -88,7 +87,10 @@ struct Ctx<'a> {
     mode: SizeMode,
     /// Descendant nodes still allowed in the output.
     budget: usize,
+    /// Nodes still allowed to be examined.
+    visit: usize,
     truncated: bool,
+    visit_capped: bool,
 }
 
 impl Ctx<'_> {
@@ -101,8 +103,16 @@ impl Ctx<'_> {
         if depth == 0 {
             return out;
         }
-        let mut kids: Vec<(NodeId, u64)> =
-            self.tree.children(id).map(|c| (c, self.tree.get(c).map_or(0, |n| n.total_size(self.mode)))).collect();
+        let mut kids: Vec<(NodeId, u64)> = Vec::new();
+        for c in self.tree.children(id) {
+            if self.visit == 0 {
+                self.truncated = true;
+                self.visit_capped = true;
+                break;
+            }
+            self.visit = self.visit.saturating_sub(1);
+            kids.push((c, self.tree.get(c).map_or(0, |n| n.total_size(self.mode))));
+        }
         kids.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let mut rendered = Vec::new();
         let mut shown = 0_usize;
@@ -196,6 +206,23 @@ mod tests {
         let v = session_tree(&t, &json!({"depth": u64::MAX, "limit": u64::MAX})).unwrap();
         assert_eq!(v["depth"], MAX_DEPTH);
         assert_eq!(v["limit"], MAX_LIMIT);
+    }
+
+    #[test]
+    fn huge_directories_are_visited_with_a_budget() {
+        let mut t = Tree::new("root");
+        let root = t.root();
+        for i in 0..(MAX_VISITED + 10) {
+            t.add_child(root, &format!("f{i}"), NodeKind::File, 1).unwrap();
+        }
+        t.aggregate();
+        let v = session_tree(&t, &json!({"depth": 1, "limit": 5})).unwrap();
+        assert_eq!(v["visit_capped"], true);
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["node"]["total_children"], MAX_VISITED);
+        assert_eq!(v["node"]["children"].as_array().unwrap().len(), 5);
+        let small = session_tree(&sample(), &json!({})).unwrap();
+        assert_eq!(small["visit_capped"], false);
     }
 
     #[test]

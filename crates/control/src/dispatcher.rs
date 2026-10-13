@@ -73,37 +73,52 @@ impl Dispatcher {
 
     /// Handles one request line and returns one response line (no trailing newline). Never panics.
     pub fn handle_line(&self, line: &str) -> String {
-        let response = if line.len() > MAX_REQUEST_BYTES {
-            failure(&Value::Null, &ControlError::new(error::TOO_LARGE, "request exceeds the size limit"))
+        self.handle_line_checked(line).0
+    }
+
+    /// Like [`Self::handle_line`]; the flag tells whether the request passed the key check (always
+    /// true for a dispatcher without a key). The server uses it to end the pre-auth phase.
+    pub fn handle_line_checked(&self, line: &str) -> (String, bool) {
+        let (response, authorized) = if line.len() > MAX_REQUEST_BYTES {
+            (failure(&Value::Null, &ControlError::new(error::TOO_LARGE, "request exceeds the size limit")), false)
         } else {
             match serde_json::from_str::<Value>(line) {
-                Ok(request) => self.handle_value(&request),
-                Err(e) => failure(&Value::Null, &ControlError::new(error::BAD_REQUEST, format!("malformed JSON: {e}"))),
+                Ok(request) => self.handle_value_checked(&request),
+                Err(e) => (
+                    failure(&Value::Null, &ControlError::new(error::BAD_REQUEST, format!("malformed JSON: {e}"))),
+                    false,
+                ),
             }
         };
-        serialize_bounded(&response)
+        (serialize_bounded(&response), authorized)
     }
 
     /// Handles one parsed request and returns the response object.
     pub fn handle_value(&self, request: &Value) -> Value {
+        self.handle_value_checked(request).0
+    }
+
+    fn handle_value_checked(&self, request: &Value) -> (Value, bool) {
         let Some(obj) = request.as_object() else {
-            return failure(&Value::Null, &ControlError::new(error::BAD_REQUEST, "request must be a JSON object"));
+            let err = ControlError::new(error::BAD_REQUEST, "request must be a JSON object");
+            return (failure(&Value::Null, &err), false);
         };
         let id = match obj.get("id") {
             None | Some(Value::Null) => Value::Null,
             Some(v @ (Value::Number(_) | Value::String(_))) => v.clone(),
             Some(_) => {
-                return failure(&Value::Null, &ControlError::new(error::BAD_REQUEST, "id must be a number or string"));
+                let err = ControlError::new(error::BAD_REQUEST, "id must be a number or string");
+                return (failure(&Value::Null, &err), false);
             }
         };
         if let Some(expected) = &self.key {
             let given = obj.get("key").and_then(Value::as_str).unwrap_or("");
             if !constant_time_eq(expected.as_bytes(), given.as_bytes()) {
-                return failure(&id, &ControlError::new(error::UNAUTHORIZED, "missing or wrong key"));
+                return (failure(&id, &ControlError::new(error::UNAUTHORIZED, "missing or wrong key")), false);
             }
         }
         let Some(method) = obj.get("method").and_then(Value::as_str) else {
-            return failure(&id, &ControlError::new(error::BAD_REQUEST, "method must be a string"));
+            return (failure(&id, &ControlError::new(error::BAD_REQUEST, "method must be a string")), true);
         };
         let empty = Value::Object(Map::new());
         let params = match obj.get("params") {
@@ -111,8 +126,8 @@ impl Dispatcher {
             Some(p) => p,
         };
         match self.call_guarded(method, params) {
-            Ok(result) => json!({ "id": id, "ok": true, "result": result }),
-            Err(err) => failure(&id, &err),
+            Ok(result) => (json!({ "id": id, "ok": true, "result": result }), true),
+            Err(err) => (failure(&id, &err), true),
         }
     }
 
@@ -166,6 +181,14 @@ impl Dispatcher {
             params: Value,
         }
         let p = P::deserialize(params).map_err(|e| ControlError::invalid_params(e.to_string()))?;
+        if p.command == "scan.start"
+            && let Some(path) = p.params.get("path").and_then(Value::as_str)
+            && is_unc_path(path)
+        {
+            // A remote caller must not be able to point the scanner at a network share (it can
+            // hang on a dead server and leaks credentials to it). The CLI and UI are not affected.
+            return Err(ControlError::invalid_params("UNC paths are not supported over control"));
+        }
         let result = lock_session(&self.session).execute(&p.command, &p.params)?;
         Ok(result)
     }
@@ -227,6 +250,16 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
+/// True for server/share style paths (two leading separators, either kind) and the extended
+/// `\\?\UNC\...` form; extended local paths such as `\\?\C:\...` are not UNC.
+fn is_unc_path(path: &str) -> bool {
+    let norm: String = path.trim_start().chars().take(8).map(|c| if c == '/' { '\\' } else { c }).collect();
+    if let Some(rest) = norm.strip_prefix(r"\\?\") {
+        return rest.get(..3).is_some_and(|s| s.eq_ignore_ascii_case("UNC"));
+    }
+    norm.starts_with(r"\\")
+}
+
 fn expect_empty(params: &Value) -> Result<(), ControlError> {
     match params {
         Value::Object(m) if m.is_empty() => Ok(()),
@@ -250,7 +283,7 @@ impl<'a> ObjectParams<'a> {
 
 fn parse_screenshot(params: &Value) -> Result<ScreenshotRequest, ControlError> {
     let obj = ObjectParams::parse(params)?;
-    if let Some(unknown) = obj.0.keys().find(|k| !matches!(k.as_str(), "path" | "region")) {
+    if let Some(unknown) = obj.0.keys().find(|k| !matches!(k.as_str(), "path" | "region" | "overwrite")) {
         return Err(ControlError::invalid_params(format!("unknown field `{unknown}`")));
     }
     let path = obj.get("path")?.as_str().ok_or_else(|| ControlError::invalid_params("path must be a string"))?;
@@ -261,7 +294,12 @@ fn parse_screenshot(params: &Value) -> Result<ScreenshotRequest, ControlError> {
         None | Some(Value::Null) => None,
         Some(v) => Some(parse_region(v)?),
     };
-    Ok(ScreenshotRequest { path: PathBuf::from(path), region })
+    let overwrite = match obj.0.get("overwrite") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(ControlError::invalid_params("overwrite must be a boolean")),
+    };
+    Ok(ScreenshotRequest { path: PathBuf::from(path), region, overwrite })
 }
 
 fn parse_region(value: &Value) -> Result<Region, ControlError> {
@@ -299,7 +337,7 @@ mod tests {
             Ok(json!({"applied": patch}))
         }
         fn ui_screenshot(&self, request: &ScreenshotRequest) -> Result<Value, ControlError> {
-            Ok(json!({"path": request.path, "region": request.region.is_some()}))
+            Ok(json!({"path": request.path, "region": request.region.is_some(), "overwrite": request.overwrite}))
         }
         fn app_quit(&self) -> Result<Value, ControlError> {
             self.quits.fetch_add(1, Ordering::SeqCst);
@@ -404,6 +442,22 @@ mod tests {
     }
 
     #[test]
+    fn unc_scan_roots_are_refused_over_control() {
+        let (d, _) = fake();
+        for path in [r"\\server\share", "//server/share", r"\\?\UNC\server\share", r"\\.\C:", r"  \\host\x"] {
+            let v = call(&d, "engine.execute", json!({"command": "scan.start", "params": {"path": path}}));
+            assert_eq!(code(&v), "invalid_params", "{path}");
+            assert!(v["error"]["message"].as_str().unwrap().contains("UNC"), "{path}");
+        }
+        assert!(!is_unc_path(r"C:\Users"));
+        assert!(!is_unc_path(r"\\?\C:\Users"));
+        assert!(!is_unc_path("/home/user"));
+        assert!(!is_unc_path(""));
+        // The session never started a scan.
+        assert_eq!(call(&d, "session.state", json!({}))["result"]["scanning"], false);
+    }
+
+    #[test]
     fn ui_methods_delegate_to_the_bridge() {
         let (d, bridge) = fake();
         assert_eq!(call(&d, "ui.state", json!({}))["result"]["panel"], "tree");
@@ -412,6 +466,9 @@ mod tests {
         let v = call(&d, "ui.screenshot", json!({"path": "shot.png", "region": {"x": 0, "y": 1, "w": 10, "h": 10}}));
         assert_eq!(v["result"]["path"], "shot.png");
         assert_eq!(v["result"]["region"], true);
+        assert_eq!(v["result"]["overwrite"], false);
+        let v = call(&d, "ui.screenshot", json!({"path": "shot.png", "overwrite": true}));
+        assert_eq!(v["result"]["overwrite"], true);
         assert_eq!(call(&d, "app.quit", json!({}))["ok"], true);
         assert_eq!(bridge.quits.load(Ordering::SeqCst), 1);
     }
@@ -433,6 +490,7 @@ mod tests {
             json!({"path": "a.png", "region": {"x": -1, "y": 0, "w": 5, "h": 5}}),
             json!({"path": "a.png", "region": {"x": 0, "y": 0, "w": 5}}),
             json!({"path": "a.png", "region": "all"}),
+            json!({"path": "a.png", "overwrite": "yes"}),
             json!(null),
         ] {
             let v = call(&d, "ui.screenshot", p.clone());
@@ -512,6 +570,18 @@ mod tests {
         assert_eq!(code(&v), "unauthorized");
         // Wrong key is rejected before the method is looked at.
         assert_eq!(code(&send(&d, &json!({"key": "x"}))), "unauthorized");
+    }
+
+    #[test]
+    fn checked_flag_reports_the_key_result() {
+        let d = Dispatcher::headless(share(Session::new())).with_key("secret");
+        let line = |key: &str| json!({"id": 1, "key": key, "method": "engine.commands"}).to_string();
+        assert!(d.handle_line_checked(&line("secret")).1);
+        assert!(!d.handle_line_checked(&line("nope")).1);
+        assert!(!d.handle_line_checked("{oops").1);
+        // A valid key with a bad method is still an authorized peer.
+        assert!(d.handle_line_checked(&json!({"key": "secret"}).to_string()).1);
+        assert!(Dispatcher::headless(share(Session::new())).handle_line_checked(&line("")).1);
     }
 
     #[test]

@@ -208,6 +208,15 @@ impl Tree {
         self.nodes.get(id.index())
     }
 
+    /// The id of the node stored at arena `index`, if there is one. O(1); used to resolve indices
+    /// reported to (and echoed back by) agents without walking the tree.
+    pub fn node_at(&self, index: usize) -> Option<NodeId> {
+        if index >= self.nodes.len() {
+            return None;
+        }
+        u32::try_from(index).ok().map(NodeId)
+    }
+
     /// Adds a child with equal logical and allocated size. Totals are valid after `aggregate`.
     pub fn add_child(&mut self, parent: NodeId, name: &str, kind: NodeKind, size: u64) -> Result<NodeId, ModelError> {
         self.add_node(parent, name, kind, NodeData::with_size(size))
@@ -336,6 +345,16 @@ mod tests {
 
     const A: SizeMode = SizeMode::Allocated;
     const L: SizeMode = SizeMode::Logical;
+
+    #[test]
+    fn node_at_resolves_arena_indices_in_constant_time() {
+        let mut t = Tree::new("r");
+        let a = t.add_child(t.root(), "a", NodeKind::File, 1).unwrap();
+        assert_eq!(t.node_at(0), Some(t.root()));
+        assert_eq!(t.node_at(1), Some(a));
+        assert_eq!(t.node_at(2), None);
+        assert_eq!(t.node_at(usize::MAX), None);
+    }
 
     #[test]
     fn aggregates_sizes_bottom_up() {

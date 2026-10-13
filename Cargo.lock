@@ -798,6 +798,7 @@ version = "0.0.1"
 dependencies = [
  "dirustat-engine",
  "dirustat-model",
+ "getrandom 0.4.3",
  "serde",
  "serde_json",
  "tempfile",

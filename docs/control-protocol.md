@@ -7,7 +7,7 @@ Goal: any action a human can take is available to an agent; the app can be launc
 ## Transport
 
 - Launch: `dirustat --control <port>`. Listens only on `127.0.0.1:<port>`.
-- A window key is generated at start and written to `control-key.local-<port>` (Windows: `%APPDATA%\dirustat\`, Linux: `~/.config/dirustat/`, macOS: `~/Library/Application Support/diRUSTat/`). Every request must carry `key`.
+- A window key is generated at start and written to `control-key.local-<port>` (Windows: `%APPDATA%\dirustat\`, Linux: `~/.config/dirustat/`, macOS: `~/Library/Application Support/diRUSTat/`). Every request must carry `key`. The key comes from the OS random generator (`getrandom`); if that fails the server does not start (fail closed). A stale key file is removed and the new one created exclusively (mode 0600 on Unix); it is removed again on shutdown.
 - Format: one JSON line per request, one per response.
 
 ```json
@@ -16,7 +16,7 @@ Goal: any action a human can take is available to an agent; the app can be launc
 {"id":2,"ok":false,"error":{"code":"invalid_params","message":"path is empty"}}
 ```
 
-Stable error codes: `unknown_command`, `invalid_params`, `unsupported`, `confirmation_required`, `not_enabled`, `internal`; transport level: `unknown_method`, `bad_request` (malformed JSON or envelope), `unauthorized` (missing/wrong key), `too_large` (request over 1 MiB closes the connection; response over 8 MiB), `rate_limited` (200 requests/s per connection).
+Stable error codes: `unknown_command`, `invalid_params`, `unsupported`, `confirmation_required`, `not_enabled`, `internal`; transport level: `unknown_method`, `bad_request` (malformed JSON or envelope), `unauthorized` (missing/wrong key), `too_large` (request over 1 MiB closes the connection; response over 8 MiB), `rate_limited` (200 requests/s per connection and 1000 requests/s over all connections). A connection that has not sent a request with the right key within 5 s is closed (idle and wrong-key peers free their slot); an authenticated connection may idle for 60 s.
 
 Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `ControlServer::start(port, key_dir, session, bridge)`, `UiBridge` for `ui.*`/`app.quit` (headless: `unsupported`). `session.state` accepts `path` as a JSON pointer (`/selection`). `session.tree` takes `node` (id), `depth` (max 8), `limit` (max 1000), `offset` (pages the children of `node`), `mode` (`allocated`|`logical`); children are sorted by size, largest first.
 
@@ -30,13 +30,15 @@ Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `
 | `session.tree` | `node?`, `depth?`, `limit?` | subtree with sizes (paginated, never the whole tree) |
 | `ui.state` | none | serialized UI state (serde) |
 | `ui.set_state` | `patch` | change UI state (panels, sorting, zoom) |
-| `ui.screenshot` | `path`, `region?` | save a window PNG (offscreen render, no focus stealing) |
+| `ui.screenshot` | `path`, `region?`, `overwrite?` | save a window PNG. An existing file is an error unless `overwrite: true`; missing parent directories are never created; the file is written to a temp file and renamed; captures above 64 megapixels are refused; a request with no capture within 60 s fails with a timeout |
 | `app.quit` | none | graceful shutdown |
 
 Rules:
 - A programmatic call never opens a dialog; anything that needs a dialog in the UI has a parameterized command variant.
 - `engine.execute` blocks until fast commands finish; long ones (`scan.start`) return at once and progress is read through `session.state`.
-- Responses are size-limited: big trees are returned in pages (`session.tree`).
+- Responses are size-limited: big trees are returned in pages (`session.tree`). One `session.tree` call examines at most 50 000 nodes; past that the answer has `truncated: true` and `visit_capped: true` (`total_children` is then a lower bound).
+- `engine.execute` of `scan.start` with a UNC path (two leading slashes or backslashes, including the extended UNC form) is refused with `invalid_params` over control. `scan.start` returns at once: a missing or non-directory root is reported when the scan is polled (`session.poll`/`session.state`) as `invalid_params`.
+- `ControlClient` drops its connection after any I/O error or timeout (the next call reconnects) and rejects a response whose `id` differs from the request.
 
 ## MCP
 

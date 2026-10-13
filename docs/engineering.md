@@ -46,6 +46,7 @@ Every dependency is justified in the table below (add a row in the same change).
 | `eframe` 0.36 (wgpu, default_fonts, accesskit) | ui, apps/dirustat | native window and event loop on wgpu (ADR 0001); no webview | MIT OR Apache-2.0 | accepted 2026-10-13 |
 | `egui` 0.36 | ui, apps/dirustat | immediate-mode UI widgets; alternative: iced/slint (heavier, retained) | MIT OR Apache-2.0 | accepted 2026-10-13 |
 | `png` 0.18 | ui | encode window screenshots (`ui.screenshot`); already in the tree via eframe, pure Rust; alternative: `image` (heavier) | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `getrandom` 0.4 | control | OS CSPRNG for the control window key; fails closed; already in the tree via tempfile; alternative: `/dev/urandom` (not portable) | MIT OR Apache-2.0 | accepted 2026-10-13 |
 
 Planned (decided in an ADR when introduced): `windows-sys`/`windows` (only `dirustat-ntfs` and platform services), `trash` (recycle bin), `regex` (search), `image` (PNG export).
 

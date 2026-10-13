@@ -15,6 +15,7 @@ dirustat-engine.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 dirustat-model.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

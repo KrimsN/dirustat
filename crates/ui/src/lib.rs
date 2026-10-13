@@ -14,7 +14,7 @@ pub mod tree_panel;
 
 pub use app::DirustatApp;
 pub use commands::{UI_COMMANDS, UiCommand, UiEffect};
-pub use screenshot::{Region, ScreenshotStatus};
+pub use screenshot::{Region, SaveOptions, ScreenshotStatus};
 pub use state::{PanelVisibility, ScanStatus, UiState};
 pub use theme::{ThemeKind, Tokens};
 

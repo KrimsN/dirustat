@@ -86,6 +86,10 @@ impl Session {
     /// The `count` largest files (links included, directories not) with size >= `min_size` by the
     /// session size mode, largest first, ties by arena index. One iterative pass over the tree
     /// with a bounded min-heap: O(n log count) time, O(count) memory.
+    ///
+    /// Known cost: this runs while the caller holds the session lock. A result cache keyed by
+    /// (`Session::revision`, size mode, count, min_size) would make repeated calls O(count); it is
+    /// deferred (not needed yet at the current call rates).
     pub fn largest_files(&self, count: usize, min_size: u64) -> Vec<NodeId> {
         let count = count.min(MAX_PAGE.saturating_mul(2));
         if count == 0 {

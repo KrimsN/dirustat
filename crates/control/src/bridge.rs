@@ -20,6 +20,9 @@ pub struct ScreenshotRequest {
     /// Target PNG path (non-empty, no NUL).
     pub path: PathBuf,
     pub region: Option<Region>,
+    /// Replace an existing file. Default false: an existing path is an error. Missing parent
+    /// directories are never created.
+    pub overwrite: bool,
 }
 
 /// UI side of the control channel. Called from server threads, so implementations must be

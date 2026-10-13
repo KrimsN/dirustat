@@ -41,20 +41,9 @@ struct NodeParams {
     id: u64,
 }
 
-/// Finds the node whose arena index is `index` with an iterative walk (ids cannot be forged).
+/// Resolves an arena index reported by the engine back to a node id in O(1).
 pub(super) fn node_by_index(tree: &Tree, index: u64) -> Option<NodeId> {
-    let index = usize::try_from(index).ok()?;
-    if index >= tree.len() {
-        return None;
-    }
-    let mut stack = vec![tree.root()];
-    while let Some(node) = stack.pop() {
-        if node.index() == index {
-            return Some(node);
-        }
-        stack.extend(tree.children(node));
-    }
-    None
+    tree.node_at(usize::try_from(index).ok()?)
 }
 
 fn run_node(session: &mut Session, params: &Value) -> Result<Value, CommandError> {

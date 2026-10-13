@@ -17,6 +17,7 @@
 
 - **Never** run destructive commands on the user's real directories (`C:\Users\...`, Documents, Desktop, external drives). Test only on directories created by the test in a temp folder (`tempfile`) or by `cargo xtask fixtures`.
 - Scanning real directories for measurements is allowed only in read-only mode; never save the contents of someone's paths into the repository, devlog, screenshots or fixtures. Report aggregates and synthetic names.
+- `ui.screenshot` over control never overwrites an existing file unless `overwrite: true`, never creates directories and refuses to scan UNC paths (see `docs/control-protocol.md`); settings and CLI exports are written via temp file plus rename and a settings file from a newer version is never overwritten.
 - Never enable automatic deletion "by default" in the UI, CLI or MCP. Destructive MCP tools are marked `destructive: true` and require `confirm`.
 - Before any action that cannot be undone (permanent deletion, formatting, writing to system directories), stop and ask the human.
 

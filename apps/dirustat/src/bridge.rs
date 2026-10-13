@@ -3,7 +3,7 @@
 //! frame ([`UiEndpoint::pump`]); the egui context is woken so an idle window still answers.
 
 use dirustat_control::{ControlError, ScreenshotRequest, UiBridge};
-use dirustat_ui::{DirustatApp, Region, ScreenshotStatus};
+use dirustat_ui::{DirustatApp, Region, SaveOptions, ScreenshotStatus};
 use eframe::egui;
 use serde_json::{Value, json};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -157,7 +157,8 @@ impl UiEndpoint {
             }
             Request::Screenshot(shot) => {
                 let path = shot.path.to_string_lossy().into_owned();
-                match app.request_screenshot(&path, shot.region.map(region_f32)) {
+                let options = SaveOptions::controlled(shot.overwrite);
+                match app.request_screenshot_with(&path, shot.region.map(region_f32), options) {
                     Ok(ticket) => {
                         let deadline = Instant::now() + self.screenshot_timeout;
                         self.pending.push(PendingShot { ticket, deadline, reply });
@@ -268,7 +269,7 @@ mod tests {
         let mut app = DirustatApp::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("never.png");
-        let request = ScreenshotRequest { path, region: None };
+        let request = ScreenshotRequest { path, region: None, overwrite: false };
         let client = thread::spawn(move || bridge.ui_screenshot(&request));
         let ctx = egui::Context::default();
         // Frames without any capture event: the pending screenshot must expire.
@@ -301,17 +302,22 @@ mod tests {
             let ui = c.call("ui.state", &json!({}));
             let shot = c.call("ui.screenshot", &json!({"path": png_text}));
             let bad = c.call("ui.screenshot", &json!({"path": "no-extension"}));
+            let again = c.call("ui.screenshot", &json!({"path": png_text}));
+            let over = c.call("ui.screenshot", &json!({"path": png_text, "overwrite": true}));
             let quit = c.call("app.quit", &json!({}));
             flag.store(true, Ordering::SeqCst);
-            Ok::<_, String>((mode, ui, shot, bad, quit))
+            Ok::<_, String>((mode, ui, shot, bad, again, over, quit))
         });
         drive(&mut app, &mut endpoint, &done);
-        let (mode, ui, shot, bad, quit) = client.join().unwrap().unwrap();
+        let (mode, ui, shot, bad, again, over, quit) = client.join().unwrap().unwrap();
         assert!(mode.is_ok(), "{mode:?}");
         assert_eq!(ui.unwrap()["panels"]["map"], json!(true));
         assert_eq!(shot.unwrap()["width"], 32);
         assert!(png.is_file());
         assert!(bad.is_err());
+        // The second capture of the same path is refused unless `overwrite` is passed.
+        assert_eq!(again.unwrap_err().code(), "invalid_params");
+        assert!(over.is_ok());
         assert!(quit.is_ok());
         // The command ran on the very session the UI draws.
         assert_eq!(app.session().map_size_mode(), dirustat_model::SizeMode::Logical);
