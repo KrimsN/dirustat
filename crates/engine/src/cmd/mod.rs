@@ -5,11 +5,14 @@
 //! Rules for `run`: never open a dialog, never panic (the guard is a safety net only), reject
 //! unknown params fields with `InvalidParams` (use [`parse_params`] / [`no_params`]).
 
+mod list;
 mod scan;
 mod select;
 mod session;
+mod settings;
 #[cfg(test)]
 mod testing;
+mod tree;
 mod view;
 
 use crate::{CommandError, Session, guard};
@@ -63,6 +66,9 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(select::specs());
         all.extend(view::specs());
         all.extend(session::specs());
+        all.extend(settings::specs());
+        all.extend(tree::specs());
+        all.extend(list::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all

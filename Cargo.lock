@@ -781,7 +781,11 @@ dependencies = [
 name = "dirustat-cli"
 version = "0.0.1"
 dependencies = [
+ "dirustat-control",
  "dirustat-engine",
+ "dirustat-model",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -789,8 +793,10 @@ name = "dirustat-control"
 version = "0.0.1"
 dependencies = [
  "dirustat-engine",
+ "dirustat-model",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -844,6 +850,7 @@ dependencies = [
  "dirustat-treemap",
  "eframe",
  "egui",
+ "png",
  "serde",
  "serde_json",
  "tempfile",

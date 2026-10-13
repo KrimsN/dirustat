@@ -6,12 +6,22 @@
 //! Status: command registry in place (milestone M2); see `cmd`.
 
 mod cmd;
+mod drives;
 mod ext;
 mod guard;
+mod launch;
 mod map;
+mod settings;
 
 pub use cmd::{CommandInfo, CommandSpec};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
+
+pub use drives::{DriveInfo, MAX_DRIVES};
+pub use launch::{LaunchArgs, LaunchError, USAGE as LAUNCH_USAGE};
+pub use settings::{
+    LoadOutcome, MAX_RECENT_PATHS, SETTINGS_VERSION, Settings, SettingsError, SizeModeName, SortKey, SortSetting,
+    TreemapSettings, default_dir as settings_dir, default_path as settings_path,
+};
 
 pub use ext::{ExtStat, NO_EXT_COLOR, ext_color, extension_of};
 
@@ -78,6 +88,9 @@ pub struct Session {
     map: MapState,
     /// Background scan started by `scan.start`, not yet joined.
     scan: Option<PendingScan>,
+    /// Persistent user settings (`settings.*` commands).
+    settings: Settings,
+    drives: drives::DrivesProvider,
 }
 
 /// A running scan owned by the session.
@@ -89,7 +102,14 @@ struct PendingScan {
 
 impl Session {
     pub fn new() -> Self {
-        Self { tree: empty_tree(""), revision: 0, map: MapState::new(), scan: None }
+        Self {
+            tree: empty_tree(""),
+            revision: 0,
+            map: MapState::new(),
+            scan: None,
+            settings: Settings::default(),
+            drives: drives::DrivesProvider(None),
+        }
     }
 
     pub fn tree(&self) -> &Tree {

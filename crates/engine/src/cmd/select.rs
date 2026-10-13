@@ -42,7 +42,7 @@ struct NodeParams {
 }
 
 /// Finds the node whose arena index is `index` with an iterative walk (ids cannot be forged).
-fn node_by_index(tree: &Tree, index: u64) -> Option<NodeId> {
+pub(super) fn node_by_index(tree: &Tree, index: u64) -> Option<NodeId> {
     let index = usize::try_from(index).ok()?;
     if index >= tree.len() {
         return None;

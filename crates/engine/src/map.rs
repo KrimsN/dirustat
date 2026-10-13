@@ -110,6 +110,7 @@ impl Session {
 
     pub fn set_map_size_mode(&mut self, mode: SizeMode) {
         self.map.mode = mode;
+        self.settings.size_mode = crate::SizeModeName::from_mode(mode);
     }
 
     /// Called when the tree was replaced: bumps the revision and drops selection and cache.
