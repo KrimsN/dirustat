@@ -266,6 +266,13 @@ impl Tree {
         Ok(new_id)
     }
 
+    /// Renames a node (for example to give a scanned root a neutral display label).
+    pub fn set_node_name(&mut self, id: NodeId, name: &str) -> Result<(), ModelError> {
+        let node = self.nodes.get_mut(id.index()).ok_or(ModelError::UnknownNode)?;
+        node.name = name.into();
+        Ok(())
+    }
+
     /// Flags a node as unreadable (e.g. a directory that denied access after it was added).
     pub fn mark_error(&mut self, id: NodeId) -> Result<(), ModelError> {
         let node = self.nodes.get_mut(id.index()).ok_or(ModelError::UnknownNode)?;
@@ -424,6 +431,14 @@ mod tests {
         units.push(0xDFFF);
         let (name, lossy) = name_from_wide(&units);
         assert_eq!((name.chars().count(), lossy), (40_001, true));
+    }
+
+    #[test]
+    fn set_node_name_renames_or_reports_unknown() {
+        let mut t = Tree::new("/real/path");
+        assert_eq!(t.set_node_name(t.root(), "demo"), Ok(()));
+        assert_eq!(t.get(t.root()).map(Node::name), Some("demo"));
+        assert_eq!(t.set_node_name(NodeId(999), "x"), Err(ModelError::UnknownNode));
     }
 
     #[test]

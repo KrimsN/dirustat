@@ -10,6 +10,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+dirustat-control.workspace = true
 dirustat-engine.workspace = true
+dirustat-model.workspace = true
 dirustat-ui.workspace = true
 eframe.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

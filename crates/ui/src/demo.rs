@@ -1,9 +1,8 @@
 //! Synthetic demo data for screenshots and tests. Never reads a real disk: the tree is generated
-//! in a fresh temporary directory (sparse files of fixed sizes), scanned through the normal
-//! `scan.start` / `session.poll` commands, and removed again.
+//! in a fresh temporary directory (sparse files of fixed sizes), scanned, relabelled with a neutral
+//! root name and removed again.
 
 use dirustat_engine::Session;
-use serde_json::json;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -54,7 +53,7 @@ fn fresh_dir() -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
-/// Builds a session holding the synthetic demo tree. The scan runs through the command registry.
+/// Builds a session holding the synthetic demo tree. The root is renamed to [`DEMO_ROOT_NAME`].
 pub fn demo_session() -> Result<Session, String> {
     let dir = fresh_dir().map_err(|e| format!("cannot create demo directory: {e}"))?;
     let result = scan_demo(&dir);
@@ -63,18 +62,25 @@ pub fn demo_session() -> Result<Session, String> {
     result
 }
 
+/// Label of the demo root, so screenshots never show the temporary directory path.
+pub const DEMO_ROOT_NAME: &str = "demo";
+
 fn scan_demo(dir: &Path) -> Result<Session, String> {
     write_demo_files(dir).map_err(|e| format!("cannot write demo files: {e}"))?;
-    let mut session = Session::new();
-    session.execute("scan.start", &json!({ "path": dir.to_string_lossy() })).map_err(|e| e.to_string())?;
+    let handle = dirustat_scan::start(dir, dirustat_scan::ScanOptions::default()).map_err(|e| e.to_string())?;
     let deadline = Instant::now() + Duration::from_secs(60);
-    while session.is_scanning() {
-        session.execute("session.poll", &json!({})).map_err(|e| e.to_string())?;
+    while !handle.is_finished() {
         if Instant::now() > deadline {
+            handle.cancel();
             return Err("demo scan timed out".to_owned());
         }
         std::thread::sleep(Duration::from_millis(2));
     }
+    let mut tree = handle.join().map_err(|e| e.to_string())?.tree;
+    let root = tree.root();
+    tree.set_node_name(root, DEMO_ROOT_NAME).map_err(|e| e.to_string())?;
+    let mut session = Session::new();
+    session.replace_tree(tree);
     Ok(session)
 }
 
@@ -89,5 +95,6 @@ mod tests {
         let Ok(session) = session else { return };
         assert!(session.tree().len() > FILES.len());
         assert!(session.revision() >= 1);
+        assert_eq!(session.tree().get(session.tree().root()).map(|n| n.name()), Some(DEMO_ROOT_NAME));
     }
 }

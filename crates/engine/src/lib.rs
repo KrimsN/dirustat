@@ -144,6 +144,12 @@ impl Session {
         self.execute(id, &value).map(|_| ())
     }
 
+    /// Installs a prebuilt tree as the current one (demo data, tests); bumps the revision.
+    pub fn replace_tree(&mut self, tree: Tree) {
+        self.tree = tree;
+        self.tree_replaced();
+    }
+
     /// Waits for a scan and, unless it was cancelled, makes its tree current. A panic in the scan
     /// thread is reported as an error and the previous tree is kept.
     pub fn finish_scan(&mut self, handle: ScanHandle) -> Result<bool, CommandError> {
@@ -166,6 +172,15 @@ impl Default for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replace_tree_bumps_revision() {
+        let mut s = Session::new();
+        let before = s.revision();
+        s.replace_tree(empty_tree("demo"));
+        assert!(s.revision() > before);
+        assert_eq!(s.tree().get(s.tree().root()).map(|n| n.name()), Some("demo"));
+    }
 
     #[test]
     fn unknown_command_is_an_error_not_a_panic() {

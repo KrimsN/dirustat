@@ -772,9 +772,13 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 name = "dirustat"
 version = "0.0.1"
 dependencies = [
+ "dirustat-control",
  "dirustat-engine",
+ "dirustat-model",
  "dirustat-ui",
  "eframe",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

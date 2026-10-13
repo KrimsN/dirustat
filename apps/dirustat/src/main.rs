@@ -1,10 +1,15 @@
 //! Desktop application: opens the native eframe/wgpu window.
 //!
-//! Flags for agents and documentation (`docs/development.md`):
-//! `--demo` loads a synthetic tree (never a real disk), `--screenshot <file.png>` saves the window
-//! once it has rendered, `--exit-after-screenshot` closes the app afterwards,
-//! `--size <W>x<H>` sets the window size.
+//! Flags are parsed by `dirustat_engine::LaunchArgs` (see `--help`): `--scan <path>`,
+//! `--size-mode`, `--demo` (synthetic tree, never a real disk), `--screenshot <file.png>`,
+//! `--exit-after-screenshot`, `--size WxH` and `--control <port>` (JSON control channel and MCP
+//! bridge, `docs/control-protocol.md`).
 
+mod bridge;
+
+use bridge::UiEndpoint;
+use dirustat_control::{ControlServer, SharedSession, default_key_dir, lock_session};
+use dirustat_engine::{LAUNCH_USAGE, LaunchArgs, Session, Settings, settings_path};
 use dirustat_ui::{DirustatApp, ScreenshotStatus, WINDOW_TITLE};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,36 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Frames to render before the screenshot, so panels and the treemap layout are settled.
 const WARMUP_FRAMES: u32 = 8;
 
-#[derive(Debug, Default)]
-struct Args {
-    demo: bool,
-    screenshot: Option<String>,
-    exit_after_screenshot: bool,
-    size: Option<[f32; 2]>,
-}
-
-fn parse_args<I: Iterator<Item = String>>(mut it: I) -> Result<Args, String> {
-    let mut args = Args::default();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--demo" => args.demo = true,
-            "--exit-after-screenshot" => args.exit_after_screenshot = true,
-            "--screenshot" => args.screenshot = Some(it.next().ok_or("--screenshot needs a file name")?),
-            "--size" => {
-                let v = it.next().ok_or("--size needs WxH")?;
-                let (w, h) = v.split_once('x').ok_or("--size needs WxH")?;
-                let dim = |t: &str| t.parse::<u16>().ok().filter(|n| *n >= 200).map(f32::from);
-                args.size = Some([dim(w).ok_or("bad width")?, dim(h).ok_or("bad height")?]);
-            }
-            other => return Err(format!("unknown argument: {other}")),
-        }
-    }
-    Ok(args)
-}
-
-/// Wraps the app to take the requested screenshot after a few frames.
+/// Wraps the app to serve the control bridge and take the requested screenshot after a few frames.
 struct Shell {
     app: DirustatApp,
+    endpoint: Option<UiEndpoint>,
     screenshot: Option<String>,
     exit_after: bool,
     frames: u32,
@@ -52,9 +31,13 @@ struct Shell {
 impl eframe::App for Shell {
     fn ui(&mut self, ui: &mut eframe::egui::Ui, frame: &mut eframe::Frame) {
         eframe::App::ui(&mut self.app, ui, frame);
+        if let Some(endpoint) = self.endpoint.as_mut() {
+            endpoint.pump(&mut self.app, ui.ctx());
+        }
         self.frames = self.frames.saturating_add(1);
         if self.ticket.is_none()
             && self.frames >= WARMUP_FRAMES
+            && !self.app.is_scanning()
             && let Some(path) = self.screenshot.take()
         {
             match self.app.request_screenshot(&path, None) {
@@ -93,43 +76,117 @@ impl Shell {
     }
 }
 
+/// Builds the session from the launch arguments: demo data or saved settings, then `--size-mode`.
 #[allow(clippy::print_stderr)]
+fn build_session(args: &LaunchArgs) -> Result<Session, String> {
+    let mut session = if args.demo {
+        dirustat_ui::demo::demo_session().map_err(|m| format!("cannot build demo data: {m}"))?
+    } else {
+        let mut session = Session::new();
+        if let Some(path) = settings_path() {
+            let loaded = Settings::load_from(&path);
+            if let Some(warning) = loaded.warning {
+                eprintln!("warning: {warning}");
+            }
+            session.apply_settings(loaded.settings);
+        }
+        session
+    };
+    if let Some(mode) = args.size_mode {
+        session.set_map_size_mode(mode);
+    }
+    Ok(session)
+}
+
+/// Saves the settings on exit; a failure is only a warning. Demo runs never call this.
+#[allow(clippy::print_stderr)]
+fn save_settings(session: &SharedSession) {
+    let Some(path) = settings_path() else { return };
+    let settings = lock_session(session).settings().clone();
+    if let Err(e) = settings.save_to(&path) {
+        eprintln!("warning: {e}");
+    }
+}
+
+#[allow(clippy::print_stderr, clippy::print_stdout)]
 fn main() -> eframe::Result {
-    let args = match parse_args(std::env::args().skip(1)) {
+    let args = match LaunchArgs::parse(std::env::args_os().skip(1)) {
         Ok(a) => a,
-        Err(message) => {
-            eprintln!(
-                "{message}\nusage: dirustat [--demo] [--screenshot FILE.png] [--exit-after-screenshot] [--size WxH]"
-            );
+        Err(e) => {
+            eprintln!("{e}\n\n{LAUNCH_USAGE}");
             std::process::exit(2);
         }
     };
-    let app = if args.demo {
-        match dirustat_ui::demo::demo_session() {
-            Ok(session) => DirustatApp::with_session(session),
-            Err(message) => {
-                eprintln!("cannot build demo data: {message}");
+    if args.help {
+        println!("{LAUNCH_USAGE}");
+        return Ok(());
+    }
+    let session = match build_session(&args) {
+        Ok(s) => s,
+        Err(message) => {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+    };
+    let mut app = DirustatApp::with_session(session);
+    let shared = app.shared_session();
+    if let Some(path) = &args.scan {
+        app.state_mut().path_text = path.to_string_lossy().into_owned();
+        app.start_scan();
+    }
+    let mut endpoint = None;
+    let mut server = None;
+    if let Some(port) = args.control {
+        let Some(key_dir) = default_key_dir() else {
+            eprintln!("cannot start the control channel: no per-user config directory");
+            std::process::exit(1);
+        };
+        let (ui_bridge, ui_endpoint) = bridge::channel();
+        match ControlServer::start(port, &key_dir, shared.clone(), Arc::new(ui_bridge)) {
+            Ok(s) => {
+                println!("control: 127.0.0.1:{} key file {}", s.port(), s.key_path().display());
+                server = Some(s);
+                endpoint = Some(ui_endpoint);
+            }
+            Err(e) => {
+                eprintln!("cannot start the control channel on port {port}: {e}");
                 std::process::exit(1);
             }
         }
-    } else {
-        DirustatApp::new()
-    };
-    let size = args.size.unwrap_or([1200.0, 800.0]);
+    }
+    let (w, h) = args.size.unwrap_or((1200, 800));
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default().with_title(WINDOW_TITLE).with_inner_size(size),
+        viewport: eframe::egui::ViewportBuilder::default()
+            .with_title(WINDOW_TITLE)
+            .with_inner_size([f32::from(w), f32::from(h)]),
         ..eframe::NativeOptions::default()
     };
     let failed = Arc::new(AtomicBool::new(false));
     let shell = Shell {
         app,
-        screenshot: args.screenshot,
+        endpoint,
+        screenshot: args.screenshot.map(|p| p.to_string_lossy().into_owned()),
         exit_after: args.exit_after_screenshot,
         frames: 0,
         ticket: None,
         failed: failed.clone(),
     };
-    let result = eframe::run_native(WINDOW_TITLE, options, Box::new(move |_cc| Ok(Box::new(shell))));
+    let result = eframe::run_native(
+        WINDOW_TITLE,
+        options,
+        Box::new(move |cc| {
+            if let Some(endpoint) = &shell.endpoint {
+                endpoint.attach(&cc.egui_ctx);
+            }
+            Ok(Box::new(shell))
+        }),
+    );
+    if !args.demo {
+        save_settings(&shared);
+    }
+    if let Some(server) = server {
+        server.shutdown();
+    }
     if failed.load(Ordering::SeqCst) {
         std::process::exit(1);
     }
@@ -139,18 +196,26 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
 
-    fn parse(v: &[&str]) -> Result<Args, String> {
-        parse_args(v.iter().map(|s| (*s).to_owned()))
+    fn parse(v: &[&str]) -> Result<LaunchArgs, dirustat_engine::LaunchError> {
+        LaunchArgs::parse(v.iter().map(OsString::from))
     }
 
     #[test]
-    fn flags_parse_and_hostile_values_are_errors() {
-        let a = parse(&["--demo", "--screenshot", "a.png", "--exit-after-screenshot", "--size", "800x600"]);
-        assert!(a.as_ref().is_ok_and(|a| a.demo && a.exit_after_screenshot && a.size == Some([800.0, 600.0])));
-        for bad in [&["--bogus"][..], &["--screenshot"], &["--size", "10x10"], &["--size", "axb"], &["--size", "5"]] {
-            assert!(parse(bad).is_err(), "{bad:?}");
-        }
-        assert!(parse(&[]).is_ok());
+    fn launch_flags_cover_the_app_options() {
+        let a = parse(&["--demo", "--screenshot", "a.png", "--exit-after-screenshot", "--size", "800x600"]).unwrap();
+        assert!(a.demo && a.exit_after_screenshot && a.size == Some((800, 600)));
+        assert!(parse(&["--scan", "x", "--control", "0", "--size-mode", "logical"]).is_ok());
+        assert!(parse(&["--bogus"]).is_err());
+    }
+
+    #[test]
+    fn demo_session_honours_size_mode_and_has_a_neutral_root() {
+        let args = parse(&["--demo", "--size-mode", "logical"]).unwrap();
+        let session = build_session(&args).unwrap();
+        assert_eq!(session.map_size_mode(), dirustat_model::SizeMode::Logical);
+        let root = session.tree().root();
+        assert_eq!(session.tree().get(root).map(|n| n.name()), Some("demo"));
     }
 }

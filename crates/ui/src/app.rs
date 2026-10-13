@@ -9,9 +9,11 @@ use crate::screenshot::{Region, ScreenshotStatus, Screenshots};
 use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
 use crate::{ext_panel, map_panel, tree_panel};
+use dirustat_control::{SharedSession, lock_session, share};
 use dirustat_engine::{CommandInfo, Session};
 use dirustat_model::SizeMode;
 use serde_json::{Value, json};
+use std::sync::MutexGuard;
 use std::time::Duration;
 
 /// How often the UI repaints while a scan runs.
@@ -23,7 +25,7 @@ const MENU_ORDER: [&str; 5] = ["File", "Edit", "View", "Cleanup", "Help"];
 /// The egui application. The scan runs inside the session; the UI only polls it.
 #[derive(Debug)]
 pub struct DirustatApp {
-    session: Session,
+    session: SharedSession,
     state: UiState,
     tokens: Tokens,
     applied_theme: Option<ThemeKind>,
@@ -47,6 +49,11 @@ impl DirustatApp {
     }
 
     pub fn with_session(session: Session) -> Self {
+        Self::with_shared_session(share(session))
+    }
+
+    /// Builds the app around a session that is also shared with the control server.
+    pub fn with_shared_session(session: SharedSession) -> Self {
         Self {
             session,
             state: UiState::default(),
@@ -66,13 +73,14 @@ impl DirustatApp {
         &mut self.state
     }
 
-    pub fn session(&self) -> &Session {
-        &self.session
+    /// Locks the session (poison-tolerant). Do not keep the guard across a frame.
+    pub fn session(&self) -> MutexGuard<'_, Session> {
+        lock_session(&self.session)
     }
 
-    /// Mutable session access for the control bridge (commands still go through `execute`).
-    pub fn session_mut(&mut self) -> &mut Session {
-        &mut self.session
+    /// A handle to the shared session, for the control server.
+    pub fn shared_session(&self) -> SharedSession {
+        SharedSession::clone(&self.session)
     }
 
     /// True once `ui.quit` ran; the shell closes the window on the next frame.
@@ -123,9 +131,11 @@ impl DirustatApp {
             }
             return Ok(json!({ "ok": true }));
         }
-        let infos = self.session.commands();
-        let params = self.default_params(id, &infos).ok_or_else(|| format!("{id} needs parameters"))?;
-        let value = self.session.execute(id, &params).map_err(|e| e.to_string())?;
+        let mut session = lock_session(&self.session);
+        let infos = session.commands();
+        let params = self.default_params(&session, id, &infos).ok_or_else(|| format!("{id} needs parameters"))?;
+        let value = session.execute(id, &params).map_err(|e| e.to_string())?;
+        drop(session);
         if id == "scan.start" {
             self.state.scan = ScanStatus::Running { dirs: 0, files: 0, bytes: 0, errors: 0 };
         }
@@ -133,11 +143,11 @@ impl DirustatApp {
     }
 
     /// Parameters for a command invoked without a form (menu, shortcut, palette, button).
-    fn default_params(&self, id: &str, infos: &[CommandInfo]) -> Option<Value> {
+    fn default_params(&self, session: &Session, id: &str, infos: &[CommandInfo]) -> Option<Value> {
         match id {
             "scan.start" => Some(json!({ "path": self.state.path_text.trim() })),
             "view.size_mode" => {
-                let next = if self.session.map_size_mode() == SizeMode::Allocated { "logical" } else { "allocated" };
+                let next = if session.map_size_mode() == SizeMode::Allocated { "logical" } else { "allocated" };
                 Some(json!({ "mode": next }))
             }
             _ => {
@@ -163,14 +173,15 @@ impl DirustatApp {
     }
 
     pub fn is_scanning(&self) -> bool {
-        self.session.is_scanning()
+        lock_session(&self.session).is_scanning()
     }
 
     /// Follows the session's scan without blocking: progress while it runs, status when it ends.
     fn poll_scan(&mut self, ctx: &egui::Context) {
-        if self.session.is_scanning() {
-            let errors = self.progress_into_status();
-            match self.session.execute("session.poll", &json!({})) {
+        let mut session = lock_session(&self.session);
+        if session.is_scanning() {
+            let errors = Self::progress_into_status(&mut self.state, &session);
+            match session.execute("session.poll", &json!({})) {
                 Ok(v) if v.get("scanning").and_then(Value::as_bool) == Some(false) => {
                     let replaced = v.get("replaced").and_then(Value::as_bool) == Some(true);
                     self.state.scan = if replaced { ScanStatus::Done { errors } } else { ScanStatus::Cancelled };
@@ -189,11 +200,11 @@ impl DirustatApp {
     }
 
     /// Copies the session's scan progress into the status; returns the error count.
-    fn progress_into_status(&mut self) -> u64 {
-        let state = self.session.state_json();
+    fn progress_into_status(ui_state: &mut UiState, session: &Session) -> u64 {
+        let state = session.state_json();
         let get = |k: &str| state.get("progress").and_then(|p| p.get(k)).and_then(Value::as_u64).unwrap_or(0);
         let (dirs, files, bytes, errors) = (get("dirs"), get("files"), get("bytes"), get("errors"));
-        self.state.scan = ScanStatus::Running { dirs, files, bytes, errors };
+        ui_state.scan = ScanStatus::Running { dirs, files, bytes, errors };
         errors
     }
 
@@ -211,7 +222,7 @@ impl DirustatApp {
         }
         self.poll_scan(&ctx);
         self.shots.pump(&ctx);
-        let infos = self.session.commands();
+        let infos = lock_session(&self.session).commands();
         self.handle_shortcuts(&ctx, &infos);
         if let Some(id) = self.menu_bar(ui, &infos) {
             let _ = self.run_command(&id);
@@ -332,9 +343,12 @@ impl DirustatApp {
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
-        let scanning = self.is_scanning();
+        let (scanning, mode) = {
+            let session = lock_session(&self.session);
+            (session.is_scanning(), session.map_size_mode())
+        };
         let mut run: Option<&str> = None;
-        let size_label = match self.session.map_size_mode() {
+        let size_label = match mode {
             SizeMode::Allocated => "Size: allocated",
             SizeMode::Logical => "Size: logical",
         };
@@ -370,8 +384,9 @@ impl DirustatApp {
         let tokens = &self.tokens;
         egui::Panel::bottom("status_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                let tree = self.session.tree();
-                let mode = self.session.map_size_mode();
+                let session = lock_session(&self.session);
+                let tree = session.tree();
+                let mode = session.map_size_mode();
                 let total = tree.get(tree.root()).map_or(0, |n| n.total_size(mode));
                 ui.label(format!("{} nodes", tree.len()));
                 ui.separator();
@@ -411,19 +426,20 @@ impl DirustatApp {
 
     fn central(&mut self, ui: &mut egui::Ui) {
         let panels = self.state.panels;
+        let mut session = lock_session(&self.session);
         if panels.tree {
             egui::Panel::left("tree_panel").default_size(320.0).show(ui, |ui| {
-                tree_panel::show(ui, &mut self.session, &mut self.state, &self.tokens);
+                tree_panel::show(ui, &mut session, &mut self.state, &self.tokens);
             });
         }
         if panels.extensions {
             egui::Panel::right("ext_panel").default_size(300.0).show(ui, |ui| {
-                ext_panel::show(ui, &self.session, &mut self.state);
+                ext_panel::show(ui, &session, &mut self.state);
             });
         }
         egui::CentralPanel::default().show(ui, |ui| {
             if panels.map {
-                map_panel::show(ui, &mut self.session, &mut self.state);
+                map_panel::show(ui, &mut session, &mut self.state);
             }
         });
     }

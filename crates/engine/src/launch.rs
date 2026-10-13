@@ -16,6 +16,7 @@ Options:
   --screenshot <path>      save a PNG screenshot of the main window
   --exit-after-screenshot  quit after the screenshot (requires --screenshot)
   --demo                   load synthetic demo data
+  --size <W>x<H>           initial window size in logical pixels (200..=16384 each)
   --help                   print this help
 ";
 
@@ -27,6 +28,8 @@ pub struct LaunchArgs {
     pub control: Option<u16>,
     pub screenshot: Option<PathBuf>,
     pub demo: bool,
+    /// Initial window size `(width, height)`.
+    pub size: Option<(u16, u16)>,
     pub exit_after_screenshot: bool,
     pub help: bool,
 }
@@ -81,6 +84,19 @@ fn non_empty(option: &'static str, v: OsString) -> Result<PathBuf, LaunchError> 
     Ok(PathBuf::from(v))
 }
 
+/// Smallest and largest accepted window edge, in logical pixels.
+const SIZE_RANGE: std::ops::RangeInclusive<u16> = 200..=16384;
+
+/// Parses `WxH` (decimal digits only) into an in-range size.
+fn parse_size(text: &str) -> Option<(u16, u16)> {
+    let (w, h) = text.split_once('x')?;
+    let dim = |t: &str| {
+        let ok = !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit());
+        t.parse::<u16>().ok().filter(|n| ok && SIZE_RANGE.contains(n))
+    };
+    Some((dim(w)?, dim(h)?))
+}
+
 impl LaunchArgs {
     /// Parses the arguments after the program name. `--option=value` is accepted as well as
     /// `--option value`. `--help` stops parsing and wins over later errors.
@@ -124,6 +140,12 @@ impl LaunchArgs {
                         _ => return Err(LaunchError::InvalidValue { option: "--size-mode", value: echo(&v) }),
                     };
                     set_once(&mut out.size_mode, "--size-mode", mode)?;
+                }
+                "--size" => {
+                    let v = value("--size")?;
+                    let size = v.to_str().and_then(parse_size);
+                    let size = size.ok_or_else(|| LaunchError::InvalidValue { option: "--size", value: echo(&v) })?;
+                    set_once(&mut out.size, "--size", size)?;
                 }
                 "--control" => {
                     let v = value("--control")?;
@@ -174,6 +196,17 @@ mod tests {
         assert_eq!(a.control, Some(7000));
         assert_eq!(a.screenshot, Some(PathBuf::from("a.png")));
         assert!(a.demo && a.exit_after_screenshot && !a.help);
+    }
+
+    #[test]
+    fn size_parses_and_rejects_hostile_values() {
+        assert_eq!(parse(&["--size", "800x600"]).unwrap().size, Some((800, 600)));
+        assert_eq!(parse(&["--size=1200x800"]).unwrap().size, Some((1200, 800)));
+        for bad in ["10x10", "800", "axb", "800x", "x600", "99999x600", "-5x600", "+800x600", "800x600x1", "0x0", ""] {
+            assert!(matches!(parse(&["--size", bad]), Err(LaunchError::InvalidValue { .. })), "{bad:?}");
+        }
+        assert_eq!(parse(&["--size"]), Err(LaunchError::MissingValue("--size")));
+        assert_eq!(parse(&["--size", "300x300", "--size", "400x400"]), Err(LaunchError::Duplicate("--size")));
     }
 
     #[test]
