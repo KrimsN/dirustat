@@ -1,12 +1,12 @@
 # Roadmap
 
-> Status: 2026-10-13 · revision 3 · **Current focus: M1** (portable scan + model + treemap + window). M1.1-M1.11 landed; remaining: screenshot verification (needs `ui.screenshot`, M2.5), then M2.1 command registry.
+> Status: 2026-10-13 · revision 4 · **Current focus: M3** (fast MFT: `dirustat-ntfs`, fallback, administrator rights). M1 and M2 are done; next task M3.1 Win32 FFI module in `dirustat-ntfs`.
 
 | Milestone | Result | Main gaps | Estimate |
 |---|---|---|---|
 | **M0** Bootstrap | Workspace, lints, xtask, CI, documents, agent instructions | G-000 | **done 2026-10-13** |
-| **M1** Core and first window | Parallel scan → model → treemap + tree + extensions in eframe | G-001…G-007, G-024 | 2-3 weeks |
-| **M2** Commands and control | Command registry, control, CLI, MCP, screenshots, settings | G-008…G-011 | 2 weeks |
+| **M1** Core and first window | Parallel scan → model → treemap + tree + extensions in eframe | G-001…G-007, G-024 | **done 2026-10-13** (leftovers: G-029, G-002 cold cache) |
+| **M2** Commands and control | Command registry, control, CLI, MCP, screenshots, settings | G-008…G-011 | **done 2026-10-13** (leftover UI: G-011; follow-ups G-025…G-028) |
 | **M3** Fast MFT | `dirustat-ntfs`, fallback, administrator rights | G-012, G-013 | 2-3 weeks |
 | **M4** Actions | Recycle bin, file manager, cleanups, search, filters, safe deletion | G-014…G-017 | 2 weeks |
 | **M5** Visual polish and data | Cushion, export, snapshots, comparison, duplicates | G-018…G-020 | 2-3 weeks |
@@ -28,3 +28,4 @@
 - 2026-10-13 · r1: milestones M0-M7.
 - 2026-10-13 · r2: translated to English.
 - 2026-10-13 · r3: current focus updated after M1.7-M1.11 (M1 exit criterion "screenshot in devlog" still open).
+- 2026-10-13 · r4: M1 and M2 marked done; current focus moved to M3.

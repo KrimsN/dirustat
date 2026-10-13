@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-13 · M2.1-M2.9 · Claude
+- Landed: M2.1 `CommandSpec` registry; commands `scan.start/cancel`, `select.node/clear`, `view.size_mode`, `session.state/poll`, `settings.get/set/reset`, `tree.children`, `tree.path`, `list.largest_files`, `list.drives`. M2.3 `hostile_params_never_panic` over the registry. M2.2 menus and command palette (Ctrl+Shift+P) built from the registry, `ui.*` shell commands. M2.4 control channel (TCP 127.0.0.1, key file via getrandom, limits), `UiBridge` wired in `apps/dirustat` with `--control`. M2.5 `ui.screenshot` (flags `--demo --screenshot --exit-after-screenshot`), screenshot `docs/img/m1-main.png`. M2.6 CLI (`commands`, `scan`, `info`, `run`, `mcp`, `--timeout`). M2.7 MCP stdio server and `mcp --connect`. M2.8 Settings (serde, atomic save, corrupt-file handling) and `LaunchArgs`. M2.9 engine side only: top-N largest files, paged children, drives provider (default empty).
+- Numbers: 255 tests pass in `cargo test --workspace`. Parity: WinDirStat 7/34 done (11 partial), WizTree 0/12 done (3 partial).
+- Verified: screenshot `docs/img/m1-main.png`; closed G-005, G-006, G-008, G-009, G-010.
+- Still open: G-011 (drive picker UI, flat list UI, free space; real Win32 drives need platform services in M4/G-014); review follow-ups G-025 (O(n) `tree.children`/`list.largest_files` under the session lock, cache by revision), G-026 (`info` has no `--timeout`), G-027 (screenshot encode on the UI thread), G-028 (menus only File/Edit/View), G-029 (tree keyboard navigation), G-030 (wasm-core check skipped locally); G-002 cold-cache scan slowness. Next: M3.1 Win32 FFI in `dirustat-ntfs`.
+
 ## 2026-10-13 · M1.7-M1.11 (logic + shell) · Claude + 4 parallel agents
 - Landed: M1.7 ADR 0008 + `name_lossy` flag + `name_from_wide` (model 7 -> 12 tests). M1.8 eframe/egui 0.36 shell: `Tokens` (dark/light), serde `UiState`, `DirustatApp` (menu, path bar, Scan/Stop, status bar), stub tree/map/ext panels, non-blocking scan polling, headless frame tests (ui 9 tests), `cargo run -p dirustat`. M1.10 logic: `treemap::{hit_test, layout_tree, hit_test_tiles}` (iterative, depth/tile/min-size caps) and `engine::MapLayout`/`MapState` cached by `Session::revision()`, selection (treemap 2 -> 7, engine 8 -> 18 tests). M1.11 logic: `engine::ext` extension stats and deterministic colours.
 - Numbers: `cargo xtask ci` green; 84 tests passing.
