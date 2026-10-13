@@ -27,6 +27,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             params_doc: "{\"key\": string, \"value\": any} keys: size_mode (\"logical\"|\"allocated\"), \
                 ext_sort / tree_sort ({\"key\": \"size\"|\"name\"|\"count\", \"descending\": bool}), \
                 treemap.cushion / treemap.grid / treemap.show_free_space (bool), \
+                scan.prefer_fast_path (bool, default true), \
                 recent_paths (array of at most 20 non-empty strings). Unknown key is invalid_params.",
             destructive: false,
             enabled: always,
@@ -79,6 +80,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &Value) -> Result<(), CommandEr
         "treemap.cushion" => s.treemap.cushion = typed(key, value)?,
         "treemap.grid" => s.treemap.grid = typed(key, value)?,
         "treemap.show_free_space" => s.treemap.show_free_space = typed(key, value)?,
+        "scan.prefer_fast_path" => s.prefer_fast_path = typed(key, value)?,
         "recent_paths" => s.recent_paths = paths(value)?,
         _ => return Err(invalid(format!("unknown settings key: {}", key.chars().take(100).collect::<String>()))),
     }
@@ -151,6 +153,18 @@ mod tests {
         assert_eq!(out["settings"]["size_mode"], "allocated");
         assert_eq!(s.map_size_mode(), SizeMode::Allocated);
         assert_eq!(s.settings(), &Settings::default());
+    }
+
+    #[test]
+    fn prefer_fast_path_defaults_on_and_old_files_load() {
+        let mut s = Session::new();
+        assert!(s.settings().prefer_fast_path);
+        let out = s.execute("settings.set", &json!({"key": "scan.prefer_fast_path", "value": false})).unwrap();
+        assert_eq!(out["settings"]["prefer_fast_path"], false);
+        let bad = json!({"key": "scan.prefer_fast_path", "value": "no"});
+        assert_eq!(s.execute("settings.set", &bad).unwrap_err().code(), "invalid_params");
+        let old: Settings = serde_json::from_str(r#"{"version":1,"size_mode":"logical"}"#).unwrap();
+        assert!(old.prefer_fast_path);
     }
 
     #[test]

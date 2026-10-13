@@ -101,6 +101,8 @@ pub struct Settings {
     pub treemap: TreemapSettings,
     /// Most recently scanned paths, newest first, at most [`MAX_RECENT_PATHS`].
     pub recent_paths: Vec<String>,
+    /// Use the NTFS MFT fast path when it is available (otherwise always walk the filesystem).
+    pub prefer_fast_path: bool,
 }
 
 impl Default for Settings {
@@ -112,6 +114,7 @@ impl Default for Settings {
             tree_sort: SortSetting::default(),
             treemap: TreemapSettings::default(),
             recent_paths: Vec::new(),
+            prefer_fast_path: true,
         }
     }
 }

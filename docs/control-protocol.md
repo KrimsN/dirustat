@@ -38,6 +38,8 @@ Rules:
 - `engine.execute` blocks until fast commands finish; long ones (`scan.start`) return at once and progress is read through `session.state`.
 - Responses are size-limited: big trees are returned in pages (`session.tree`). One `session.tree` call examines at most 50 000 nodes; past that the answer has `truncated: true` and `visit_capped: true` (`total_children` is then a lower bound).
 - `engine.execute` of `scan.start` with a UNC path (two leading slashes or backslashes, including the extended UNC form) is refused with `invalid_params` over control. `scan.start` returns at once: a missing or non-directory root is reported when the scan is polled (`session.poll`/`session.state`) as `invalid_params`.
+- `engine.execute` of `scan.fast_path_status` (`{volume?}`, default the system drive) probes a volume read-only and returns `{volume, available, reason, needs_admin, preferred}`; `reason` is one of `available`, `not_windows`, `access_denied`, `not_ntfs`, `not_found`, `invalid_name`, `malformed`, `io_error`. A bad volume name is a `reason`, not an error. It never elevates (ADR 0002). Setting `scan.prefer_fast_path` (bool, default true) is changed with `settings.set`.
+- `ui.relaunch_elevated_help` (UI command, run through the bridge) only toggles an explanation window (`ui.state`: `elevation_help_open`); `ui.state.elevation_hint` holds the volume whose scan root lacked administrator rights. No elevation is performed; a manifest or `runas` relaunch is left for packaging (M6).
 - `ControlClient` drops its connection after any I/O error or timeout (the next call reconnects) and rejects a response whose `id` differs from the request.
 
 ## MCP

@@ -6,6 +6,7 @@
 //! unknown params fields with `InvalidParams` (use [`parse_params`] / [`no_params`]).
 
 mod list;
+mod privileges;
 mod scan;
 mod select;
 mod session;
@@ -14,6 +15,8 @@ mod settings;
 mod testing;
 mod tree;
 mod view;
+
+pub use privileges::{FastPathStatus, fast_path_status, volume_root_of};
 
 use crate::{CommandError, Session, guard};
 use serde::Serialize;
@@ -69,6 +72,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(settings::specs());
         all.extend(tree::specs());
         all.extend(list::specs());
+        all.extend(privileges::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all

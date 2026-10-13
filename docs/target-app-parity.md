@@ -48,7 +48,7 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | # | Feature | Command / area | Milestone | Status |
 |---|---|---|---|---|
 | 1 | Scan through the MFT | `scan.start` (backend `mft`) | M3 | missing |
-| 2 | Ask for administrator rights and fall back to a normal scan | `scan.elevate` | M3 | missing |
+| 2 | Ask for administrator rights and fall back to a normal scan | `scan.elevate` | M3 | partial 2026-10-13 (awareness only: `scan.fast_path_status`, status-bar hint, `ui.relaunch_elevated_help`; real elevation left for M6 packaging) |
 | 3 | Flat list of all files | `view.file_list` | M2 | missing |
 | 4 | Top largest files | `list.largest_files` | M2 | partial (engine command with tests, callable from CLI/control/MCP; no UI panel; O(n) per call, see G-025) |
 | 5 | Search with wildcard/regex | `search.find` (mode) | M4 | missing |

@@ -70,6 +70,12 @@ fn palette(s: &mut UiState) -> UiEffect {
     s.palette_index = 0;
     UiEffect::None
 }
+/// Only explains how to get administrator rights; no elevation is performed here. Real elevation
+/// (manifest or ShellExecute `runas`) is left for packaging (M6), see ADR 0002.
+fn elevated_help(s: &mut UiState) -> UiEffect {
+    s.elevation_help_open = !s.elevation_help_open;
+    UiEffect::None
+}
 fn quit(_: &mut UiState) -> UiEffect {
     UiEffect::Quit
 }
@@ -177,6 +183,15 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         checked: None,
         run: palette,
     },
+    UiCommand {
+        id: "ui.relaunch_elevated_help",
+        label: "Administrator rights for fast scan",
+        menu: "Help/Administrator rights for fast scan",
+        shortcut: None,
+        params_doc: NONE,
+        checked: Some(|s| s.elevation_help_open),
+        run: elevated_help,
+    },
 ];
 
 /// Looks a shell command up by id.
@@ -256,5 +271,14 @@ mod tests {
         assert_eq!(s.zoom_percent, 100);
         assert_eq!(run(&mut s, "ui.quit"), Some(UiEffect::Quit));
         assert_eq!(run(&mut s, "ui.nope"), None);
+    }
+
+    #[test]
+    fn elevated_help_only_toggles_state() {
+        let mut s = UiState::default();
+        assert_eq!(run(&mut s, "ui.relaunch_elevated_help"), Some(UiEffect::None));
+        assert!(s.elevation_help_open);
+        run(&mut s, "ui.relaunch_elevated_help");
+        assert!(!s.elevation_help_open);
     }
 }

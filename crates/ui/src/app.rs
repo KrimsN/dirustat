@@ -146,11 +146,20 @@ impl DirustatApp {
         let infos = session.commands();
         let params = self.default_params(&session, id, &infos).ok_or_else(|| format!("{id} needs parameters"))?;
         let value = session.execute(id, &params).map_err(|e| e.to_string())?;
+        let prefer_fast = session.settings().prefer_fast_path;
         drop(session);
         if id == "scan.start" {
             self.state.scan = ScanStatus::Running { dirs: 0, files: 0, bytes: 0, errors: 0 };
+            self.refresh_elevation_hint(prefer_fast);
         }
         Ok(value)
+    }
+
+    /// Probes the fast path once per scan start (never per frame) and sets the status-bar hint.
+    fn refresh_elevation_hint(&mut self, prefer_fast: bool) {
+        let volume = dirustat_engine::volume_root_of(self.state.path_text.trim()).filter(|_| prefer_fast);
+        let status = volume.as_deref().map(dirustat_engine::fast_path_status);
+        self.state.set_elevation_hint(volume.as_deref(), status.as_ref());
     }
 
     /// Parameters for a command invoked without a form (menu, shortcut, palette, button).
@@ -243,6 +252,7 @@ impl DirustatApp {
             self.status_bar(ui);
         }
         self.central(ui);
+        self.elevation_help_window(&ctx);
         let entries = Self::palette_entries(&infos);
         if let Some(id) = palette::show(&ctx, &mut self.state, &self.tokens, &entries) {
             let _ = self.run_command(&id);
@@ -250,6 +260,22 @@ impl DirustatApp {
         if self.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
+    }
+
+    /// Non-modal explanation opened by `ui.relaunch_elevated_help`. It performs no elevation.
+    fn elevation_help_window(&mut self, ctx: &egui::Context) {
+        if !self.state.elevation_help_open {
+            return;
+        }
+        let mut open = true;
+        let muted = Tokens::color(self.tokens.text_muted);
+        egui::Window::new("Administrator rights").open(&mut open).collapsible(false).resizable(false).show(ctx, |ui| {
+            ui.label(crate::state::ELEVATION_HINT);
+            ui.add_space(self.tokens.spacing);
+            ui.label("To use the fast scan, close diRUSTat and start it again with \"Run as administrator\".");
+            ui.colored_label(muted, "diRUSTat never elevates by itself; scans without it use the portable walk.");
+        });
+        self.state.elevation_help_open = open;
     }
 
     /// Consumes keyboard shortcuts of enabled commands; plain keys are ignored while typing.
@@ -430,6 +456,11 @@ impl DirustatApp {
                 if let Some(notice) = &self.state.notice {
                     ui.separator();
                     ui.colored_label(Tokens::color(tokens.error), notice);
+                }
+                if self.state.elevation_hint.is_some() {
+                    ui.separator();
+                    ui.colored_label(Tokens::color(tokens.warning), crate::state::ELEVATION_HINT)
+                        .on_hover_text("Help > Administrator rights for fast scan explains how to restart");
                 }
             });
         });
@@ -643,6 +674,52 @@ mod tests {
         let out = ctx.run_ui(input, |ui| app.show(ui));
         out.drop_without_applying_deltas();
         assert_eq!(app.state().zoom_percent, 100);
+    }
+
+    #[test]
+    fn elevation_hint_is_set_only_for_denied_volume_roots() {
+        let denied = |reason: &'static str| dirustat_engine::FastPathStatus {
+            volume: "C:".into(),
+            available: false,
+            reason,
+            needs_admin: reason == "access_denied",
+        };
+        let mut s = UiState::default();
+        s.set_elevation_hint(Some("C:"), Some(&denied("access_denied")));
+        assert_eq!(s.elevation_hint.as_deref(), Some("C:"));
+        s.set_elevation_hint(Some("C:"), Some(&denied("not_ntfs")));
+        assert_eq!(s.elevation_hint, None);
+        s.set_elevation_hint(Some("C:"), Some(&denied("access_denied")));
+        s.set_elevation_hint(None, Some(&denied("access_denied")));
+        assert_eq!(s.elevation_hint, None);
+        s.set_elevation_hint(Some("C:"), None);
+        assert_eq!(s.elevation_hint, None);
+    }
+
+    #[test]
+    fn non_root_scans_clear_the_hint_and_frames_show_it() {
+        let mut app = DirustatApp::new();
+        app.state_mut().elevation_hint = Some("C:".to_owned());
+        app.state_mut().path_text = "definitely/not/a/volume/root".to_owned();
+        app.refresh_elevation_hint(true);
+        assert_eq!(app.state().elevation_hint, None);
+        // Preference off: no probe, no hint, even for a volume root.
+        app.state_mut().path_text = "C:\\".to_owned();
+        app.refresh_elevation_hint(false);
+        assert_eq!(app.state().elevation_hint, None);
+        // A frame with the hint and the help window open builds in both themes.
+        let ctx = egui::Context::default();
+        app.state_mut().elevation_hint = Some("C:".to_owned());
+        assert!(app.run_command("ui.relaunch_elevated_help").is_ok());
+        assert!(app.state().elevation_help_open);
+        for theme in [ThemeKind::Dark, ThemeKind::Light] {
+            app.state_mut().theme = theme;
+            assert!(frame(&mut app, &ctx) > 0);
+        }
+        let json = app.ui_state_json();
+        assert_eq!(json["elevation_hint"], "C:");
+        assert_eq!(json["elevation_help_open"], true);
+        assert!(app.apply_ui_patch(&json!({"elevation_hint": "D:"})).is_err());
     }
 
     #[test]

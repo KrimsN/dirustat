@@ -13,7 +13,7 @@ mod launch;
 mod map;
 mod settings;
 
-pub use cmd::{CommandInfo, CommandSpec};
+pub use cmd::{CommandInfo, CommandSpec, FastPathStatus, fast_path_status, volume_root_of};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
 
 pub use drives::{DriveInfo, MAX_DRIVES};

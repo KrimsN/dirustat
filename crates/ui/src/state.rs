@@ -104,7 +104,18 @@ pub struct UiState {
     /// Last command error shown in the status bar (cleared by the next successful command).
     #[serde(default)]
     pub notice: Option<String>,
+    /// Volume (`C:`) whose scan root could use the MFT fast path if the app had administrator
+    /// rights; drives the non-modal status-bar hint. Set when a scan starts.
+    #[serde(default)]
+    pub elevation_hint: Option<String>,
+    /// Whether the "administrator rights" explanation window (`ui.relaunch_elevated_help`) is open.
+    #[serde(default)]
+    pub elevation_help_open: bool,
 }
+
+/// Status-bar hint shown while [`UiState::elevation_hint`] is set.
+pub const ELEVATION_HINT: &str =
+    "Fast MFT scan needs administrator rights. Restart as administrator for WizTree-class speed.";
 
 /// Smallest accepted interface zoom.
 pub const MIN_ZOOM_PERCENT: u16 = 50;
@@ -137,6 +148,8 @@ impl Default for UiState {
             palette_query: String::new(),
             palette_index: 0,
             notice: None,
+            elevation_hint: None,
+            elevation_help_open: false,
         }
     }
 }
@@ -175,6 +188,15 @@ struct UiPatch {
 }
 
 impl UiState {
+    /// Records the fast-path probe result for the scan root: the hint is set only when the root is
+    /// a volume root (`volume` is `Some`) and the probe says administrator rights are missing.
+    pub fn set_elevation_hint(&mut self, volume: Option<&str>, status: Option<&dirustat_engine::FastPathStatus>) {
+        self.elevation_hint = match (volume, status) {
+            (Some(v), Some(s)) if s.needs_admin => Some(v.to_owned()),
+            _ => None,
+        };
+    }
+
     /// Applies a `ui.set_state` patch atomically: on any error the state is left unchanged.
     pub fn apply_patch(&mut self, patch: &serde_json::Value) -> Result<(), String> {
         let p = UiPatch::deserialize(patch).map_err(|e| e.to_string())?;
