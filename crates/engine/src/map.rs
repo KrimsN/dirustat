@@ -14,6 +14,8 @@ pub struct MapTile {
     pub rect: Rect,
     pub depth: u32,
     pub leaf: bool,
+    /// Stands for the children of `node` too small to get their own tile; always a leaf.
+    pub remainder: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +52,7 @@ impl MapLayout {
             .into_iter()
             .filter_map(|t| {
                 let node = *ids.get(t.id)?;
-                Some(MapTile { node, rect: t.rect, depth: t.depth, leaf: t.leaf })
+                Some(MapTile { node, rect: t.rect, depth: t.depth, leaf: t.leaf, remainder: t.remainder })
             })
             .collect();
         Self { tiles }

@@ -131,6 +131,10 @@ pub struct Tile {
     pub depth: u32,
     /// True when the tile was not subdivided (no children, depth cap, too small, or tile cap hit).
     pub leaf: bool,
+    /// True for the synthetic tile that stands for the children of `id` too small (or too many) to get
+    /// their own tile. It has the id of its parent, is always a leaf, and exists so that the children of
+    /// a subdivided tile always cover its whole rect.
+    pub remainder: bool,
 }
 
 /// Limits for [`layout_tree`].
@@ -138,7 +142,8 @@ pub struct Tile {
 pub struct LayoutOptions {
     /// Tiles at this depth are not subdivided.
     pub max_depth: u32,
-    /// Children whose rect is narrower or shorter than this are dropped (and not subdivided).
+    /// Children whose rect is narrower or shorter than this get no tile of their own: they are merged
+    /// into one remainder tile (see [`Tile::remainder`]).
     pub min_size: f32,
     /// Hard cap on emitted tiles.
     pub max_tiles: usize,
@@ -152,7 +157,8 @@ impl Default for LayoutOptions {
 
 /// Lays out a tree iteratively (no recursion). `children(id, out)` appends `(child id, weight)` for the
 /// children of `id`; zero weights are ignored. The result is in parent-before-children order; the first
-/// tile is the root. Children of a tile partition (a part of) its rect proportionally to weight.
+/// tile is the root. The children of a subdivided tile partition its whole rect proportionally to weight
+/// (undrawable children are merged into a remainder tile); a tile that cannot be subdivided stays a leaf.
 /// Empty or non-finite bounds yield no tiles.
 pub fn layout_tree<F>(root: usize, bounds: Rect, opts: LayoutOptions, mut children: F) -> Vec<Tile>
 where
@@ -168,7 +174,7 @@ where
     if !valid || opts.max_tiles == 0 {
         return tiles;
     }
-    tiles.push(Tile { id: root, rect: bounds, depth: 0, leaf: true });
+    tiles.push(Tile { id: root, rect: bounds, depth: 0, leaf: true, remainder: false });
     // Expansion is largest-area-first (ties: earliest tile), so when `max_tiles` is hit the cap cuts the
     // smallest tiles instead of starving the biggest directories. Entries are (area bits, Reverse(index));
     // the bits of a non-negative f32 order like the value.
@@ -191,20 +197,36 @@ where
         weights.clear();
         weights.extend(kids.iter().map(|&(_, w)| w));
         let rects = squarify(&weights, tile.rect);
-        let mut emitted = false;
+        // Leading children that are big enough to draw (the negated comparison also rejects NaN).
+        let visible = rects.iter().take_while(|r| r.w >= opts.min_size && r.h >= opts.min_size).count();
+        let room = opts.max_tiles.saturating_sub(tiles.len());
+        // The children that stay individual tiles. Unless all of them fit, the rest is merged into one
+        // remainder tile, so the children always cover the whole rect of their parent.
+        let keep = if visible == kids.len() && visible <= room { visible } else { visible.min(room.saturating_sub(1)) };
+        if keep == 0 {
+            continue; // nothing drawable (or no room): the tile stays a filled leaf
+        }
+        let depth = tile.depth.saturating_add(1);
+        let rects = if keep == kids.len() {
+            rects
+        } else {
+            let tail = kids.iter().skip(keep).fold(0_u64, |acc, &(_, w)| acc.saturating_add(w));
+            kids.truncate(keep);
+            weights.clear();
+            weights.extend(kids.iter().map(|&(_, w)| w));
+            let pos = weights.partition_point(|&w| w >= tail);
+            weights.insert(pos, tail);
+            let mut rects = squarify(&weights, tile.rect);
+            let remainder = if pos < rects.len() { rects.remove(pos) } else { Rect::default() };
+            tiles.push(Tile { id: tile.id, rect: remainder, depth, leaf: true, remainder: true });
+            rects
+        };
+        // `rects` is parallel to `kids` (the remainder slot was removed above).
         for (&(id, _), rect) in kids.iter().zip(rects) {
-            if tiles.len() >= opts.max_tiles {
-                break;
-            }
-            // Keep only visible tiles; the negated comparison also rejects NaN.
-            if !(rect.w >= opts.min_size && rect.h >= opts.min_size) {
-                continue;
-            }
-            emitted = true;
-            tiles.push(Tile { id, rect, depth: tile.depth.saturating_add(1), leaf: true });
+            tiles.push(Tile { id, rect, depth, leaf: true, remainder: false });
             queue.push((rect.area().to_bits(), Reverse(tiles.len().saturating_sub(1))));
         }
-        if emitted && let Some(t) = tiles.get_mut(ti) {
+        if let Some(t) = tiles.get_mut(ti) {
             t.leaf = false;
         }
     }
@@ -212,7 +234,7 @@ where
 }
 
 /// Deepest tile containing the point (ties: the later one). Parents contain their children, so a
-/// point in a gap left by dropped tiny children resolves to the parent.
+/// point inside a remainder tile resolves to that tile (which carries its parent's id).
 pub fn hit_test_tiles(tiles: &[Tile], px: f32, py: f32) -> Option<usize> {
     let mut best: Option<(usize, u32)> = None;
     for (i, t) in tiles.iter().enumerate() {
@@ -359,6 +381,51 @@ mod tests {
         assert_eq!(big_files, 8, "the largest directory must be expanded before the cap is spent");
         let big = tiles.iter().find(|t| t.id == 1).unwrap();
         assert!(!big.leaf);
+    }
+
+    /// Root -> 400 nodes of skewed weights; nodes 1..=20 are dirs with 30 skewed files each.
+    fn skewed(id: usize, out: &mut Vec<(usize, u64)>) {
+        match id {
+            0 => out.extend((1..=400_usize).map(|i| (i, 1 + (u64::try_from(i).unwrap_or(1) % 37).pow(4)))),
+            1..=20 => {
+                out.extend((0..30_usize).map(|k| (id * 1000 + k, 1 + (u64::try_from(k).unwrap_or(1) + 1).pow(3))))
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_children_cover_parents(tiles: &[Tile]) {
+        for parent in tiles.iter().filter(|t| !t.leaf) {
+            let covered: f32 = tiles
+                .iter()
+                .filter(|c| c.depth == parent.depth + 1)
+                .filter(|c| {
+                    let (cx, cy) = (c.rect.x + c.rect.w / 2.0, c.rect.y + c.rect.h / 2.0);
+                    parent.rect.contains(cx, cy)
+                })
+                .map(|c| c.rect.area())
+                .sum();
+            let want = parent.rect.area();
+            assert!(
+                (covered - want).abs() <= want * 1e-3 + 1e-3,
+                "tile {parent:?}: children cover {covered} of {want}"
+            );
+        }
+    }
+
+    #[test]
+    fn children_of_a_subdivided_tile_cover_it_at_any_viewport() {
+        for (w, h) in [(120.0, 80.0), (400.0, 300.0), (1000.0, 700.0), (1920.0, 1080.0)] {
+            let b = Rect { x: 5.0, y: 7.0, w, h };
+            for max_tiles in [7, 40, 50_000] {
+                let tiles = layout_tree(0, b, LayoutOptions { max_tiles, ..LayoutOptions::default() }, skewed);
+                assert!(tiles.len() <= max_tiles);
+                assert_children_cover_parents(&tiles);
+            }
+            let tiles = layout_tree(0, b, LayoutOptions::default(), skewed);
+            assert!(tiles.iter().any(|t| t.remainder), "{w}x{h}: tiny children must be merged, not dropped");
+            assert!(tiles.iter().filter(|t| t.remainder).all(|t| t.leaf));
+        }
     }
 
     #[test]
