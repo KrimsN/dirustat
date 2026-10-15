@@ -58,6 +58,28 @@ impl MapLayout {
         Self { tiles }
     }
 
+    /// Maps tiles laid out in `from` onto `to` (affine scale and shift), clamping every rect into `to`
+    /// so float error never lets a tile stick out of the bounds. Invalid bounds give an empty layout.
+    fn scaled(&self, from: Rect, to: Rect) -> Self {
+        if !is_valid(from) || !is_valid(to) {
+            return Self::default();
+        }
+        let (sx, sy) = (to.w / from.w, to.h / from.h);
+        let (right, bottom) = (to.x + to.w, to.y + to.h);
+        let tiles = self
+            .tiles
+            .iter()
+            .map(|t| {
+                let x = (to.x + (t.rect.x - from.x) * sx).clamp(to.x, right);
+                let y = (to.y + (t.rect.y - from.y) * sy).clamp(to.y, bottom);
+                let w = (t.rect.w * sx).min(right - x).max(0.0);
+                let h = (t.rect.h * sy).min(bottom - y).max(0.0);
+                MapTile { rect: Rect { x, y, w, h }, ..*t }
+            })
+            .collect();
+        Self { tiles }
+    }
+
     pub fn tiles(&self) -> &[MapTile] {
         &self.tiles
     }
@@ -91,13 +113,44 @@ pub struct MapState {
     mode: SizeMode,
     selected: Option<NodeId>,
     options: LayoutOptions,
+    /// Layout computed for the quantized bounds.
     cache: Option<(CacheKey, MapLayout)>,
+    /// `cache` rescaled to the exact bounds (key of the base layout, exact bounds bits).
+    view: Option<(CacheKey, [u32; 4], MapLayout)>,
 }
 
 impl MapState {
     pub(crate) fn new() -> Self {
-        Self { mode: SizeMode::default(), selected: None, options: LayoutOptions::default(), cache: None }
+        Self { mode: SizeMode::default(), selected: None, options: LayoutOptions::default(), cache: None, view: None }
     }
+}
+
+fn is_valid(b: Rect) -> bool {
+    b.x.is_finite() && b.y.is_finite() && b.w.is_finite() && b.h.is_finite() && b.w > 0.0 && b.h > 0.0
+}
+
+/// Rounds one dimension up to a multiple of 1/8 of the next power of two (at least 16 px), i.e. about
+/// 6-12 % steps. Values beyond 2^20 px are clamped.
+fn quantize_dim(v: f32) -> f32 {
+    let clamped = v.clamp(1.0, 1_048_576.0);
+    // Both casts are in range after the clamp.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let px = clamped.ceil() as u32;
+    let step = (px.next_power_of_two() / 8).max(16);
+    let q = px.div_ceil(step).saturating_mul(step);
+    #[allow(clippy::cast_precision_loss)]
+    let q = q as f32;
+    q
+}
+
+/// Bounds the expensive layout is computed for: origin (0, 0) and a size rounded up to a coarse grid, so
+/// that small window-size changes reuse the cached layout. Invalid bounds are returned unchanged (they
+/// lay out to nothing).
+fn quantize_bounds(b: Rect) -> Rect {
+    if !is_valid(b) {
+        return b;
+    }
+    Rect { x: 0.0, y: 0.0, w: quantize_dim(b.w), h: quantize_dim(b.h) }
 }
 
 impl Session {
@@ -120,18 +173,31 @@ impl Session {
         self.revision = self.revision.saturating_add(1);
         self.map.selected = None;
         self.map.cache = None;
+        self.map.view = None;
     }
 
-    /// Cached layout for `bounds` and the current size mode; recomputed only when the key changes.
+    /// Cached layout for `bounds` and the current size mode.
+    ///
+    /// The expensive hierarchical layout is computed for coarsely quantized bounds (see
+    /// [`quantize_bounds`]) and only when revision, quantized size or mode change; for the exact `bounds`
+    /// the cached tiles are merely rescaled (cheap, at most `max_tiles` rects). Dragging a window edge
+    /// therefore recomputes the layout once per size step instead of once per pixel.
     pub fn map_layout(&mut self, bounds: Rect) -> &MapLayout {
-        let key = CacheKey { revision: self.revision, bounds: bounds_bits(bounds), mode: self.map.mode };
-        let fresh = matches!(&self.map.cache, Some((k, _)) if *k == key);
-        if !fresh {
-            let layout = MapLayout::build(&self.tree, bounds, self.map.mode, self.map.options);
+        let base_bounds = quantize_bounds(bounds);
+        let key = CacheKey { revision: self.revision, bounds: bounds_bits(base_bounds), mode: self.map.mode };
+        if !matches!(&self.map.cache, Some((k, _)) if *k == key) {
+            let layout = MapLayout::build(&self.tree, base_bounds, self.map.mode, self.map.options);
             self.map.cache = Some((key, layout));
+            self.map.view = None;
         }
-        match &self.map.cache {
-            Some((_, layout)) => layout,
+        let exact = bounds_bits(bounds);
+        if !matches!(&self.map.view, Some((k, b, _)) if *k == key && *b == exact)
+            && let Some((_, base)) = &self.map.cache
+        {
+            self.map.view = Some((key, exact, base.scaled(base_bounds, bounds)));
+        }
+        match &self.map.view {
+            Some((_, _, layout)) => layout,
             None => {
                 // Unreachable by construction; an empty layout keeps the API total.
                 static EMPTY: MapLayout = MapLayout { tiles: Vec::new() };
@@ -143,8 +209,8 @@ impl Session {
     /// Cached layout for `bounds` together with the tree it was built from.
     pub fn map_view(&mut self, bounds: Rect) -> (&Tree, &MapLayout) {
         self.map_layout(bounds);
-        match &self.map.cache {
-            Some((_, layout)) => (&self.tree, layout),
+        match &self.map.view {
+            Some((_, _, layout)) => (&self.tree, layout),
             None => {
                 static EMPTY: MapLayout = MapLayout { tiles: Vec::new() };
                 (&self.tree, &EMPTY)
@@ -154,7 +220,7 @@ impl Session {
 
     /// Node under the point in the last computed layout (empty when none was computed yet).
     pub fn tile_at(&self, px: f32, py: f32) -> Option<NodeId> {
-        let (_, layout) = self.map.cache.as_ref()?;
+        let (_, _, layout) = self.map.view.as_ref()?;
         layout.tile_at(px, py).map(|t| t.node)
     }
 
@@ -189,7 +255,7 @@ impl Session {
                 SizeMode::Logical => "logical",
                 SizeMode::Allocated => "allocated",
             },
-            tile_count: self.map.cache.as_ref().map_or(0, |(_, l)| l.tiles.len()),
+            tile_count: self.map.view.as_ref().map_or(0, |(_, _, l)| l.tiles.len()),
             selected: self.map.selected.map(NodeId::index),
             selected_name: self.map.selected.and_then(|id| self.tree.get(id)).map(|n| n.name().to_owned()),
         }
@@ -251,6 +317,39 @@ mod tests {
         assert_eq!(s.revision(), rev + 1);
         assert_eq!(s.selection(), None);
         assert_eq!(s.tile_at(1.0, 1.0), None, "cache dropped with the old tree");
+    }
+
+    #[test]
+    fn small_resizes_reuse_the_expensive_layout_and_stay_inside_the_bounds() {
+        let mut s = sample_session();
+        s.map_layout(Rect { x: 10.0, y: 20.0, w: 800.0, h: 600.0 });
+        let base_ptr = s.map.cache.as_ref().map(|(_, l)| l.tiles().as_ptr()).unwrap();
+        for w in 790..=800_u16 {
+            let b = Rect { x: 10.0, y: 20.0, w: f32::from(w), h: 590.0 };
+            let layout = s.map_layout(b).clone();
+            assert_eq!(layout.tiles().len(), 5);
+            for t in layout.tiles() {
+                let r = t.rect;
+                assert!(r.x >= b.x && r.y >= b.y && r.x + r.w <= b.x + b.w && r.y + r.h <= b.y + b.h, "{r:?} in {b:?}");
+            }
+            let root = layout.tiles().first().unwrap().rect;
+            assert!((root.w - b.w).abs() < 0.01 && (root.h - b.h).abs() < 0.01, "root fills the exact bounds");
+            assert_eq!(s.map.cache.as_ref().map(|(_, l)| l.tiles().as_ptr()), Some(base_ptr), "layout reused");
+            assert!(s.tile_at(b.x + 1.0, b.y + 1.0).is_some());
+        }
+        s.map_layout(Rect { x: 10.0, y: 20.0, w: 300.0, h: 200.0 });
+        assert_ne!(s.map.cache.as_ref().map(|(_, l)| l.tiles().as_ptr()), Some(base_ptr), "big change recomputes");
+    }
+
+    #[test]
+    fn quantized_bounds_are_coarse_monotonic_and_total() {
+        for v in [0.5_f32, 1.0, 15.0, 100.0, 800.0, 1920.0, 1e9] {
+            let q = quantize_dim(v);
+            assert!(q >= v.min(1_048_576.0) && q <= v.min(1_048_576.0) * 1.26 + 16.0, "{v} -> {q}");
+        }
+        assert!(quantize_dim(f32::NAN).is_finite());
+        let bad = Rect { x: 0.0, y: 0.0, w: f32::NAN, h: 5.0 };
+        assert!(quantize_bounds(bad).w.is_nan());
     }
 
     #[test]
