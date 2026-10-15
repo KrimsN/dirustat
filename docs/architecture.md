@@ -68,7 +68,7 @@ See `docs/control-protocol.md`: `engine.execute`, `engine.commands`, `session.st
 ## 9. Glossary
 
 - **MFT**: Master File Table, the table of all NTFS files; reading it whole gives a very fast scan.
-- **Logical size**: the file's data size; **allocated size**: space taken on disk (clusters).
+- **Logical size**: the file's data size; **allocated size**: space taken on disk (clusters). The MFT backend reports exact allocation (resident files 0, sparse/compressed = stored size); the portable backend estimates it as logical rounded up to the cluster size, so its allocated total is an upper bound (policy table in the `dirustat-scan` crate docs, remaining work G-045).
 - **Treemap**: a map of nested rectangles with area proportional to size; **squarified**: an algorithm that minimizes elongation; **cushion**: van Wijk's cushion shading that reveals hierarchy.
 - **Cleanup**: a user-defined action on the selected file/directory (open, delete, run a command).
 - **Revision**: a monotonic number of the tree state; the cache key.

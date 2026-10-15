@@ -18,7 +18,7 @@
 //!   below them (`$Extend\$UsnJrnl`, `$RmMetadata`, ...): their parent is a metafile.
 //! * A file with several hard links gets one node per link name (DOS-only 8.3 duplicates excluded). The
 //!   size is charged to the first node created in traversal order; the other nodes carry size 0, so the
-//!   volume total is never inflated. The portable scan applies the same rule where `std` exposes it.
+//!   volume total is never inflated. The portable scan applies the same rule on every platform.
 //! * A link whose parent is missing, not a directory, in a different generation (sequence mismatch) or
 //!   itself unreachable (parent cycles, self-parents) is attached below a synthetic `<orphaned>` directory
 //!   flagged `error`. Directories are descended into at most once, so cycles cannot loop.
@@ -27,7 +27,8 @@
 //!   (cloud placeholders, dedup) are regular files. A directory link has size 0.
 //! * Logical size is the unnamed `$DATA` size. Allocated size is the recorded allocation, or the stored
 //!   (compressed) size for compressed and sparse streams. Resident data lives inside the MFT record and
-//!   occupies no clusters, so its allocated size is 0 by design. Alternate data streams are not counted yet.
+//!   occupies no clusters, so its allocated size is 0 by design (the portable walk cannot see residency and
+//!   reports one cluster; see the size policy table in the crate documentation). Alternate data streams are not counted yet.
 //! * Timestamps are the `$STANDARD_INFORMATION` modification time converted to Unix seconds.
 
 mod build;

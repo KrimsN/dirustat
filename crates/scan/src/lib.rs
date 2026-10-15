@@ -6,10 +6,25 @@
 //! `NodeKind::Link` nodes and are never followed, so cycles cannot occur. Unreadable directories are
 //! flagged with `NodeData::error` and the walk continues.
 //!
-//! Limits of the portable path: allocated size is the logical size rounded up to
-//! `ScanOptions::cluster_size`, sparse and compressed files are not detected, and hardlinks are
-//! deduplicated only where the platform exposes file identity through `std` (Unix). The NTFS fast
-//! path (`dirustat-ntfs`, module `mft`) is the exact source on Windows.
+//! # Size policy (the two backends)
+//!
+//! Logical size is the data size on both backends. Hardlinks are charged once (to the first name in
+//! traversal order) on both: via `st_dev`/`st_ino` on Unix and `GetFileInformationByHandle` through
+//! `dirustat_ntfs::file_identity` on Windows.
+//!
+//! Allocated size ("size on disk") is an estimate on the portable path and exact on the MFT path:
+//!
+//! | file | portable | MFT |
+//! |---|---|---|
+//! | normal, non-resident | logical rounded up to `ScanOptions::cluster_size` | recorded allocation |
+//! | empty | 0 | 0 |
+//! | tiny, resident in its MFT record | one cluster (`std` cannot tell) | 0 (occupies no clusters) |
+//! | sparse / compressed | logical rounded up (flags not inspected) | stored size, when recorded |
+//!
+//! The MFT figures are the truth on NTFS. Consequently the portable allocated total is an upper bound
+//! that is higher than the MFT one by about one cluster per resident file, and by the holes of sparse
+//! files and the savings of compressed ones. Closing this needs a per-file `GetCompressedFileSize`
+//! query on Windows (cost comparable to the hardlink query), tracked as gap G-045.
 //!
 //! Backend choice: when the root is a whole volume (`C:` / `C:\`) and `ScanOptions::prefer_fast_path` is
 //! set, [`start`] first tries the MFT path. Any failure (no administrator rights, not NTFS, damaged or
@@ -654,6 +669,23 @@ mod tests {
         assert_eq!(out.tree.get(link).unwrap().kind(), NodeKind::Link);
         assert_eq!(out.tree.children(link).count(), 0);
         assert_eq!(out.tree.len(), 4);
+    }
+
+    #[test]
+    fn portable_allocated_size_policy_is_cluster_rounding() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("empty"), 0);
+        write(&tmp.path().join("tiny"), 100);
+        write(&tmp.path().join("exact"), 4096);
+        write(&tmp.path().join("over"), 4097);
+        let out =
+            start(tmp.path(), ScanOptions { cluster_size: 4096, ..ScanOptions::default() }).unwrap().join().unwrap();
+        let tree = &out.tree;
+        let alloc = |name: &str| {
+            let id = tree.children(tree.root()).find(|&c| tree.get(c).is_some_and(|n| n.name() == name)).unwrap();
+            tree.get(id).unwrap().data().allocated_size
+        };
+        assert_eq!([alloc("empty"), alloc("tiny"), alloc("exact"), alloc("over")], [0, 4096, 4096, 8192]);
     }
 
     #[test]
