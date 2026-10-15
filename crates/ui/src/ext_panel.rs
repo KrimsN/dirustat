@@ -8,14 +8,17 @@
 use crate::app::human_size;
 use crate::state::{ExtSort, ExtSortColumn, UiState};
 use crate::theme::Tokens;
+use crate::tree_panel::{Arrow, arrow};
 use dirustat_engine::{ExtStat, Session, ext_color};
 use dirustat_model::SizeMode;
 use egui::{Align2, FontId, Id, Rect, Sense, Ui, pos2, vec2};
 use std::sync::{Arc, Mutex, PoisonError};
 
-const COUNT_W: f32 = 48.0;
-const SIZE_W: f32 = 68.0;
-const PERCENT_W: f32 = 64.0;
+const COUNT_W: f32 = 40.0;
+const SIZE_W: f32 = 72.0;
+const PERCENT_W: f32 = 56.0;
+/// Narrowest the extension-name column is allowed to get; the other columns keep their width.
+const EXT_MIN_W: f32 = 56.0;
 const SWATCH: f32 = 10.0;
 
 /// Label shown for files without an extension.
@@ -83,19 +86,16 @@ pub(crate) fn bar_fraction(percent: f64) -> f32 {
     }
 }
 
-fn header_label(base: &str, column: ExtSortColumn, sort: ExtSort) -> String {
-    if sort.column == column {
-        format!("{base} {}", if sort.descending { "\u{25BC}" } else { "\u{25B2}" })
-    } else {
-        base.to_owned()
-    }
-}
-
 /// Column x ranges `(ext_right, count_right, size_right)` inside a row of the given rect.
+///
+/// The number columns have a fixed width and the extension column takes the rest (at least
+/// [`EXT_MIN_W`]). In a rect that is too narrow the right columns overflow and are clipped, so the
+/// extension name never collapses to zero width.
 fn column_edges(rect: Rect) -> (f32, f32, f32) {
-    let size_right = (rect.right() - PERCENT_W).max(rect.left());
-    let count_right = (size_right - SIZE_W).max(rect.left());
-    let ext_right = (count_right - COUNT_W).max(rect.left());
+    let fixed = COUNT_W + SIZE_W + PERCENT_W;
+    let ext_right = rect.left() + (rect.width() - fixed).max(EXT_MIN_W);
+    let count_right = ext_right + COUNT_W;
+    let size_right = count_right + SIZE_W;
     (ext_right, count_right, size_right)
 }
 
@@ -188,9 +188,17 @@ fn header_row(ui: &mut Ui, tokens: &Tokens, sort: ExtSort) -> Option<ExtSortColu
     let mut hit = None;
     for (column, base, cell, align) in cells {
         let resp = ui.interact(cell, ui.id().with(("ext_header", base)), Sense::click());
-        let colour = if sort.column == column { tokens.accent } else { tokens.text_muted };
+        let active = sort.column == column;
+        let colour = Tokens::color(if active { tokens.accent } else { tokens.text_muted });
         let anchor = if align == Align2::LEFT_CENTER { cell.left_center() } else { cell.right_center() };
-        ui.painter_at(cell).text(anchor, align, header_label(base, column, sort), font.clone(), Tokens::color(colour));
+        let painter = ui.painter_at(cell);
+        let text = painter.text(anchor, align, base, font.clone(), colour);
+        if active {
+            // A drawn triangle: the UI font has no arrow glyphs.
+            let dir = if sort.descending { Arrow::Down } else { Arrow::Up };
+            let x = if align == Align2::LEFT_CENTER { text.right() + 7.0 } else { text.left() - 7.0 };
+            arrow(&painter, pos2(x, text.center().y), 3.0, dir, colour);
+        }
         if resp.clicked() {
             hit = Some(column);
         }
@@ -299,10 +307,15 @@ mod tests {
     }
 
     #[test]
-    fn column_edges_never_invert_in_narrow_rects() {
-        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(10.0, 10.0));
-        let (a, b, c) = column_edges(rect);
-        assert!(a >= rect.left() && a <= b && b <= c && c <= rect.right());
+    fn column_edges_keep_the_extension_column_visible() {
+        for width in [0.0, 10.0, 100.0, 224.0, 300.0, 1000.0] {
+            let rect = Rect::from_min_size(pos2(5.0, 0.0), vec2(width, 10.0));
+            let (a, b, c) = column_edges(rect);
+            assert!(a - rect.left() >= EXT_MIN_W, "ext column too narrow at {width}");
+            assert!((b - a - COUNT_W).abs() < 1e-3 && (c - b - SIZE_W).abs() < 1e-3);
+        }
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 10.0));
+        assert!((column_edges(rect).2 + PERCENT_W - 300.0).abs() < 1e-3, "wide rects fill exactly");
     }
 
     #[test]

@@ -509,7 +509,7 @@ impl DirustatApp {
             });
         }
         if panels.extensions {
-            egui::Panel::right("ext_panel").default_size(300.0).show(ui, |ui| {
+            egui::Panel::right("ext_panel").default_size(300.0).min_size(240.0).show(ui, |ui| {
                 ext_panel::show(ui, &session, &mut self.state);
             });
         }

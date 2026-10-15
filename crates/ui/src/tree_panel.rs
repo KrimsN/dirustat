@@ -295,13 +295,13 @@ impl Widths {
 }
 
 #[derive(Clone, Copy)]
-enum Arrow {
+pub(crate) enum Arrow {
     Right,
     Down,
     Up,
 }
 
-fn arrow(painter: &egui::Painter, center: egui::Pos2, half: f32, dir: Arrow, color: egui::Color32) {
+pub(crate) fn arrow(painter: &egui::Painter, center: egui::Pos2, half: f32, dir: Arrow, color: egui::Color32) {
     let h = half;
     let pts = match dir {
         Arrow::Right => {
