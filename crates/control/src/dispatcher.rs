@@ -3,7 +3,7 @@
 use crate::bridge::{NullBridge, Region, ScreenshotRequest, UiBridge};
 use crate::error::{self, ControlError};
 use crate::tree::session_tree;
-use dirustat_engine::Session;
+use dirustat_engine::{Session, is_unc_path};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::panic::{self, AssertUnwindSafe};
@@ -246,20 +246,6 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
-}
-
-/// True for server/share style paths (two leading separators, either kind) and the extended
-/// `\\?\UNC\...` form; extended local paths such as `\\?\C:\...` are not UNC.
-fn is_unc_path(path: &str) -> bool {
-    let norm: String = path.trim_start().chars().take(16).map(|c| if c == '/' { '\\' } else { c }).collect();
-    // `\\?\` is the Win32 extended prefix, `\??\` the NT namespace spelling of the same thing.
-    for prefix in [r"\\?\", r"\??\"] {
-        if let Some(rest) = norm.strip_prefix(prefix) {
-            return rest.get(..3).is_some_and(|s| s.eq_ignore_ascii_case("UNC"))
-                && rest.get(3..).is_none_or(|t| t.is_empty() || t.starts_with('\\'));
-        }
-    }
-    norm.starts_with(r"\\")
 }
 
 /// True if any string inside `value` (bounded depth) is a UNC path.

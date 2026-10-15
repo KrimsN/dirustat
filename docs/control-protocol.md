@@ -30,7 +30,7 @@ Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `
 | `session.tree` | `node?`, `depth?`, `limit?` | subtree with sizes (paginated, never the whole tree) |
 | `ui.state` | none | serialized UI state (serde) |
 | `ui.set_state` | `patch` | change UI state (panels, sorting, zoom) |
-| `ui.screenshot` | `path`, `region?`, `overwrite?` | save a window PNG. An existing file is an error unless `overwrite: true`; missing parent directories are never created; the file is written to a temp file and renamed; captures above 64 megapixels are refused; a request with no capture within 60 s fails with a timeout |
+| `ui.screenshot` | `path`, `region?`, `overwrite?` | save a window PNG. An existing file is an error unless `overwrite: true`, and even then only an existing PNG (checked by its signature) is replaced, never another kind of file; UNC paths and system locations (Windows, Program Files, ProgramData, `/etc`, `/usr`, ...) are refused; missing parent directories are never created; the file is written to a temp file and renamed; captures above 64 megapixels are refused; a request with no capture within 60 s fails with a timeout |
 | `app.quit` | none | graceful shutdown |
 
 Rules:

@@ -11,10 +11,12 @@ mod ext;
 mod guard;
 mod launch;
 mod map;
+mod paths;
 mod settings;
 
 pub use cmd::{CommandInfo, CommandSpec, FastPathStatus, fast_path_status, volume_root_of};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
+pub use paths::is_unc_path;
 
 pub use drives::{DriveInfo, MAX_DRIVES};
 pub use launch::{LaunchArgs, LaunchError, USAGE as LAUNCH_USAGE};

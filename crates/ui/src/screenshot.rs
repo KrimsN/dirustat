@@ -54,17 +54,74 @@ pub struct SaveOptions {
     /// Create missing parent directories. Only trusted callers (the app's own `--screenshot`
     /// flag) set this; the control channel never creates directories.
     pub create_dirs: bool,
+    /// Remote caller: refuse network paths and system locations, and replace only an existing
+    /// regular file that really is a PNG (checked by its signature, not its name).
+    pub restricted: bool,
 }
 
 impl SaveOptions {
-    /// Options for the control channel: no directory creation, overwrite only when asked.
+    /// Options for the control channel: no directory creation, overwrite only when asked, and
+    /// the restrictions of [`SaveOptions::restricted`].
     pub fn controlled(overwrite: bool) -> Self {
-        Self { overwrite, create_dirs: false }
+        Self { overwrite, create_dirs: false, restricted: true }
     }
 
     /// Options for the user's own command line: overwrite and create directories.
     pub fn trusted() -> Self {
-        Self { overwrite: true, create_dirs: true }
+        Self { overwrite: true, create_dirs: true, restricted: false }
+    }
+}
+
+/// Directories a remote caller may not write into (lowercase, `/` separators, prefix match on
+/// whole components).
+const PROTECTED_DIRS: &[&str] =
+    &["/etc", "/usr", "/bin", "/sbin", "/boot", "/sys", "/proc", "/dev", "/lib", "/lib64", "/system", "/library"];
+/// Environment variables naming protected Windows directories.
+const PROTECTED_ENV: &[&str] =
+    &["SystemRoot", "windir", "ProgramFiles", "ProgramFiles(x86)", "ProgramW6432", "ProgramData"];
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+fn normalized_lower(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/").to_lowercase()
+}
+
+fn is_under(path: &str, dir: &str) -> bool {
+    let dir = dir.trim_end_matches('/');
+    !dir.is_empty() && path.strip_prefix(dir).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+}
+
+/// Checks a target path against the restrictions of a remote caller.
+fn check_restricted_target(path: &Path, options: SaveOptions) -> Result<(), String> {
+    if !options.restricted {
+        return Ok(());
+    }
+    if dirustat_engine::is_unc_path(&path.to_string_lossy()) {
+        return Err("network (UNC) paths are not allowed for screenshots".to_owned());
+    }
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let lower = normalized_lower(&abs);
+    let mut protected: Vec<String> = PROTECTED_DIRS.iter().map(|d| (*d).to_owned()).collect();
+    protected.extend(PROTECTED_ENV.iter().filter_map(std::env::var_os).map(|v| normalized_lower(Path::new(&v))));
+    // The raw spelling is checked too: on Windows `/etc/x` becomes `C:\etc\x` when made absolute.
+    let raw = normalized_lower(path);
+    if protected.iter().any(|d| is_under(&lower, d) || is_under(&raw, d)) {
+        return Err(format!("{} is in a protected system location", path.display()));
+    }
+    match std::fs::symlink_metadata(path) {
+        Err(_) => Ok(()),
+        Ok(meta) if !meta.file_type().is_file() => Err(format!("{} is not a regular file", path.display())),
+        Ok(_) => {
+            use std::io::Read;
+            let mut head = [0_u8; 8];
+            let is_png =
+                std::fs::File::open(path).and_then(|mut f| f.read_exact(&mut head)).is_ok() && head == PNG_SIGNATURE;
+            if is_png {
+                Ok(())
+            } else {
+                Err(format!("{} exists and is not a PNG; refusing to replace it", path.display()))
+            }
+        }
     }
 }
 
@@ -117,6 +174,7 @@ impl Screenshots {
         if !options.overwrite && std::fs::symlink_metadata(&path).is_ok() {
             return Err(format!("{} exists; pass overwrite: true to replace it", path.display()));
         }
+        check_restricted_target(&path, options)?;
         if let Some(r) = region
             && !(r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite() && r.w > 0.0 && r.h > 0.0)
         {
@@ -293,6 +351,7 @@ pub fn save_png(
     if !options.overwrite && std::fs::symlink_metadata(path).is_ok() {
         return Err(format!("{} exists; pass overwrite: true to replace it", path.display()));
     }
+    check_restricted_target(path, options)?;
     let tmp = write_temp(dir, &bytes).map_err(|e| format!("cannot write in {}: {e}", dir.display()))?;
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
@@ -409,14 +468,44 @@ mod tests {
         assert!(matches!(s.status(t), Some(ScreenshotStatus::Failed { .. })));
         assert_eq!(std::fs::read(&other).unwrap_or_default(), b"late");
         assert_eq!(std::fs::read(&path).unwrap_or_default(), b"precious");
-        let Ok(t) = s.request_with(&p, None, SaveOptions::controlled(true)) else { return };
+        // A restricted caller cannot replace a non-PNG file even with overwrite: true (QA-7).
+        assert!(s.request_with(&p, None, SaveOptions::controlled(true)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap_or_default(), b"precious");
+        // The trusted command line may; afterwards the file is a real PNG that a remote caller
+        // may replace when it asks for overwrite.
+        let Ok(t) = s.request_with(&p, None, SaveOptions::trusted()) else { return };
         s.finish(t, &image(4, 4), 1.0);
         assert!(matches!(s.status(t), Some(ScreenshotStatus::Done { .. })));
-        assert_ne!(std::fs::read(&path).unwrap_or_default(), b"precious");
+        let Ok(t) = s.request_with(&p, None, SaveOptions::controlled(true)) else { return };
+        s.finish(t, &image(5, 5), 1.0);
+        assert!(matches!(s.status(t), Some(ScreenshotStatus::Done { width: 5, .. })));
         let leftovers = std::fs::read_dir(dir.path()).map_or(0, |d| {
             d.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().ends_with(".tmp")).count()
         });
         assert_eq!(leftovers, 0);
+    }
+
+    #[test]
+    fn restricted_callers_cannot_target_network_or_system_locations() {
+        let mut s = Screenshots::default();
+        for bad in [
+            r"\\server\share\x.png",
+            "//server/share/x.png",
+            r"\??\UNC\server\share\x.png",
+            r"\\?\UNC\server\share\x.png",
+            "/etc/x.png",
+            "/usr/share/x.png",
+            "/ETC/x.png",
+        ] {
+            assert!(s.request_with(bad, None, SaveOptions::controlled(true)).is_err(), "{bad}");
+        }
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            let p = Path::new(&root).join("System32").join("x.png");
+            assert!(s.request_with(&p.to_string_lossy(), None, SaveOptions::controlled(true)).is_err());
+        }
+        // Names that merely start like a protected directory are fine.
+        assert!(!is_under("/etcetera/x.png", "/etc"));
+        assert!(is_under("/etc/x.png", "/etc"));
     }
 
     #[test]
