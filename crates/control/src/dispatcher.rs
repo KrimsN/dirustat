@@ -181,12 +181,10 @@ impl Dispatcher {
             params: Value,
         }
         let p = P::deserialize(params).map_err(|e| ControlError::invalid_params(e.to_string()))?;
-        if p.command == "scan.start"
-            && let Some(path) = p.params.get("path").and_then(Value::as_str)
-            && is_unc_path(path)
-        {
-            // A remote caller must not be able to point the scanner at a network share (it can
-            // hang on a dead server and leaks credentials to it). The CLI and UI are not affected.
+        // A remote caller must not be able to point any path-taking command at a network share (it
+        // can hang on a dead server and leaks credentials to it). The CLI and UI are not affected.
+        // Every string in the params is checked, so future path parameters are covered too.
+        if contains_unc_path(&p.params, 0) {
             return Err(ControlError::invalid_params("UNC paths are not supported over control"));
         }
         let result = lock_session(&self.session).execute(&p.command, &p.params)?;
@@ -253,11 +251,28 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// True for server/share style paths (two leading separators, either kind) and the extended
 /// `\\?\UNC\...` form; extended local paths such as `\\?\C:\...` are not UNC.
 fn is_unc_path(path: &str) -> bool {
-    let norm: String = path.trim_start().chars().take(8).map(|c| if c == '/' { '\\' } else { c }).collect();
-    if let Some(rest) = norm.strip_prefix(r"\\?\") {
-        return rest.get(..3).is_some_and(|s| s.eq_ignore_ascii_case("UNC"));
+    let norm: String = path.trim_start().chars().take(16).map(|c| if c == '/' { '\\' } else { c }).collect();
+    // `\\?\` is the Win32 extended prefix, `\??\` the NT namespace spelling of the same thing.
+    for prefix in [r"\\?\", r"\??\"] {
+        if let Some(rest) = norm.strip_prefix(prefix) {
+            return rest.get(..3).is_some_and(|s| s.eq_ignore_ascii_case("UNC"))
+                && rest.get(3..).is_none_or(|t| t.is_empty() || t.starts_with('\\'));
+        }
     }
     norm.starts_with(r"\\")
+}
+
+/// True if any string inside `value` (bounded depth) is a UNC path.
+fn contains_unc_path(value: &Value, depth: usize) -> bool {
+    if depth > 8 {
+        return false;
+    }
+    match value {
+        Value::String(s) => is_unc_path(s),
+        Value::Array(items) => items.iter().any(|v| contains_unc_path(v, depth + 1)),
+        Value::Object(map) => map.values().any(|v| contains_unc_path(v, depth + 1)),
+        _ => false,
+    }
 }
 
 fn expect_empty(params: &Value) -> Result<(), ControlError> {
@@ -289,6 +304,9 @@ fn parse_screenshot(params: &Value) -> Result<ScreenshotRequest, ControlError> {
     let path = obj.get("path")?.as_str().ok_or_else(|| ControlError::invalid_params("path must be a string"))?;
     if path.is_empty() || path.len() > MAX_PATH_BYTES || path.contains('\0') {
         return Err(ControlError::invalid_params("path is empty, too long or contains NUL"));
+    }
+    if is_unc_path(path) {
+        return Err(ControlError::invalid_params("UNC paths are not supported over control"));
     }
     let region = match obj.0.get("region") {
         None | Some(Value::Null) => None,
@@ -449,6 +467,25 @@ mod tests {
             assert_eq!(code(&v), "invalid_params", "{path}");
             assert!(v["error"]["message"].as_str().unwrap().contains("UNC"), "{path}");
         }
+        for path in [
+            r"\??\UNC\server\share",
+            r"\??\unc\server\share",
+            "/??/UNC/server/share",
+            r"\\?\unc\h\s",
+            r"/\?\UNC\h\s",
+            r"\??\UNC",
+        ] {
+            assert!(is_unc_path(path), "{path}");
+            for command in ["scan.start", "select.node", "some.other"] {
+                let v = call(&d, "engine.execute", json!({"command": command, "params": {"path": path}}));
+                assert_eq!(code(&v), "invalid_params", "{command} {path}");
+                assert!(v["error"]["message"].as_str().unwrap().contains("UNC"), "{command} {path}");
+            }
+            let v = call(&d, "ui.screenshot", json!({"path": path}));
+            assert_eq!(code(&v), "invalid_params", "screenshot {path}");
+        }
+        assert!(!is_unc_path(r"\??\C:\Users"));
+        assert!(!is_unc_path(r"\\?\UNCLE\x"));
         assert!(!is_unc_path(r"C:\Users"));
         assert!(!is_unc_path(r"\\?\C:\Users"));
         assert!(!is_unc_path("/home/user"));
