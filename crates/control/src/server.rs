@@ -6,11 +6,12 @@ use crate::error::{self, ControlError};
 use crate::key::{generate_key, write_key_file};
 use crate::line::{LineRead, read_line_bounded};
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, BufReader, Write};
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -25,7 +26,14 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(1);
 pub const GLOBAL_RATE_LIMIT: u32 = 1000;
 /// A connection must send a request carrying the right key within this time of connecting;
 /// idle or wrong-key peers give their slot back.
-pub const PRE_AUTH_TIMEOUT: Duration = Duration::from_secs(5);
+pub const PRE_AUTH_TIMEOUT: Duration = Duration::from_secs(2);
+/// Connections that have not authenticated yet live in their own slot budget, so keyless peers
+/// cannot take slots from authenticated clients. When it is full the oldest pre-auth peer is
+/// evicted to make room for the newcomer.
+pub const MAX_PRE_AUTH: usize = 8;
+/// Failed (unauthenticated) requests allowed per [`RATE_WINDOW`] across all connections. They
+/// never count against [`GLOBAL_RATE_LIMIT`], which belongs to authenticated clients.
+pub const PRE_AUTH_RATE_LIMIT: u32 = 50;
 /// A request line must arrive within this time of the previous response (idle and slow-drip bound).
 pub const LINE_TIMEOUT: Duration = Duration::from_secs(60);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -35,9 +43,13 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tunable limits of a [`ControlServer`] (tests use small ones).
 #[derive(Clone, Copy, Debug)]
 pub struct ServerLimits {
+    /// Authenticated connections served at once.
     pub max_connections: usize,
+    /// Connections that have not authenticated yet (separate budget).
+    pub max_pre_auth: usize,
     pub conn_rate: u32,
     pub global_rate: u32,
+    pub pre_auth_rate: u32,
     pub pre_auth_timeout: Duration,
 }
 
@@ -45,8 +57,10 @@ impl Default for ServerLimits {
     fn default() -> Self {
         Self {
             max_connections: MAX_CONNECTIONS,
+            max_pre_auth: MAX_PRE_AUTH,
             conn_rate: RATE_LIMIT,
             global_rate: GLOBAL_RATE_LIMIT,
+            pre_auth_rate: PRE_AUTH_RATE_LIMIT,
             pre_auth_timeout: PRE_AUTH_TIMEOUT,
         }
     }
@@ -56,7 +70,34 @@ impl Default for ServerLimits {
 #[derive(Debug)]
 struct Shared {
     limits: ServerLimits,
+    /// Budget of authenticated requests.
     global: Mutex<RateLimiter>,
+    /// Budget of failed unauthenticated requests; independent of `global`.
+    pre_auth: Mutex<RateLimiter>,
+    /// Authenticated connections currently served.
+    authed_active: AtomicUsize,
+    /// Streams of connections that have not authenticated yet, oldest first (ids increase).
+    pending: Mutex<BTreeMap<u64, TcpStream>>,
+    next_id: AtomicU64,
+}
+
+impl Shared {
+    fn forget_pending(&self, id: u64) {
+        self.pending.lock().unwrap_or_else(PoisonError::into_inner).remove(&id);
+    }
+
+    /// Registers a new pre-auth stream, evicting the oldest one when the budget is full.
+    fn add_pending(&self, stream: &TcpStream) -> Option<u64> {
+        let clone = stream.try_clone().ok()?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        while pending.len() >= self.limits.max_pre_auth.max(1) {
+            let Some((_, oldest)) = pending.pop_first() else { break };
+            let _ = oldest.shutdown(Shutdown::Both);
+        }
+        pending.insert(id, clone);
+        Some(id)
+    }
 }
 
 /// Fixed-window request counter.
@@ -124,6 +165,10 @@ impl ControlServer {
         let shared = Arc::new(Shared {
             limits,
             global: Mutex::new(RateLimiter::new(limits.global_rate, RATE_WINDOW, Instant::now())),
+            pre_auth: Mutex::new(RateLimiter::new(limits.pre_auth_rate, RATE_WINDOW, Instant::now())),
+            authed_active: AtomicUsize::new(0),
+            pending: Mutex::new(BTreeMap::new()),
+            next_id: AtomicU64::new(0),
         });
         let spawned = thread::Builder::new()
             .name("dirustat-control-accept".to_owned())
@@ -172,22 +217,20 @@ impl Drop for ControlServer {
 }
 
 fn accept_loop(listener: &TcpListener, dispatcher: &Dispatcher, stop: &Arc<AtomicBool>, shared: &Arc<Shared>) {
-    let active = Arc::new(AtomicUsize::new(0));
     while !stop.load(Ordering::SeqCst) {
         match listener.accept() {
             Ok((stream, peer)) => {
-                if !peer.ip().is_loopback() || active.load(Ordering::SeqCst) >= shared.limits.max_connections {
+                if !peer.ip().is_loopback() {
                     continue;
                 }
-                active.fetch_add(1, Ordering::SeqCst);
-                let (d, s, a) = (dispatcher.clone(), Arc::clone(stop), Arc::clone(&active));
-                let sh = Arc::clone(shared);
+                let Some(id) = shared.add_pending(&stream) else { continue };
+                let (d, s, sh) = (dispatcher.clone(), Arc::clone(stop), Arc::clone(shared));
                 let spawned = thread::Builder::new().name("dirustat-control-conn".to_owned()).spawn(move || {
-                    serve_connection(stream, &d, &s, &sh);
-                    a.fetch_sub(1, Ordering::SeqCst);
+                    serve_connection(stream, id, &d, &s, &sh);
+                    sh.forget_pending(id);
                 });
                 if spawned.is_err() {
-                    active.fetch_sub(1, Ordering::SeqCst);
+                    shared.forget_pending(id);
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(POLL_INTERVAL),
@@ -210,7 +253,16 @@ fn error_line(err: &ControlError) -> String {
     json!({ "id": null, "ok": false, "error": { "code": err.code(), "message": err.message() } }).to_string()
 }
 
-fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBool, shared: &Shared) {
+/// Releases the authenticated-connection slot when the connection thread ends.
+struct AuthedSlot<'a>(&'a AtomicUsize);
+
+impl Drop for AuthedSlot<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn serve_connection(stream: TcpStream, id: u64, dispatcher: &Dispatcher, stop: &AtomicBool, shared: &Shared) {
     if stream.set_nonblocking(false).is_err()
         || stream.set_read_timeout(Some(READ_POLL)).is_err()
         || stream.set_write_timeout(Some(WRITE_TIMEOUT)).is_err()
@@ -221,8 +273,9 @@ fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBoo
     let mut reader = BufReader::new(stream);
     let mut limiter = RateLimiter::new(shared.limits.conn_rate, RATE_WINDOW, Instant::now());
     let mut buf = Vec::new();
-    // Until a request carries the right key the whole connection lives on this short deadline.
-    let mut authed = false;
+    // Until a request carries the right key the whole connection lives on this short deadline
+    // and in the pre-auth slot budget.
+    let mut slot: Option<AuthedSlot<'_>> = None;
     let mut deadline = Instant::now() + shared.limits.pre_auth_timeout;
     while !stop.load(Ordering::SeqCst) {
         match read_line_bounded(&mut reader, MAX_REQUEST_BYTES, &mut buf, Some(deadline)) {
@@ -233,15 +286,26 @@ fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBoo
                 return;
             }
             Ok(LineRead::Line) => {
-                let (response, ok) = answer(dispatcher, &buf, &mut limiter, &shared.global);
-                authed |= ok;
+                let answered = answer(dispatcher, &buf, slot.is_some(), &mut limiter, shared);
                 buf.clear();
-                if let Some(response) = response
+                if let Some(response) = answered.response
                     && write_line(&mut writer, &response).is_err()
                 {
                     return;
                 }
-                if authed {
+                if answered.close {
+                    return;
+                }
+                if answered.authorized {
+                    if slot.is_none() {
+                        // Move from the pre-auth budget to the authenticated one.
+                        if shared.authed_active.fetch_add(1, Ordering::SeqCst) >= shared.limits.max_connections {
+                            shared.authed_active.fetch_sub(1, Ordering::SeqCst);
+                            return;
+                        }
+                        slot = Some(AuthedSlot(&shared.authed_active));
+                        shared.forget_pending(id);
+                    }
                     deadline = Instant::now() + LINE_TIMEOUT;
                 }
             }
@@ -252,28 +316,53 @@ fn serve_connection(stream: TcpStream, dispatcher: &Dispatcher, stop: &AtomicBoo
     }
 }
 
-/// Answers one line; the flag is true when the request passed the key check.
-fn answer(
-    dispatcher: &Dispatcher,
-    line: &[u8],
-    limiter: &mut RateLimiter,
-    global: &Mutex<RateLimiter>,
-) -> (Option<String>, bool) {
+/// Outcome of one request line.
+struct Answered {
+    response: Option<String>,
+    /// The request passed the key check.
+    authorized: bool,
+    /// Drop the connection after sending `response`.
+    close: bool,
+}
+
+fn rate_limited() -> String {
+    error_line(&ControlError::new(error::RATE_LIMITED, "too many requests"))
+}
+
+/// Answers one line. A connection that has not authenticated yet only ever draws on the pre-auth
+/// budget (per connection and global), so it cannot use up the budget of authenticated clients.
+fn answer(dispatcher: &Dispatcher, line: &[u8], authed: bool, limiter: &mut RateLimiter, shared: &Shared) -> Answered {
+    let reply = |response: Option<String>, authorized: bool, close: bool| Answered { response, authorized, close };
     if line.iter().all(u8::is_ascii_whitespace) {
-        return (None, false);
+        return reply(None, false, false);
     }
     let now = Instant::now();
-    let global_ok = global.lock().unwrap_or_else(PoisonError::into_inner).allow(now);
-    if !global_ok || !limiter.allow(now) {
-        return (Some(error_line(&ControlError::new(error::RATE_LIMITED, "too many requests"))), false);
+    if !limiter.allow(now) {
+        return reply(Some(rate_limited()), authed, !authed);
     }
-    match std::str::from_utf8(line) {
-        Ok(text) => {
-            let (response, ok) = dispatcher.handle_line_checked(text);
-            (Some(response), ok)
+    let global_ok = || shared.global.lock().unwrap_or_else(PoisonError::into_inner).allow(now);
+    if authed && !global_ok() {
+        return reply(Some(rate_limited()), true, false);
+    }
+    let Ok(text) = std::str::from_utf8(line) else {
+        let err = ControlError::new(error::BAD_REQUEST, "request is not valid UTF-8");
+        return reply(Some(error_line(&err)), authed, false);
+    };
+    let (response, ok) = dispatcher.handle_line_checked(text);
+    if authed {
+        return reply(Some(response), ok, false);
+    }
+    if ok {
+        // A correct key is charged to the authenticated budget only, never to the pre-auth one,
+        // so keyless peers cannot make it fail; the budget itself still bounds new connections.
+        if !global_ok() {
+            return reply(Some(rate_limited()), false, false);
         }
-        Err(_) => (Some(error_line(&ControlError::new(error::BAD_REQUEST, "request is not valid UTF-8"))), false),
+        return reply(Some(response), true, false);
     }
+    // A failed request of an unauthenticated peer: charge the pre-auth budget; past it, hang up.
+    let within = shared.pre_auth.lock().unwrap_or_else(PoisonError::into_inner).allow(now);
+    if within { reply(Some(response), false, false) } else { reply(Some(rate_limited()), false, true) }
 }
 
 #[cfg(test)]
@@ -479,6 +568,58 @@ mod tests {
         }
         thread::sleep(Duration::from_millis(300));
         assert_eq!(ping(server.port(), server.key())["ok"], true);
+    }
+
+    #[test]
+    fn keyless_clients_cannot_starve_authenticated_ones() {
+        let limits = ServerLimits {
+            max_connections: 2,
+            max_pre_auth: 3,
+            global_rate: 20,
+            pre_auth_rate: 10,
+            pre_auth_timeout: Duration::from_secs(30),
+            ..ServerLimits::default()
+        };
+        let (server, _dir) = start_limited(limits);
+        let key = server.key().to_owned();
+        let mut legit = Conn::open(server.port());
+        assert_eq!(legit.ask(&json!({"id": 0, "key": key, "method": "session.state"}))["ok"], true);
+        // A hostile process opens far more silent connections than any budget allows ...
+        let silent: Vec<TcpStream> =
+            (0..12).map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, server.port())).unwrap()).collect();
+        // ... and floods bad-key requests well above the global limit of 20 per second.
+        let mut flood = Vec::new();
+        for _ in 0..4 {
+            let mut c = Conn::open(server.port());
+            let bad = format!("{}\n", json!({"id": 1, "key": "nope", "method": "session.state"}));
+            let _ = c.writer.write_all(bad.repeat(60).as_bytes());
+            flood.push(c);
+        }
+        // The authenticated connection is neither evicted nor rate limited by the flood.
+        for i in 1..=10 {
+            let v = legit.ask(&json!({"id": i, "key": key, "method": "session.state"}));
+            assert_eq!(v["ok"], true, "request {i}: {v}");
+        }
+        // A new legitimate client still gets in while the pre-auth budget is saturated.
+        assert_eq!(ping(server.port(), &key)["ok"], true);
+        drop((silent, flood));
+    }
+
+    #[test]
+    fn pre_auth_flood_is_cut_off() {
+        let limits = ServerLimits { pre_auth_rate: 5, ..ServerLimits::default() };
+        let (server, _dir) = start_limited(limits);
+        let mut c = Conn::open(server.port());
+        let bad = format!("{}\n", json!({"id": 1, "key": "nope", "method": "session.state"}));
+        let _ = c.writer.write_all(bad.repeat(40).as_bytes());
+        let mut answers = 0;
+        let mut line = String::new();
+        while c.reader.read_line(&mut line).unwrap_or(0) > 0 {
+            answers += 1;
+            line.clear();
+        }
+        // Closed by the server after the pre-auth budget (5 bad requests plus the cutoff answer).
+        assert!(answers <= 7, "{answers}");
     }
 
     #[test]
