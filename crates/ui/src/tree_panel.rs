@@ -22,9 +22,9 @@ pub const MAX_EXPANDED: usize = 1_000_000;
 const INDENT: f32 = 14.0;
 const SIZE_W: f32 = 76.0;
 const BAR_W: f32 = 80.0;
-const FILES_W: f32 = 64.0;
+const FILES_W: f32 = 56.0;
 const DATE_W: f32 = 84.0;
-const NAME_MIN_W: f32 = 120.0;
+const NAME_MIN_W: f32 = 110.0;
 const ROW_PAD: f32 = 4.0;
 
 /// A sortable column.
@@ -266,20 +266,35 @@ fn toggle(state: &mut UiState, id: NodeId) {
     }
 }
 
-#[derive(Clone, Copy)]
+/// Column widths of the tree table. Name takes the flexible rest; when the panel is too narrow
+/// for a readable Name, the optional columns are dropped (width 0) in the order Modified, Files,
+/// % of parent.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct Widths {
     name: f32,
+    bar: f32,
+    files: f32,
+    date: f32,
 }
 
 impl Widths {
     fn new(available: f32) -> Self {
-        let fixed = SIZE_W + BAR_W + FILES_W + DATE_W;
         let avail = if available.is_finite() { available } else { 0.0 };
-        Self { name: (avail - fixed).max(NAME_MIN_W) }
+        let mut optional = [DATE_W, FILES_W, BAR_W];
+        let mut fixed = SIZE_W + optional.iter().sum::<f32>();
+        for slot in &mut optional {
+            if avail - fixed >= NAME_MIN_W {
+                break;
+            }
+            fixed -= *slot;
+            *slot = 0.0;
+        }
+        let [date, files, bar] = optional;
+        Self { name: (avail - fixed).max(NAME_MIN_W), bar, files, date }
     }
 
     fn total(self) -> f32 {
-        self.name + SIZE_W + BAR_W + FILES_W + DATE_W
+        self.name + SIZE_W + self.bar + self.files + self.date
     }
 
     /// Cell rectangles for a row rectangle: name, size, bar, files, modified.
@@ -290,7 +305,7 @@ impl Widths {
             x += w;
             r
         };
-        [next(self.name), next(SIZE_W), next(BAR_W), next(FILES_W), next(DATE_W)]
+        [next(self.name), next(SIZE_W), next(self.bar), next(self.files), next(self.date)]
     }
 }
 
@@ -423,23 +438,25 @@ fn draw_row(
         text,
     );
 
-    // Share of the parent.
+    // Share of the parent (the column is dropped in narrow panels).
     let parent_total = node.parent().and_then(|p| tree.get(p)).map_or(total, |p| p.total_size(mode));
-    let tenths = percent_tenths(total, parent_total);
-    let track = bar_cell.shrink2(egui::vec2(ROW_PAD, 3.0));
-    painter.rect_filled(track, f32::from(tokens.radius_small), Tokens::color(tokens.background));
-    let fill_w = track.width() * f32::from(u16::try_from(tenths).unwrap_or(1000)) / 1000.0;
-    if fill_w > 0.5 {
-        let fill = egui::Rect::from_min_size(track.min, egui::vec2(fill_w, track.height()));
-        painter.rect_filled(fill, f32::from(tokens.radius_small), Tokens::color(tokens.accent));
+    if widths.bar > 0.0 {
+        let tenths = percent_tenths(total, parent_total);
+        let track = bar_cell.shrink2(egui::vec2(ROW_PAD, 3.0));
+        painter.rect_filled(track, f32::from(tokens.radius_small), Tokens::color(tokens.background));
+        let fill_w = track.width() * f32::from(u16::try_from(tenths).unwrap_or(1000)) / 1000.0;
+        if fill_w > 0.5 {
+            let fill = egui::Rect::from_min_size(track.min, egui::vec2(fill_w, track.height()));
+            painter.rect_filled(fill, f32::from(tokens.radius_small), Tokens::color(tokens.accent));
+        }
+        painter.with_clip_rect(bar_cell).text(
+            track.center(),
+            egui::Align2::CENTER_CENTER,
+            percent_text(tenths),
+            egui::FontId::proportional(tokens.font_small),
+            text,
+        );
     }
-    painter.with_clip_rect(bar_cell).text(
-        track.center(),
-        egui::Align2::CENTER_CENTER,
-        percent_text(tenths),
-        egui::FontId::proportional(tokens.font_small),
-        text,
-    );
 
     // Files and modification time.
     let files = if node.kind() == NodeKind::Dir { node.file_count().to_string() } else { String::new() };
@@ -535,6 +552,18 @@ mod tests {
         tree.add_child(root, "alpha", NodeKind::File, 300).unwrap();
         tree.aggregate();
         tree
+    }
+
+    #[test]
+    fn widths_drop_optional_columns_before_squeezing_the_name() {
+        let wide = Widths::new(1000.0);
+        assert!(wide.bar > 0.0 && wide.files > 0.0 && wide.date > 0.0);
+        assert!((wide.total() - 1000.0).abs() < 1e-3, "name takes the flexible rest");
+        let mid = Widths::new(330.0);
+        assert!(mid.date == 0.0 && mid.name >= NAME_MIN_W);
+        let narrow = Widths::new(190.0);
+        assert!(narrow.bar == 0.0 && narrow.files == 0.0 && narrow.date == 0.0 && narrow.name >= NAME_MIN_W);
+        assert!(Widths::new(f32::NAN).name >= NAME_MIN_W);
     }
 
     fn names(tree: &Tree, flat: &Flat) -> Vec<String> {

@@ -35,6 +35,37 @@ pub struct DirustatApp {
     quit_requested: bool,
     /// Result of the fast-path probe running on a helper thread (opening a volume can block).
     probe: Option<Receiver<(String, FastPathStatus)>>,
+    /// The file types panel is enabled but collapsed because the window is too narrow.
+    ext_collapsed: bool,
+}
+
+/// Share of the window width the treemap always keeps, and its absolute floor in points.
+const MAP_MIN_FRACTION: f32 = 0.40;
+const MAP_MIN_W: f32 = 200.0;
+/// Of the width left over by the treemap, the tree panel may take this share and the file types
+/// panel the rest.
+const TREE_SHARE: f32 = 0.6;
+const TREE_MIN_W: f32 = 190.0;
+const EXT_MIN_W: f32 = 240.0;
+
+/// Width limits of the side panels, derived from the window width (in points).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SideLayout {
+    /// False when the file types panel would not get its minimum width; it is collapsed then.
+    pub show_ext: bool,
+    pub tree_max: f32,
+    pub ext_max: f32,
+}
+
+impl SideLayout {
+    /// The treemap keeps at least 40 % of the window (and 200 points); the side panels share the
+    /// rest, and the file types panel collapses first when there is not enough room.
+    pub(crate) fn for_width(total: f32, map_visible: bool) -> Self {
+        let total = if total.is_finite() { total.max(0.0) } else { 0.0 };
+        let budget = if map_visible { (total - (total * MAP_MIN_FRACTION).max(MAP_MIN_W)).max(0.0) } else { total };
+        let ext_max = budget * (1.0 - TREE_SHARE);
+        Self { show_ext: ext_max >= EXT_MIN_W, tree_max: budget * TREE_SHARE, ext_max }
+    }
 }
 
 /// A menu item: label, shortcut and state of one command.
@@ -66,6 +97,7 @@ impl DirustatApp {
             shots: Screenshots::default(),
             quit_requested: false,
             probe: None,
+            ext_collapsed: false,
         }
     }
 
@@ -491,6 +523,10 @@ impl DirustatApp {
                     ui.separator();
                     ui.colored_label(Tokens::color(tokens.error), notice);
                 }
+                if self.ext_collapsed {
+                    ui.separator();
+                    ui.colored_label(Tokens::color(tokens.text_muted), "File types hidden: window too narrow");
+                }
                 if self.state.elevation_hint.is_some() {
                     ui.separator();
                     ui.colored_label(Tokens::color(tokens.warning), crate::state::ELEVATION_HINT)
@@ -503,13 +539,19 @@ impl DirustatApp {
     fn central(&mut self, ui: &mut egui::Ui) {
         let panels = self.state.panels;
         let mut session = lock_session(&self.session);
+        let layout = SideLayout::for_width(ui.available_width(), panels.map);
+        self.ext_collapsed = panels.extensions && !layout.show_ext;
         if panels.tree {
-            egui::Panel::left("tree_panel").default_size(320.0).show(ui, |ui| {
-                tree_panel::show(ui, &mut session, &mut self.state, &self.tokens);
-            });
+            let tree_max = layout.tree_max;
+            egui::Panel::left("tree_panel").default_size(440.0).size_range(TREE_MIN_W.min(tree_max)..=tree_max).show(
+                ui,
+                |ui| {
+                    tree_panel::show(ui, &mut session, &mut self.state, &self.tokens);
+                },
+            );
         }
-        if panels.extensions {
-            egui::Panel::right("ext_panel").default_size(300.0).min_size(240.0).show(ui, |ui| {
+        if panels.extensions && layout.show_ext {
+            egui::Panel::right("ext_panel").default_size(300.0).size_range(EXT_MIN_W..=layout.ext_max).show(ui, |ui| {
                 ext_panel::show(ui, &session, &mut self.state);
             });
         }
@@ -779,6 +821,37 @@ mod tests {
         app.state_mut().path_text = "folder".to_owned();
         app.refresh_elevation_hint(true);
         assert!(app.probe.is_none());
+    }
+
+    #[test]
+    fn side_panels_leave_the_treemap_a_minimum_share() {
+        for total in [0.0, 100.0, 330.0, 667.0, 700.0, 1000.0, 1200.0, 2560.0, f32::NAN, f32::INFINITY] {
+            let l = SideLayout::for_width(total, true);
+            let t = if total.is_finite() { total } else { 0.0 };
+            let ext = if l.show_ext { l.ext_max } else { 0.0 };
+            let map = t - l.tree_max - ext;
+            assert!(map >= (t * 0.4).min(t) - 0.01, "treemap starved at {total}: {map}");
+        }
+        assert!(!SideLayout::for_width(667.0, true).show_ext, "zoom 150 at 1000 px collapses the file types");
+        assert!(SideLayout::for_width(1200.0, true).show_ext);
+        assert!(SideLayout::for_width(1200.0, false).tree_max >= 1200.0 * 0.6 - 0.01);
+    }
+
+    #[test]
+    fn narrow_window_collapses_file_types_and_says_so() {
+        let Some(mut app) = demo_app() else { return };
+        let ctx = egui::Context::default();
+        let size = |w: f32, h: f32| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w, h))),
+            ..egui::RawInput::default()
+        };
+        for (w, collapsed) in [(1400.0, false), (500.0, true), (1400.0, false)] {
+            for _ in 0..3 {
+                let out = ctx.run_ui(size(w, 700.0), |ui| app.show(ui));
+                out.drop_without_applying_deltas();
+            }
+            assert_eq!(app.ext_collapsed, collapsed, "width {w}");
+        }
     }
 
     #[test]
