@@ -106,7 +106,7 @@ fn rgba(c: [u8; 3]) -> egui::Color32 {
 /// Draws the panel.
 pub fn show(ui: &mut Ui, session: &Session, state: &mut UiState) {
     let tokens = Tokens::for_kind(state.theme);
-    let mode = SizeMode::default();
+    let mode = session.map_size_mode();
     let cache_id = Id::new("dirustat_ext_cache");
     let cache: SharedCache = ui.data_mut(|d| d.get_temp::<SharedCache>(cache_id)).unwrap_or_default();
     {
@@ -322,6 +322,24 @@ mod tests {
         let n = out.shapes.len();
         out.drop_without_applying_deltas();
         n
+    }
+
+    #[test]
+    fn panel_follows_session_size_mode() {
+        let ctx = egui::Context::default();
+        let mut state = UiState::default();
+        let mut session = Session::new();
+        let Ok(dir) = tempfile::tempdir() else { return };
+        assert!(std::fs::write(dir.path().join("a.bin"), vec![1u8; 10]).is_ok());
+        let Ok(handle) = dirustat_scan::start(dir.path(), dirustat_scan::ScanOptions::default()) else { return };
+        assert!(session.finish_scan(handle).is_ok());
+        session.set_map_size_mode(SizeMode::Logical);
+        let _ = frame(&session, &mut state, &ctx, egui::RawInput::default());
+        let cache = ctx.data_mut(|d| d.get_temp::<SharedCache>(Id::new("dirustat_ext_cache")));
+        let Some(cache) = cache else { return };
+        let c = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(c.key.map(|k| k.1), Some(SizeMode::Logical));
+        assert_eq!(c.rows.iter().map(|r| r.size).sum::<u64>(), 10);
     }
 
     #[test]
