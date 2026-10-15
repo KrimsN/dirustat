@@ -1,20 +1,40 @@
 //! Chunked sequential reading of the whole MFT: sector-aligned reads of at most `MAX_READ_BYTES`, one parsed
 //! record at a time, with a hard cap on the number of records.
 
+use std::time::Instant;
+
 use crate::error::{ParseError, ParseLimits};
 use crate::record::{FIXUP_STRIDE, MftRecord, parse_raw_record};
 use crate::runs::Extent;
 use crate::volume::{MAX_READ_BYTES, NtfsVolumeData, Volume, VolumeError, is_pow2_in};
 
+/// Nanoseconds since `started`, saturating.
+pub(crate) fn nanos_since(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// A random-access, read-only byte source. `Volume` implements it; tests use `MemSource`.
 pub trait BlockSource {
     /// Reads exactly `len` bytes at the byte `offset` (both sector-aligned by the caller).
     fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, VolumeError>;
+
+    /// An independent handle onto the same data, for reading from another thread at the same time. `None`
+    /// when the source cannot do that cheaply (the default); callers then use the single source they have.
+    fn duplicate(&self) -> Option<Self>
+    where
+        Self: Sized,
+    {
+        None
+    }
 }
 
 impl BlockSource for Volume {
     fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, VolumeError> {
         Volume::read_at(self, offset, len)
+    }
+
+    fn duplicate(&self) -> Option<Self> {
+        self.reopen().ok()
     }
 }
 
@@ -92,6 +112,17 @@ pub struct MftItem {
     pub record: Result<MftRecord, ParseError>,
 }
 
+/// I/O accounting of a reader: time inside `BlockSource::read_at` and the volume of data it returned.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReaderIo {
+    /// Time spent inside `read_at`, in nanoseconds.
+    pub read_nanos: u64,
+    /// Number of `read_at` calls.
+    pub read_calls: u64,
+    /// Bytes returned by those calls.
+    pub bytes_read: u64,
+}
+
 /// Iterator over the records of the MFT. An I/O error is yielded once and ends the iteration.
 #[derive(Debug)]
 pub struct MftReader<S> {
@@ -109,6 +140,7 @@ pub struct MftReader<S> {
     skipped_empty: u64,
     done: bool,
     stopped: bool,
+    io: ReaderIo,
 }
 
 impl<S: BlockSource> MftReader<S> {
@@ -144,6 +176,7 @@ impl<S: BlockSource> MftReader<S> {
             skipped_empty: 0,
             done: false,
             stopped: false,
+            io: ReaderIo::default(),
         })
     }
 
@@ -164,6 +197,21 @@ impl<S: BlockSource> MftReader<S> {
         }
         self.max_records = self.max_records.min(total_bytes / u64::from(self.geometry.bytes_per_record));
         Ok(self)
+    }
+
+    /// The validated extents of the `$MFT`, in file order.
+    pub fn extents(&self) -> &[Extent] {
+        &self.extents
+    }
+
+    /// The most records this reader will yield (by MFT size, volume size and `ReaderLimits`).
+    pub fn max_records(&self) -> u64 {
+        self.max_records
+    }
+
+    /// Time and bytes spent reading so far.
+    pub fn io(&self) -> ReaderIo {
+        self.io
     }
 
     /// Zero-filled (never used) record slots skipped so far.
@@ -189,13 +237,23 @@ impl<S: BlockSource> MftReader<S> {
                 .byte_offset(bpc)
                 .and_then(|o| o.checked_add(self.ext_offset))
                 .ok_or(VolumeError::InvalidRange)?;
-            let data = self.source.read_at(start, len)?;
+            let started = Instant::now();
+            let data = self.source.read_at(start, len);
+            self.io.read_nanos = self.io.read_nanos.saturating_add(nanos_since(started));
+            self.io.read_calls = self.io.read_calls.saturating_add(1);
+            let data = data?;
             if data.len() != len {
                 return Err(VolumeError::ShortRead);
             }
-            self.ext_offset =
-                self.ext_offset.saturating_add(u64::try_from(len).map_err(|_| VolumeError::InvalidRange)?);
-            self.buf.extend_from_slice(&data);
+            let len64 = u64::try_from(len).map_err(|_| VolumeError::InvalidRange)?;
+            self.io.bytes_read = self.io.bytes_read.saturating_add(len64);
+            self.ext_offset = self.ext_offset.saturating_add(len64);
+            if self.buf.is_empty() {
+                // Nothing carried over: adopt the fresh chunk without copying it.
+                self.buf = data;
+            } else {
+                self.buf.extend_from_slice(&data);
+            }
             return Ok(true);
         }
         Ok(false)
@@ -271,6 +329,70 @@ impl<S: BlockSource> MftReader<S> {
                 }
             }
         }
+    }
+}
+
+/// A run of whole, consecutive record slots cut from the MFT byte stream, still raw (fixups not applied).
+#[derive(Debug)]
+pub struct RawBatch {
+    /// Record number of the first slot.
+    pub first_number: u64,
+    /// Size of one slot in bytes; `bytes.len()` is a multiple of it.
+    pub record_size: usize,
+    pub bytes: Vec<u8>,
+}
+
+/// Cuts the MFT byte stream (any chunking) into batches of whole records, carrying a partial record over
+/// to the next chunk, and stops after `max_records` slots.
+#[derive(Debug)]
+pub struct RecordBatcher {
+    record_size: usize,
+    next_number: u64,
+    max_records: u64,
+    carry: Vec<u8>,
+}
+
+impl RecordBatcher {
+    pub fn new(geometry: MftGeometry, max_records: u64) -> Result<Self, ParseError> {
+        let record_size = usize::try_from(geometry.bytes_per_record).map_err(|_| ParseError::BadGeometry)?;
+        if record_size == 0 {
+            return Err(ParseError::BadGeometry);
+        }
+        Ok(Self { record_size, next_number: 0, max_records, carry: Vec::new() })
+    }
+
+    /// All `max_records` slots have been handed out; further chunks are not needed.
+    pub fn is_full(&self) -> bool {
+        self.next_number >= self.max_records
+    }
+
+    /// Adds the next chunk of the stream. Returns the whole records now available, if any.
+    pub fn push(&mut self, chunk: Vec<u8>) -> Option<RawBatch> {
+        if self.is_full() {
+            return None;
+        }
+        let mut data = if self.carry.is_empty() {
+            chunk
+        } else {
+            let mut joined = std::mem::take(&mut self.carry);
+            joined.extend_from_slice(&chunk);
+            joined
+        };
+        let room = usize::try_from(self.max_records - self.next_number).unwrap_or(usize::MAX);
+        let whole = (data.len() / self.record_size).min(room);
+        let cut = whole.checked_mul(self.record_size)?;
+        if cut == 0 {
+            self.carry = data;
+            return None;
+        }
+        let tail = data.split_off(cut);
+        // Only a partial record can remain when the cap was not hit; past the cap the rest is dropped.
+        let first_number = self.next_number;
+        self.next_number = self.next_number.saturating_add(u64::try_from(whole).unwrap_or(u64::MAX));
+        if !self.is_full() {
+            self.carry = tail;
+        }
+        Some(RawBatch { first_number, record_size: self.record_size, bytes: data })
     }
 }
 

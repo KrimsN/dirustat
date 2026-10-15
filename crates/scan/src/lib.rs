@@ -33,7 +33,9 @@ use dirustat_model::{NodeData, NodeId, NodeKind, Tree};
 
 mod mft;
 
-pub use mft::{MftError, MftLimits, MftScan, MftStats};
+#[doc(hidden)]
+pub use mft::bench_scan_mft_mem;
+pub use mft::{MftError, MftLimits, MftScan, MftStats, MftTimings};
 
 /// Builds a tree with a single root and no disk walk — a skeleton for testing higher layers.
 pub fn empty_tree(root: &str) -> Tree {
@@ -195,11 +197,13 @@ pub struct ScanOutcome {
     pub backend: ScanBackend,
     /// Why the MFT fast path was abandoned for the portable walk; `None` when it was not tried or worked.
     pub fallback_reason: Option<String>,
+    /// Counters and phase timings of the MFT pass, when it produced this tree.
+    pub mft_stats: Option<MftStats>,
 }
 
 impl ScanOutcome {
     fn new(tree: Tree, cancelled: bool, backend: ScanBackend) -> Self {
-        Self { tree, cancelled, backend, fallback_reason: None }
+        Self { tree, cancelled, backend, fallback_reason: None, mft_stats: None }
     }
 }
 

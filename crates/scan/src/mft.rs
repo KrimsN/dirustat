@@ -96,9 +96,60 @@ impl From<ParseError> for MftError {
     }
 }
 
+/// Wall-clock time per phase of the MFT pass, in nanoseconds, measured once per chunk (never per record).
+///
+/// With the pipelined reader the I/O of the next chunk overlaps with parsing of the current one, so the
+/// phases overlap and do not add up to `total_nanos`: `read_nanos` is the time the reader spent inside
+/// `read_at` (on its own thread), `wait_nanos` is the time the consumer sat idle waiting for the next chunk
+/// (the part of the I/O that parsing could not hide).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MftTimings {
+    /// Time inside `BlockSource::read_at`.
+    pub read_nanos: u64,
+    /// Number of `read_at` calls.
+    pub read_calls: u64,
+    /// Bytes returned by `read_at`.
+    pub bytes_read: u64,
+    /// Reader threads that ran (requests in flight); `read_nanos` is summed over them.
+    pub read_threads: u32,
+    /// Time the consumer waited for the reader to deliver a chunk.
+    pub wait_nanos: u64,
+    /// Fixup, header and attribute parsing plus turning records into compact entries (wall time, parallel).
+    pub parse_nanos: u64,
+    /// Merging the per-chunk results into the shared tables, cap checks and progress counters.
+    pub merge_nanos: u64,
+    /// Whole collect phase (reading the MFT and everything done with its records).
+    pub collect_nanos: u64,
+    /// Build phase part 1: resolving parent references and grouping links by parent.
+    pub resolve_nanos: u64,
+    /// Build phase part 2: creating the nodes and aggregating the totals.
+    pub nodes_nanos: u64,
+    /// Whole build phase (resolving parents, creating nodes, aggregating).
+    pub build_nanos: u64,
+    /// The complete `scan_mft` call.
+    pub total_nanos: u64,
+}
+
+impl MftTimings {
+    /// Read throughput in MiB/s over the time spent inside `read_at`; 0 when nothing was read.
+    pub fn read_mib_per_sec(&self) -> f64 {
+        if self.read_nanos == 0 {
+            return 0.0;
+        }
+        (self.bytes_read as f64 / (1024.0 * 1024.0)) / (self.read_nanos as f64 / 1e9)
+    }
+}
+
+/// Nanoseconds since `started`, saturating.
+pub(crate) fn nanos_since(started: std::time::Instant) -> u64 {
+    u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// What the MFT pass saw; logged and available to tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MftStats {
+    /// Where the time went, see [`MftTimings`].
+    pub timings: MftTimings,
     /// Record slots that were not zero-filled.
     pub records_seen: u64,
     /// Records that failed fixup, header or number validation.
@@ -239,7 +290,7 @@ pub(crate) struct Collected {
 ///
 /// `label` is the root node's name. Progress goes to `counters`, cancellation is read from `cancel`; a
 /// cancelled scan returns `Ok` with `cancelled: true` and a partial (possibly root-only) tree.
-pub(crate) fn scan_mft<S: BlockSource>(
+pub(crate) fn scan_mft<S: BlockSource + Send>(
     source: S,
     volume: &NtfsVolumeData,
     label: &str,
@@ -250,7 +301,7 @@ pub(crate) fn scan_mft<S: BlockSource>(
 }
 
 /// [`scan_mft`] with explicit limits.
-pub(crate) fn scan_mft_with<S: BlockSource>(
+pub(crate) fn scan_mft_with<S: BlockSource + Send>(
     source: S,
     volume: &NtfsVolumeData,
     label: &str,
@@ -258,14 +309,21 @@ pub(crate) fn scan_mft_with<S: BlockSource>(
     cancel: &AtomicBool,
     counters: &Counters,
 ) -> Result<MftScan, MftError> {
-    let collected = collect::collect(source, volume, limits, cancel, counters)?;
+    let started = std::time::Instant::now();
+    let mut collected = collect::collect(source, volume, limits, cancel, counters)?;
+    collected.stats.timings.collect_nanos = nanos_since(started);
     if collected.cancelled {
         let mut tree = Tree::new(label);
         tree.aggregate();
-        let outcome = ScanOutcome::new(tree, true, crate::ScanBackend::Mft);
+        let mut outcome = ScanOutcome::new(tree, true, crate::ScanBackend::Mft);
+        collected.stats.timings.total_nanos = nanos_since(started);
+        outcome.mft_stats = Some(collected.stats);
         return Ok(MftScan { outcome, stats: collected.stats });
     }
-    let (tree, cancelled, stats) = build::build(collected, label, cancel, counters)?;
+    let build_started = std::time::Instant::now();
+    let (tree, cancelled, mut stats) = build::build(collected, label, cancel, counters)?;
+    stats.timings.build_nanos = nanos_since(build_started);
+    stats.timings.total_nanos = nanos_since(started);
     tracing::info!(?stats, nodes = tree.len(), "MFT scan finished");
     if stats.undercounted_files > 0 {
         tracing::warn!(
@@ -273,7 +331,17 @@ pub(crate) fn scan_mft_with<S: BlockSource>(
             "MFT scan: files whose data lives in unmerged extension records are shown with size 0"
         );
     }
-    Ok(MftScan { outcome: ScanOutcome::new(tree, cancelled, crate::ScanBackend::Mft), stats })
+    let mut outcome = ScanOutcome::new(tree, cancelled, crate::ScanBackend::Mft);
+    outcome.mft_stats = Some(stats);
+    Ok(MftScan { outcome, stats })
+}
+
+/// Benchmark entry: runs the MFT pass over an in-memory image with default limits and no cancellation.
+/// Used by the `mft_synth_bench` example; not part of the stable API.
+#[doc(hidden)]
+pub fn bench_scan_mft_mem(image: dirustat_ntfs::MemSource, volume: &NtfsVolumeData) -> Result<MftScan, MftError> {
+    let cancel = AtomicBool::new(false);
+    scan_mft(image, volume, "bench", &cancel, &Counters::default())
 }
 
 /// Opens `volume` (for example `C:`) read-only and scans its MFT. Needs administrator rights.
@@ -285,5 +353,5 @@ pub(crate) fn scan_volume(
 ) -> Result<MftScan, MftError> {
     let vol = Volume::open(volume)?;
     let data = *vol.data();
-    scan_mft(&vol, &data, label, cancel, counters)
+    scan_mft(vol, &data, label, cancel, counters)
 }

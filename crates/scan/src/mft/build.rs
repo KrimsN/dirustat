@@ -3,6 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use dirustat_model::{ModelError, NodeData, NodeId, NodeKind, Tree};
+use rayon::prelude::*;
 
 use super::{
     ATTR_DIRECTORY, Collected, Entry, EntryKind, Link, MftError, MftStats, NO_MTIME, NO_PARENT, ORPHAN_DIR,
@@ -16,6 +17,8 @@ const REACHED: u8 = 1;
 const CHARGED: u8 = 2;
 /// The cancel flag is read once per this many created nodes.
 const CANCEL_EVERY: u64 = 4096;
+/// Links resolved per parallel task.
+const RESOLVE_BLOCK: usize = 16 * 1024;
 
 /// Why node creation stopped early.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,7 +65,8 @@ pub(super) fn build(
     cancel: &AtomicBool,
     counters: &Counters,
 ) -> Result<(Tree, bool, MftStats), MftError> {
-    let Collected { entries, mut links, names, stats, .. } = collected;
+    let Collected { entries, mut links, names, mut stats, .. } = collected;
+    let resolve_started = std::time::Instant::now();
     let root_entry = entries
         .binary_search_by_key(&ROOT_RECORD, |e| e.number)
         .ok()
@@ -74,15 +78,23 @@ pub(super) fn build(
         tree.aggregate();
         Ok((tree, true, stats))
     };
-    for (i, link) in links.iter_mut().enumerate() {
-        if polled(i, cancel) {
-            return cancelled_result(stats);
+    // Independent binary searches: resolved in parallel, in blocks that look at the cancel flag first.
+    links.par_chunks_mut(RESOLVE_BLOCK).for_each(|block| {
+        if cancel.load(Ordering::Relaxed) {
+            return;
         }
-        link.parent = resolve_parent(&entries, link.parent, link.parent_sequence);
+        for link in block {
+            link.parent = resolve_parent(&entries, link.parent, link.parent_sequence);
+        }
+    });
+    if cancel.load(Ordering::Relaxed) {
+        return cancelled_result(stats);
     }
     let Some((child_start, child_links)) = group_children(entries.len(), &links, root_entry, cancel)? else {
         return cancelled_result(stats);
     };
+    stats.timings.resolve_nanos = super::nanos_since(resolve_started);
+    let nodes_started = std::time::Instant::now();
     let state = zeroed(entries.len(), 0u8, "state")?;
     let mut b = Builder {
         entries,
@@ -103,6 +115,7 @@ pub(super) fn build(
         tracing::warn!("MFT scan stopped at the node limit; the tree is partial");
     }
     b.tree.aggregate();
+    b.stats.timings.nodes_nanos = super::nanos_since(nodes_started);
     if let Some(root) = b.tree.get(b.tree.root()) {
         counters.store_totals(
             root.dir_count(),

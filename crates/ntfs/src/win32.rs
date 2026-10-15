@@ -13,7 +13,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_PRIVILEGE_NOT_HELD, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
+    CreateFileW, FILE_FLAG_NO_BUFFERING, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
@@ -44,8 +44,10 @@ fn last_error() -> VolumeError {
 }
 
 impl RawHandle {
-    /// Opens `path` (a NUL-terminated UTF-16 volume path such as `\\.\C:`) for reading only.
-    pub(crate) fn open_read(path: &[u16]) -> Result<Self, VolumeError> {
+    /// Opens `path` (a NUL-terminated UTF-16 volume path such as `\\.\C:`) for reading only. With `direct` the
+    /// handle bypasses the system cache: reads then need a sector-aligned buffer, offset and length, but a big
+    /// request goes to the device as one I/O instead of a series of small cache-sized ones.
+    pub(crate) fn open_read(path: &[u16], direct: bool) -> Result<Self, VolumeError> {
         if path.last() != Some(&0) {
             return Err(VolumeError::InvalidName);
         }
@@ -58,7 +60,7 @@ impl RawHandle {
                 FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                 null(),
                 OPEN_EXISTING,
-                0,
+                if direct { FILE_FLAG_NO_BUFFERING } else { 0 },
                 null_mut(),
             )
         };

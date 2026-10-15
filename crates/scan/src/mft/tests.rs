@@ -712,3 +712,69 @@ fn forged_extents_larger_than_the_volume_are_rejected() {
     src.0[record_at(0)..record_at(0) + rec0.len()].copy_from_slice(&rec0);
     assert_eq!(scan_image(&src, &vol).err(), Some(MftError::Parse(ParseError::ExtentOutOfRange)));
 }
+
+/// A source that can hand out independent copies, like a volume with several handles, so the parallel
+/// reading path is exercised.
+#[derive(Clone)]
+struct Shared(std::sync::Arc<Vec<u8>>);
+
+impl BlockSource for Shared {
+    fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, VolumeError> {
+        let start = usize::try_from(offset).map_err(|_| VolumeError::InvalidRange)?;
+        self.0
+            .get(start..start.checked_add(len).ok_or(VolumeError::InvalidRange)?)
+            .map(<[u8]>::to_vec)
+            .ok_or(VolumeError::ShortRead)
+    }
+
+    fn duplicate(&self) -> Option<Self> {
+        Some(self.clone())
+    }
+}
+
+fn big_image() -> Img {
+    let mut img = Img::new();
+    for d in 0..40u32 {
+        img.dir(100 + d, 5, &format!("d{d}"));
+    }
+    // About 30 MiB of records: several read chunks, hundreds of parse blocks.
+    for i in 0..30_000u32 {
+        img.small(200 + i, 100 + i % 40, &format!("file{i}"), usize::try_from(i % 97).unwrap());
+    }
+    img
+}
+
+#[test]
+fn parallel_reading_and_parsing_gives_the_same_tree_as_one_reader() {
+    let img = big_image();
+    let (src, vol) = img.finish();
+    let single = scan_image(&src, &vol).unwrap();
+    let shared =
+        scan_mft(Shared(std::sync::Arc::new(src.0.clone())), &vol, "V:", &AtomicBool::new(false), &Counters::default())
+            .unwrap();
+    assert_eq!(dump(&single.outcome.tree), dump(&shared.outcome.tree));
+    assert_eq!(single.stats.entries, shared.stats.entries);
+    assert_eq!(single.stats.records_seen, shared.stats.records_seen);
+    assert_eq!(single.stats.timings.read_threads, 1);
+    assert_eq!(shared.stats.timings.read_threads, 4);
+    assert!(shared.stats.timings.read_calls >= 3, "{:?}", shared.stats.timings);
+}
+
+#[test]
+fn timings_are_filled_in() {
+    let out = ok(&big_image());
+    let t = out.stats.timings;
+    assert!(t.read_calls >= 1 && t.bytes_read > 0, "{t:?}");
+    assert!(t.total_nanos > 0 && t.collect_nanos > 0 && t.build_nanos > 0, "{t:?}");
+    assert!(t.parse_nanos > 0 && t.resolve_nanos > 0 && t.nodes_nanos > 0, "{t:?}");
+    assert!(t.collect_nanos <= t.total_nanos && t.build_nanos <= t.total_nanos, "{t:?}");
+}
+
+#[test]
+fn a_cancelled_parallel_scan_returns_a_partial_tree() {
+    let (src, vol) = big_image().finish();
+    let cancel = AtomicBool::new(true);
+    let out = scan_mft(Shared(std::sync::Arc::new(src.0)), &vol, "V:", &cancel, &Counters::default()).unwrap();
+    assert!(out.outcome.cancelled);
+    assert_eq!(out.outcome.tree.len(), 1);
+}

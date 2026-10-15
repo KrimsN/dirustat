@@ -251,3 +251,60 @@ fn stop_callback_ends_iteration_between_chunks_and_inside_empty_runs() {
     assert!(out.is_none() && reader.was_stopped());
     assert!(reader.skipped_empty() <= 4096 + 1);
 }
+
+fn batcher(max_records: u64) -> RecordBatcher {
+    RecordBatcher::new(geometry(), max_records).unwrap()
+}
+
+#[test]
+fn batcher_carries_partial_records_across_chunks() {
+    let mut b = batcher(100);
+    let bytes: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+    let mut out = Vec::new();
+    let mut first_numbers = Vec::new();
+    // Chunk sizes that never line up with the 1024-byte records.
+    for chunk in bytes.chunks(700) {
+        if let Some(batch) = b.push(chunk.to_vec()) {
+            assert_eq!(batch.record_size, 1024);
+            assert_eq!(batch.bytes.len() % 1024, 0);
+            first_numbers.push(batch.first_number);
+            out.extend_from_slice(&batch.bytes);
+        }
+    }
+    assert_eq!(out, bytes[..2048]);
+    assert_eq!(first_numbers, vec![0, 1]);
+}
+
+#[test]
+fn batcher_stops_at_the_record_cap_and_drops_the_rest() {
+    let mut b = batcher(3);
+    let batch = b.push(vec![1u8; 10 * 1024 + 5]).unwrap();
+    assert_eq!((batch.first_number, batch.bytes.len()), (0, 3 * 1024));
+    assert!(b.is_full());
+    assert!(b.push(vec![1u8; 4096]).is_none());
+    let mut zero = batcher(0);
+    assert!(zero.is_full());
+    assert!(zero.push(vec![1u8; 4096]).is_none());
+}
+
+#[test]
+fn batcher_rejects_zero_record_size_and_handles_tiny_chunks() {
+    let bad = MftGeometry { bytes_per_sector: 512, bytes_per_cluster: 4096, bytes_per_record: 0 };
+    assert_eq!(RecordBatcher::new(bad, 1).unwrap_err(), ParseError::BadGeometry);
+    let mut b = batcher(10);
+    assert!(b.push(Vec::new()).is_none());
+    assert!(b.push(vec![0u8; 1]).is_none());
+    assert_eq!(b.push(vec![0u8; 1023]).unwrap().bytes.len(), 1024);
+}
+
+#[test]
+fn reader_accounts_for_its_io() {
+    let (src, extents, size) = image(16);
+    let mut reader = MftReader::new(&src, geometry(), extents, size, ReaderLimits::default()).unwrap();
+    while reader.next().is_some() {}
+    let io = reader.io();
+    assert_eq!(io.read_calls, 2);
+    assert_eq!(io.bytes_read, 4 * 4096);
+    assert_eq!(reader.max_records(), 16);
+    assert_eq!(reader.extents().len(), 2);
+}

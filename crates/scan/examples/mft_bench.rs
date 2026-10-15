@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use dirustat_scan::{ScanOptions, start};
+use dirustat_scan::{MftStats, ScanOptions, start};
 
 fn run_once(path: &Path, prefer_fast_path: bool) {
     let label = if prefer_fast_path { "auto" } else { "portable" };
@@ -23,9 +23,44 @@ fn run_once(path: &Path, prefer_fast_path: bool) {
                 out.tree.len() as f64 / secs,
                 out.fallback_reason
             );
+            if let Some(stats) = &out.mft_stats {
+                print_mft_stats(stats);
+            }
         }
         Err(err) => eprintln!("{label}: {err}"),
     }
+}
+
+fn ms(nanos: u64) -> f64 {
+    nanos as f64 / 1e6
+}
+
+/// Phase timings of the MFT pass (aggregate numbers only).
+fn print_mft_stats(stats: &MftStats) {
+    let t = &stats.timings;
+    let mib = t.bytes_read as f64 / 1_048_576.0;
+    let wall_mib_s = if t.collect_nanos == 0 { 0.0 } else { mib / (t.collect_nanos as f64 / 1e9) };
+    println!(
+        "    records_seen={} entries={} links={} corrupt={} orphan_links={} cycle_entries={}",
+        stats.records_seen, stats.entries, stats.links, stats.corrupt, stats.orphan_links, stats.cycle_entries
+    );
+    println!(
+        "    read   {:>9.1} ms thread time ({} calls, {mib:.0} MiB, {} reader thread(s), {:.0} MiB/s per thread)",
+        ms(t.read_nanos),
+        t.read_calls,
+        t.read_threads,
+        t.read_mib_per_sec()
+    );
+    println!("    wait   {:>9.1} ms (parser idle, waiting for the disk)", ms(t.wait_nanos));
+    println!("    parse  {:>9.1} ms   merge {:>9.1} ms", ms(t.parse_nanos), ms(t.merge_nanos));
+    println!("    collect{:>9.1} ms ({wall_mib_s:.0} MiB/s of MFT per wall second)", ms(t.collect_nanos));
+    println!(
+        "    build  {:>9.1} ms (resolve {:.1} ms, nodes+aggregate {:.1} ms)",
+        ms(t.build_nanos),
+        ms(t.resolve_nanos),
+        ms(t.nodes_nanos)
+    );
+    println!("    total  {:>9.1} ms", ms(t.total_nanos));
 }
 
 fn main() {

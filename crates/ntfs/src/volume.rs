@@ -4,6 +4,8 @@
 //! rules): sector sizes must be sane, reads must be sector-aligned, inside the volume and capped.
 
 use std::fmt;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(windows)]
 use crate::win32::RawHandle;
@@ -155,11 +157,38 @@ pub fn volume_path(name: &str) -> Result<Vec<u16>, VolumeError> {
     Ok(path)
 }
 
+/// Bytes to skip from `addr` to the next multiple of `align` (0 when `align` is 0 or `addr` is aligned).
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn align_pad(addr: usize, align: usize) -> usize {
+    addr.checked_rem(align).map_or(0, |r| if r == 0 { 0 } else { align - r })
+}
+
+/// Whether two geometry reports describe the same volume. `mft_valid_data_length` is left out: it grows
+/// while the volume is in use.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn same_volume(a: &NtfsVolumeData, b: &NtfsVolumeData) -> bool {
+    a.volume_serial_number == b.volume_serial_number
+        && a.bytes_per_sector == b.bytes_per_sector
+        && a.bytes_per_cluster == b.bytes_per_cluster
+        && a.bytes_per_file_record == b.bytes_per_file_record
+        && a.total_clusters == b.total_clusters
+        && a.total_bytes == b.total_bytes
+        && a.mft_start_lcn == b.mft_start_lcn
+}
+
 /// A read-only handle to an NTFS volume with validated geometry.
 #[derive(Debug)]
 pub struct Volume {
     #[cfg(windows)]
     handle: RawHandle,
+    /// A second handle that bypasses the system cache, used for big sequential reads. `None` when it could
+    /// not be opened; dropped from use for good as soon as one read through it fails.
+    #[cfg(windows)]
+    direct: Option<RawHandle>,
+    #[cfg(windows)]
+    direct_disabled: AtomicBool,
+    #[cfg(windows)]
+    path: Vec<u16>,
     data: NtfsVolumeData,
 }
 
@@ -172,9 +201,24 @@ impl Volume {
 
     #[cfg(windows)]
     fn open_path(path: &[u16]) -> Result<Self, VolumeError> {
-        let handle = RawHandle::open_read(path)?;
+        let handle = RawHandle::open_read(path, false)?;
         let data = validate_volume_data(&handle.ntfs_volume_data()?)?;
-        Ok(Self { handle, data })
+        let direct = RawHandle::open_read(path, true).ok();
+        Ok(Self { handle, direct, direct_disabled: AtomicBool::new(false), path: path.to_vec(), data })
+    }
+
+    /// Opens the same volume again, with its own handles, so another thread can read in parallel. Fails when
+    /// the volume no longer looks the same.
+    #[cfg(windows)]
+    pub fn reopen(&self) -> Result<Self, VolumeError> {
+        let other = Self::open_path(&self.path)?;
+        if same_volume(&self.data, &other.data) { Ok(other) } else { Err(VolumeError::Malformed) }
+    }
+
+    /// Not available off Windows.
+    #[cfg(not(windows))]
+    pub fn reopen(&self) -> Result<Self, VolumeError> {
+        Err(VolumeError::Unsupported)
     }
 
     #[cfg(not(windows))]
@@ -190,9 +234,35 @@ impl Volume {
     /// Reads `len` bytes at the byte `offset`; both must be sector-aligned and inside the volume.
     pub fn read_at(&self, offset: u64, len: usize) -> Result<Vec<u8>, VolumeError> {
         check_read_range(&self.data, offset, len)?;
+        #[cfg(windows)]
+        if let Some(buf) = self.read_direct(offset, len) {
+            return Ok(buf);
+        }
         let mut buf = vec![0u8; len];
         self.fill(offset, &mut buf)?;
         Ok(buf)
+    }
+
+    /// Reads through the cache-bypassing handle into a sector-aligned window of a larger buffer. `None` when
+    /// that handle is unavailable or failed (it is then switched off and the caller reads the usual way, so a
+    /// volume or driver that rejects unbuffered I/O costs nothing but the first attempt).
+    #[cfg(windows)]
+    fn read_direct(&self, offset: u64, len: usize) -> Option<Vec<u8>> {
+        let handle = self.direct.as_ref().filter(|_| !self.direct_disabled.load(Ordering::Relaxed))?;
+        let align = usize::try_from(self.data.bytes_per_sector).ok()?;
+        let mut buf = vec![0u8; len.checked_add(align)?];
+        let pad = align_pad(buf.as_ptr().addr(), align);
+        let window = buf.get_mut(pad..pad.checked_add(len)?)?;
+        match handle.read_at(offset, window) {
+            Ok(read) if read == len => {}
+            _ => {
+                self.direct_disabled.store(true, Ordering::Relaxed);
+                return None;
+            }
+        }
+        buf.drain(..pad);
+        buf.truncate(len);
+        Some(buf)
     }
 
     #[cfg(windows)]
@@ -356,5 +426,39 @@ mod tests {
         let boot = volume.read_at(0, sector)?;
         assert_eq!(boot.get(3..11), Some(&b"NTFS    "[..]));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod align_tests {
+    use super::*;
+
+    #[test]
+    fn align_pad_reaches_the_next_boundary() {
+        assert_eq!(align_pad(0, 512), 0);
+        assert_eq!(align_pad(512, 512), 0);
+        assert_eq!(align_pad(1, 512), 511);
+        assert_eq!(align_pad(513, 512), 511);
+        assert_eq!(align_pad(1000, 0), 0);
+        for addr in 0..2000usize {
+            assert_eq!((addr + align_pad(addr, 64)) % 64, 0);
+        }
+    }
+
+    #[test]
+    fn same_volume_ignores_the_growing_mft_length() {
+        let a = NtfsVolumeData {
+            volume_serial_number: 1,
+            bytes_per_sector: 512,
+            bytes_per_cluster: 4096,
+            bytes_per_file_record: 1024,
+            total_clusters: 10,
+            total_bytes: 40_960,
+            mft_valid_data_length: 4096,
+            mft_start_lcn: 2,
+        };
+        assert!(same_volume(&a, &NtfsVolumeData { mft_valid_data_length: 8192, ..a }));
+        assert!(!same_volume(&a, &NtfsVolumeData { volume_serial_number: 2, ..a }));
+        assert!(!same_volume(&a, &NtfsVolumeData { total_bytes: 81_920, ..a }));
     }
 }

@@ -8,6 +8,7 @@
 
 mod bytes;
 mod error;
+mod prefetch;
 mod reader;
 mod record;
 mod runs;
@@ -18,7 +19,10 @@ mod volume;
 mod win32;
 
 pub use error::{ParseError, ParseLimits};
-pub use reader::{BlockSource, MemSource, MftGeometry, MftItem, MftReader, ReaderLimits};
+pub use prefetch::{MAX_READ_WORKERS, StreamPlan, StreamSummary, read_mft_stream};
+pub use reader::{
+    BlockSource, MemSource, MftGeometry, MftItem, MftReader, RawBatch, ReaderIo, ReaderLimits, RecordBatcher,
+};
 pub use record::{
     ATTR_ATTRIBUTE_LIST, ATTR_DATA, ATTR_FILE_NAME, ATTR_REPARSE_POINT, ATTR_STANDARD_INFORMATION, AttributeList,
     AttributeListEntry, DataStream, FIXUP_STRIDE, FileName, FileRef, MftRecord, NamedStream, Namespace, StandardInfo,
