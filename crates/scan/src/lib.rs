@@ -459,7 +459,7 @@ fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool) -> Li
         };
         let name = item.file_name().to_string_lossy().into_owned();
         listing.entries.push(match item.metadata() {
-            Ok(meta) => entry_from(name, &meta, cluster),
+            Ok(meta) => entry_from(name, &item.path(), &meta, cluster),
             Err(_) => Entry {
                 name,
                 kind: NodeKind::File,
@@ -472,7 +472,7 @@ fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool) -> Li
     listing
 }
 
-fn entry_from(name: String, meta: &fs::Metadata, cluster: u64) -> Entry {
+fn entry_from(name: String, path: &Path, meta: &fs::Metadata, cluster: u64) -> Entry {
     let attributes = attributes_of(meta);
     let kind = if meta.file_type().is_symlink() || is_reparse_point(attributes) {
         NodeKind::Link
@@ -490,7 +490,8 @@ fn entry_from(name: String, meta: &fs::Metadata, cluster: u64) -> Entry {
         error: false,
         name_lossy: false,
     };
-    let link_id = if kind == NodeKind::File { link_id_of(meta) } else { None };
+    // An empty file adds nothing to any total, so it never needs the (on Windows costly) identity query.
+    let link_id = if kind == NodeKind::File && logical > 0 { link_id_of(meta, path) } else { None };
     Entry { name, kind, data, link_id }
 }
 
@@ -524,15 +525,18 @@ fn attributes_of(_meta: &fs::Metadata) -> u32 {
 }
 
 #[cfg(unix)]
-fn link_id_of(meta: &fs::Metadata) -> Option<(u64, u64)> {
+fn link_id_of(meta: &fs::Metadata, _path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     (meta.nlink() > 1).then(|| (meta.dev(), meta.ino()))
 }
 
-/// `std` does not expose the file index on Windows without nightly features.
+/// `std` does not expose the file index on Windows without nightly features, so ask the safe wrapper in
+/// `dirustat-ntfs`. It opens every regular file once (attribute access only); only files with more than
+/// one link get an id.
 #[cfg(not(unix))]
-fn link_id_of(_meta: &fs::Metadata) -> Option<(u64, u64)> {
-    None
+fn link_id_of(_meta: &fs::Metadata, path: &Path) -> Option<(u64, u64)> {
+    let identity = dirustat_ntfs::file_identity(path)?;
+    (identity.links > 1).then_some((identity.volume_serial, identity.file_index))
 }
 
 #[cfg(test)]
@@ -650,6 +654,19 @@ mod tests {
         assert_eq!(out.tree.get(link).unwrap().kind(), NodeKind::Link);
         assert_eq!(out.tree.children(link).count(), 0);
         assert_eq!(out.tree.len(), 4);
+    }
+
+    #[test]
+    fn real_hardlinks_on_disk_are_counted_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        write(&tmp.path().join("a.bin"), 1 << 20);
+        fs::hard_link(tmp.path().join("a.bin"), tmp.path().join("b.bin")).unwrap();
+        fs::hard_link(tmp.path().join("a.bin"), tmp.path().join("c.bin")).unwrap();
+        write(&tmp.path().join("solo.bin"), 100);
+        let out = scan(tmp.path());
+        let root = out.tree.root();
+        assert_eq!(out.tree.children(root).count(), 4);
+        assert_eq!(out.tree.get(root).unwrap().total_size(SizeMode::Logical), (1 << 20) + 100);
     }
 
     #[test]

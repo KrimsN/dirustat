@@ -13,7 +13,8 @@ use windows_sys::Win32::Foundation::{
     ERROR_PRIVILEGE_NOT_HELD, GENERIC_READ, GetLastError, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_FLAG_NO_BUFFERING, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, ReadFile,
+    BY_HANDLE_FILE_INFORMATION, CreateFileW, FILE_FLAG_NO_BUFFERING, FILE_SHARE_DELETE, FILE_SHARE_READ,
+    FILE_SHARE_WRITE, GetFileInformationByHandle, OPEN_EXISTING, ReadFile,
 };
 use windows_sys::Win32::System::IO::{DeviceIoControl, OVERLAPPED, OVERLAPPED_0, OVERLAPPED_0_0};
 use windows_sys::Win32::System::Ioctl::{FSCTL_GET_NTFS_VOLUME_DATA, NTFS_VOLUME_DATA_BUFFER};
@@ -144,4 +145,29 @@ impl Drop for RawHandle {
             CloseHandle(self.0);
         }
     }
+}
+
+/// Identity of an open file as reported by `GetFileInformationByHandle`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RawFileInfo {
+    pub(crate) volume_serial: u32,
+    pub(crate) file_index: u64,
+    pub(crate) links: u32,
+}
+
+/// Queries the identity of the file behind `handle` (a handle that stays open for the call).
+pub(crate) fn file_info_by_handle(handle: HANDLE) -> Result<RawFileInfo, VolumeError> {
+    // SAFETY: `BY_HANDLE_FILE_INFORMATION` is a plain C struct of integers; all-zero is a valid value.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { core::mem::zeroed() };
+    // SAFETY: the caller keeps `handle` open for this synchronous call; the output pointer addresses
+    // `info` on this stack frame and is written only during the call.
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    if ok == 0 {
+        return Err(last_error());
+    }
+    Ok(RawFileInfo {
+        volume_serial: info.dwVolumeSerialNumber,
+        file_index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        links: info.nNumberOfLinks,
+    })
 }

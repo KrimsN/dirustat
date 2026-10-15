@@ -8,6 +8,7 @@
 
 mod bytes;
 mod error;
+mod identity;
 mod prefetch;
 mod reader;
 mod record;
@@ -19,6 +20,7 @@ mod volume;
 mod win32;
 
 pub use error::{ParseError, ParseLimits};
+pub use identity::{FileIdentity, file_identity};
 pub use prefetch::{MAX_READ_WORKERS, StreamPlan, StreamSummary, read_mft_stream};
 pub use reader::{
     BlockSource, MemSource, MftGeometry, MftItem, MftReader, RawBatch, ReaderIo, ReaderLimits, RecordBatcher,
