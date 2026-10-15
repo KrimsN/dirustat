@@ -8,6 +8,17 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 
 | ID | P | Milestone | Description | Done when |
 |---|---|---|---|---|
+| G-038 | P0 | QA | **QA-2, QA-101 (S2).** Treemap `max_tiles` cap is spent LIFO, so the smallest dirs are expanded first and the largest stay empty; holes grow with the window size (the reported resize bug). Fix: spend the cap largest-first / breadth-first, or aggregate the remainder | invariant test: with a cap hit, no top-level dir is left without children while smaller ones are expanded; maximized `100k-seed1` and `1m-seed1` screenshots show no holes |
+| G-039 | P0 | QA | **QA-1 (S2).** `layout_tree` drops children below `min_size`, marks the parent `leaf = false`, and `map_panel` paints it as a frame only, leaving background holes that depend on the viewport | every directory rect is fully covered (fill the parent or add an "other" tile); property test on area coverage at several bounds |
+| G-040 | P0 | QA | **QA-3 (S2).** Windows portable scan counts hardlinks N times (`link_id_of` returns `None` outside unix) | fixture with 3 hardlinks counts the size once; parity with the MFT backend; works under `unsafe_code = forbid` (safe wrapper or `dirustat-ntfs`) |
+| G-041 | P0 | QA | **QA-4 (S2/S1).** Control-channel UNC guard is bypassed by `\??\UNC\...` and runs only for `scan.start` | every path-taking command refuses network paths in every spelling; dispatcher tests |
+| G-042 | P1 | QA | **QA-102 (S3).** Treemap relayout runs on the UI thread on every resize step (about 2.4 s on 1M nodes) | layout off the UI thread or debounced, previous layout reused; resize on `1m-seed1` does not block frames |
+| G-043 | P1 | QA | **QA-103 (S3).** File types panel ignores the size mode (`ext_panel.rs:109` uses `SizeMode::default()`) | logical/allocated switch changes the panel; screenshot test |
+| G-044 | P1 | QA | **QA-104 (S3).** File types panel: extension and Files columns have zero width, size clipped, sort glyph is a tofu box | default width honoured, columns readable, glyph renders; screenshot |
+| G-045 | P1 | QA | **QA-5 (S3, static).** Portable and MFT backends disagree on allocated size (resident files 0 vs 4096, sparse, compressed) | same fixture gives the same allocated totals on both backends, or the difference is documented; elevated parity test |
+| G-046 | P1 | QA | **QA-106 (S3).** Treemap shrinks to a strip at narrow widths or 150% zoom; panels vanish without a hint | treemap keeps a minimum share, side panels collapse first; screenshots at 700x500 and 1000x700 with zoom 150 |
+| G-047 | P1 | QA | **QA-105 (S3).** `ui.state` and `ui.screenshot` time out (10 s / 40 s) while the window is minimized; docs say 60 s | `ui.state` answers while minimized or fails fast with a clear error; docs match |
+| G-048 | P2 | QA | **QA-6 (S3).** Keyless local client can exhaust connection slots and the global rate limit of the control server | unauthenticated peers do not consume authenticated capacity; load test |
 | G-002 | P0 | M1 | Portable parallel scan in `scan` (rayon, progress, cancellation, hardlinks, reparse points; errors do not abort the walk) | integration tests on fixtures; budget documented. M1.4 `scan::start` and M1.5 fixture test + measurement landed; open: cold-cache scan slowness (125 s for 1M), `xtask perf` |
 | G-011 | P1 | M2 | Remainder of M2.9: drive picker UI, flat-list panel, free-space UI (settings, launch args and the engine side of top-N, paged children and the drives provider landed). Real drive enumeration and free space move to M4/G-014 | parity rows A12, B3, B4, B10 become done |
 | G-025 | P1 | M2 | `tree.children` and `list.largest_files` are O(n) under the session lock | cache by `Session::revision()`; measured on 1M nodes |
@@ -25,6 +36,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-035 | P2 | M3 | Progress is frozen during the tree build phase after the MFT read | progress counters advance while building; test |
 | G-036 | P2 | M3 | No fuzz target for the whole MFT image (`MftReader` + builder) | `crates/ntfs/fuzz` target added and run without crashes |
 | G-037 | P3 | M3 | The UI does not show `fallback_reason` (only the elevation hint) | reason visible in the status bar or about window; screenshot |
+| G-038 | P1 | M3 | MFT scan outlier: 3.26 s run with ~2.7 s unexplained inside `collect` (parse 44 ms, disk wait 325 ms); suspects: reader backpressure or thread stalls, `NO_BUFFERING` handle fallback, antivirus, rayon contention | repeat 10+ runs with finer phase timers (consumer blocked-on-send, per-chunk latency histogram); budget met in all runs |
 | G-014 | P1 | M4 | Platform services: recycle bin, file manager, properties, free space | `PlatformServices` + Windows implementation |
 | G-015 | P0 | M4 | Destructive commands per `docs/safety.md` (confirm, dry-run, protected paths, journal) | tests for refusal without confirm and for protected paths |
 | G-016 | P2 | M4 | Search (substring/wildcard/regex), filters, scan exclusions | tests + hostile patterns |
@@ -65,3 +77,5 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-13 · r9: after M2, closed G-005, G-006, G-008, G-009, G-010; G-011 narrowed to the UI remainder; added G-025-G-030 from review follow-ups.
 - 2026-10-13 · r10: M3.1 landed; G-012 stays open (progress note).
 - 2026-10-13 · r11: M3.2-M3.6 and review fixes landed; G-012/G-013 narrowed (both stay open); added G-031-G-037 (review deferrals).
+- 2026-10-15 · r12: QA pass (`docs/qa/reports/2026-10-15-summary.md`): added G-038-G-048 from confirmed S2/S3 bugs (S2 on top).
+- 2026-10-15 · r12: M3.5 measurement recorded; G-038 added.

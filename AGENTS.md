@@ -32,6 +32,7 @@ The approach is borrowed from [storytold](https://github.com/storytold) (photocr
 | `docs/ui-design.md` | Tokens, themes, widgets, visual verification |
 | `docs/target-app-parity.md` | Parity with WinDirStat/WizTree: feature matrix with command ids |
 | `docs/gaps.md` | Ranked work list: tasks are picked from here |
+| `docs/qa/README.md` | QA process: severity scale (S1-S5), bug report template, where reports go. Testers find and report bugs, they do not fix them |
 | `docs/roadmap.md`, `ROADMAP.md` | Milestones M0–M7, current focus |
 | `docs/adr/` | Accepted architecture decisions. Do not revisit without a new ADR |
 | `log/devlog.md` | Journal: what landed, numbers, what is still open |
