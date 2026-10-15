@@ -3,6 +3,9 @@
 //! Input is weights in descending order plus a rectangle; output is one rectangle per weight. A weight
 //! of 0 yields a zero-area rectangle. The function never panics on any input (NaN, empty bounds).
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 /// Rectangle in pixels or abstract units.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Rect {
@@ -166,11 +169,14 @@ where
         return tiles;
     }
     tiles.push(Tile { id: root, rect: bounds, depth: 0, leaf: true });
-    // The stack holds indices into `tiles`.
-    let mut stack: Vec<usize> = vec![0];
+    // Expansion is largest-area-first (ties: earliest tile), so when `max_tiles` is hit the cap cuts the
+    // smallest tiles instead of starving the biggest directories. Entries are (area bits, Reverse(index));
+    // the bits of a non-negative f32 order like the value.
+    let mut queue: BinaryHeap<(u32, Reverse<usize>)> = BinaryHeap::new();
+    queue.push((bounds.area().to_bits(), Reverse(0)));
     let mut kids: Vec<(usize, u64)> = Vec::new();
     let mut weights: Vec<u64> = Vec::new();
-    while let Some(ti) = stack.pop() {
+    while let Some((_, Reverse(ti))) = queue.pop() {
         let Some(tile) = tiles.get(ti).copied() else { continue };
         if tile.depth >= opts.max_depth || tile.rect.w < opts.min_size || tile.rect.h < opts.min_size {
             continue;
@@ -196,7 +202,7 @@ where
             }
             emitted = true;
             tiles.push(Tile { id, rect, depth: tile.depth.saturating_add(1), leaf: true });
-            stack.push(tiles.len().saturating_sub(1));
+            queue.push((rect.area().to_bits(), Reverse(tiles.len().saturating_sub(1))));
         }
         if emitted && let Some(t) = tiles.get_mut(ti) {
             t.leaf = false;
@@ -328,6 +334,31 @@ mod tests {
             }
         });
         assert_eq!(huge.len(), 3);
+    }
+
+    /// Root -> big dir 1 (8 files, ids 100..108) plus 20 tiny dirs (ids 2..=21, 2 files each).
+    fn big_and_tiny(id: usize, out: &mut Vec<(usize, u64)>) {
+        match id {
+            0 => {
+                out.push((1, 1000));
+                out.extend((2..=21).map(|d| (d, 1)));
+            }
+            1 => out.extend((100..108).map(|f| (f, 10))),
+            2..=21 => out.extend([(id * 100, 1), (id * 100 + 1, 1)]),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn tile_cap_cuts_the_smallest_tiles_not_the_largest_directories() {
+        // 22 tiles after the root is expanded; 10 spare slots are enough for the big dir only.
+        let opts = LayoutOptions { max_tiles: 32, min_size: 0.5, ..LayoutOptions::default() };
+        let tiles = layout_tree(0, bounds(), opts, big_and_tiny);
+        assert_eq!(tiles.len(), 32);
+        let big_files = tiles.iter().filter(|t| (100..108).contains(&t.id)).count();
+        assert_eq!(big_files, 8, "the largest directory must be expanded before the cap is spent");
+        let big = tiles.iter().find(|t| t.id == 1).unwrap();
+        assert!(!big.leaf);
     }
 
     #[test]
