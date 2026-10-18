@@ -30,11 +30,7 @@ Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `
 | `session.tree` | `node?`, `depth?`, `limit?` (1..), `offset?`, `mode?` | subtree with sizes (paginated, never the whole tree); `limit` 0 is `invalid_params` |
 | `ui.state` | none | serialized UI state (serde) |
 | `ui.set_state` | `patch` | change UI state (panels, sorting, zoom) |
-<<<<<<< HEAD
-| `ui.screenshot` | `path`, `region?`, `overwrite?` | save a window PNG. An existing file is an error unless `overwrite: true`, and even then only an existing PNG (checked by its signature) is replaced, never another kind of file; UNC paths and system locations (Windows, Program Files, ProgramData, `/etc`, `/usr`, ...) are refused; missing parent directories are never created; the file is written to a temp file and renamed; captures above 64 megapixels are refused; a request with no capture within 60 s fails with a timeout |
-=======
-| `ui.screenshot` | `path`, `region?`, `overwrite?` | save a window PNG. An existing file is an error unless `overwrite: true`; missing parent directories are never created; the file is written to a temp file and renamed; captures above 64 megapixels are refused; a request the window does not pick up within 5 s (for example it is minimized) fails with a `timeout` error asking to restore it; once accepted, no capture within 30 s fails with a timeout (at most 40 s per call). `ui.state` of a window that does not render is answered from the last published state with `"stale": true` |
->>>>>>> 2cdd0e0 (QA-105: fail fast when the window does not render, stale ui.state, align docs)
+| `ui.screenshot` | `path`, `region?`, `overwrite?` | save a window PNG. An existing file is an error unless `overwrite: true`, and even then only an existing PNG (checked by its signature) is replaced, never another kind of file; UNC paths and system locations (Windows, Program Files, ProgramData, `/etc`, `/usr`, ...) are refused; missing parent directories are never created; the file is written to a temp file and renamed; captures above 64 megapixels are refused; a request the window does not pick up within 5 s (for example it is minimized) fails with a `timeout` error asking to restore it; once accepted, no capture within 30 s fails with a timeout (at most 40 s per call). `ui.state` of a window that does not render is answered from the last published state with `"stale": true` |
 | `app.quit` | none | graceful shutdown |
 
 Rules:
