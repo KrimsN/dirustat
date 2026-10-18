@@ -889,6 +889,7 @@ dependencies = [
  "dirustat-control",
  "dirustat-engine",
  "dirustat-model",
+ "dirustat-platform",
  "dirustat-scan",
  "dirustat-treemap",
  "eframe",

@@ -3,11 +3,15 @@
 
 mod app;
 pub mod commands;
+pub mod context_menu;
 pub mod demo;
+pub mod drive_picker;
 pub mod ext_panel;
 pub mod map_panel;
 pub mod palette;
+pub mod prefs;
 pub mod screenshot;
+pub mod search_panel;
 pub mod state;
 pub mod theme;
 pub mod tree_panel;

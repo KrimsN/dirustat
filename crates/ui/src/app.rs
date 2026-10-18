@@ -3,12 +3,12 @@
 //! Every action goes through a command: menus are built from `Session::commands()` plus the
 //! shell-only `UI_COMMANDS`, buttons and shortcuts dispatch by id (`DirustatApp::run_command`).
 
-use crate::commands::{self, UI_COMMANDS, UiEffect};
+use crate::commands::{self, Needs, UI_COMMANDS, UiEffect};
 use crate::palette::{self, PaletteEntry};
 use crate::screenshot::{Region, SaveOptions, ScreenshotStatus, Screenshots};
 use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
-use crate::{ext_panel, map_panel, tree_panel};
+use crate::{drive_picker, ext_panel, map_panel, prefs, search_panel, tree_panel};
 use dirustat_control::{SharedSession, lock_session, share};
 use dirustat_engine::{CommandInfo, FastPathStatus, Session};
 use dirustat_model::SizeMode;
@@ -41,6 +41,8 @@ pub struct DirustatApp {
     focus_path: bool,
     /// Pixel area of the treemap panel in the last frame (for the "too small" selection hint).
     map_area_px: f32,
+    /// Text for the clipboard, handed to egui on the next frame (`ui.copy_path`).
+    pending_copy: Option<String>,
 }
 
 /// Share of the window width the treemap always keeps, and its absolute floor in points.
@@ -74,6 +76,9 @@ impl SideLayout {
 
 /// Status text when a scan is requested without a path.
 const EMPTY_PATH_MESSAGE: &str = "Type or paste a folder path first";
+
+/// Status text when a command needs a selected node and there is none.
+const SELECT_FIRST_MESSAGE: &str = "Select a file or folder first";
 
 /// Drops the internal `invalid params: ` prefix of an engine error.
 fn strip_prefix(message: &str) -> String {
@@ -131,6 +136,7 @@ impl DirustatApp {
             ext_collapsed: false,
             focus_path: false,
             map_area_px: 0.0,
+            pending_copy: None,
         }
     }
 
@@ -212,22 +218,91 @@ impl DirustatApp {
             return Err(EMPTY_PATH_MESSAGE.to_owned());
         }
         if let Some(effect) = commands::run(&mut self.state, id) {
-            if effect == UiEffect::Quit {
-                self.quit_requested = true;
+            match effect {
+                UiEffect::Quit => self.quit_requested = true,
+                UiEffect::CopyPath => self.copy_selected_path()?,
+                UiEffect::None => {}
             }
             return Ok(json!({ "ok": true }));
         }
         let mut session = lock_session(&self.session);
         let infos = session.commands();
-        let params = self.default_params(&session, id, &infos).ok_or_else(|| format!("{id} needs parameters"))?;
+        let params = self.default_params(&session, id, &infos).ok_or_else(|| {
+            if commands::engine_menu(id).is_some_and(|e| e.needs == Needs::Selection) {
+                SELECT_FIRST_MESSAGE.to_owned()
+            } else {
+                format!("{id} needs parameters")
+            }
+        })?;
         let value = session.execute(id, &params).map_err(|e| e.to_string())?;
         let prefer_fast = session.settings().prefer_fast_path;
         drop(session);
         if id == "scan.start" {
             self.state.scan = ScanStatus::Running { dirs: 0, files: 0, bytes: 0, errors: 0 };
+            self.state.free_space = None;
+            self.state.free_key = None;
             self.refresh_elevation_hint(prefer_fast);
+        } else if id == "search.clear" {
+            self.state.search.reset();
         }
         Ok(value)
+    }
+
+    /// Queues the path of the selected node for the clipboard.
+    fn copy_selected_path(&mut self) -> Result<(), String> {
+        let session = lock_session(&self.session);
+        let path = session.selection().and_then(|n| session.node_path(n)).ok_or(SELECT_FIRST_MESSAGE)?;
+        drop(session);
+        self.pending_copy = Some(path);
+        Ok(())
+    }
+
+    /// Replaces the `scan.exclude` setting through `settings.set`; the error is shown in the editor.
+    fn set_excludes(&mut self, list: &[String]) -> Result<(), String> {
+        let mut session = lock_session(&self.session);
+        session
+            .execute("settings.set", &json!({ "key": "scan.exclude", "value": list }))
+            .map(|_| ())
+            .map_err(|e| strip_prefix(&e.to_string()))
+    }
+
+    /// Applies one action of the exclusions editor.
+    pub fn apply_prefs_action(&mut self, action: prefs::PrefsAction) {
+        let current = lock_session(&self.session).settings().exclude.clone();
+        let result = match action {
+            prefs::PrefsAction::Add(text) => {
+                prefs::with_pattern(&current, &text).and_then(|next| self.set_excludes(&next)).map(|()| {
+                    self.state.exclude_input.clear();
+                })
+            }
+            prefs::PrefsAction::Remove(i) => self.set_excludes(&prefs::without_pattern(&current, i)),
+        };
+        self.state.prefs_error = result.err();
+    }
+
+    /// Reloads the drive list and the free space of the scanned volume when they are stale.
+    fn refresh_volumes(&mut self) {
+        let mut session = lock_session(&self.session);
+        if !self.state.drives_loaded {
+            self.state.drives = drive_picker::load(&mut session);
+            self.state.drives_loaded = true;
+        }
+        if matches!(self.state.scan, ScanStatus::Done { .. }) {
+            let key = (self.state.path_text.trim().to_owned(), session.revision());
+            if self.state.free_key.as_ref() != Some(&key) {
+                self.state.free_space =
+                    session.execute("platform.free_space", &json!({ "path": key.0 })).ok().and_then(|v| {
+                        Some(crate::state::FreeSpace {
+                            path: key.0.clone(),
+                            total: v.get("total")?.as_u64()?,
+                            free: v.get("free")?.as_u64()?,
+                        })
+                    });
+                self.state.free_key = Some(key);
+                // The fill bars of the drive list changed with the scan.
+                self.state.drives_loaded = false;
+            }
+        }
     }
 
     /// Probes the fast path once per scan start (never per frame) and sets the status-bar hint.
@@ -274,6 +349,7 @@ impl DirustatApp {
                 let next = if session.map_size_mode() == SizeMode::Allocated { "logical" } else { "allocated" };
                 Some(json!({ "mode": next }))
             }
+            "platform.reveal" | "platform.properties" => session.selection().map(|n| json!({ "id": n.index() })),
             _ => {
                 let info = infos.iter().find(|i| i.id == id)?;
                 info.params_doc.trim_start().starts_with("none").then(|| json!({}))
@@ -281,9 +357,20 @@ impl DirustatApp {
         }
     }
 
+    /// Menu path of an engine command: its own, or the one the shell assigns.
+    fn menu_of(info: &CommandInfo) -> &'static str {
+        if info.menu.is_empty() { commands::engine_menu(info.id).map_or("", |e| e.menu) } else { info.menu }
+    }
+
+    /// Shortcut of an engine command: its own, or the one the shell assigns.
+    fn shortcut_of(info: &CommandInfo) -> Option<&'static str> {
+        info.shortcut.or_else(|| commands::engine_menu(info.id).and_then(|e| e.shortcut))
+    }
+
     /// Whether a command can run without a parameter form.
     fn runnable_without_form(info: &CommandInfo) -> bool {
-        matches!(info.id, "scan.start" | "view.size_mode") || info.params_doc.trim_start().starts_with("none")
+        matches!(info.id, "scan.start" | "view.size_mode" | "platform.reveal" | "platform.properties")
+            || info.params_doc.trim_start().starts_with("none")
     }
 
     /// Starts a scan of the path in the text field. Errors become the scan status, never a panic.
@@ -354,16 +441,26 @@ impl DirustatApp {
         }
         self.poll_scan(&ctx);
         self.shots.pump(&ctx);
+        self.refresh_volumes();
+        if let Some(text) = self.pending_copy.take() {
+            ctx.copy_text(text);
+        }
         let infos = lock_session(&self.session).commands();
         self.handle_shortcuts(&ctx, &infos);
         if let Some(id) = self.menu_bar(ui, &infos) {
             let _ = self.run_command(&id);
         }
         self.top_bar(ui);
+        self.search_bar(ui, &ctx);
         if self.state.panels.status_bar {
             self.status_bar(ui);
         }
-        self.central(ui);
+        self.search_results(ui);
+        if let Some(path) = self.central(ui) {
+            self.state.path_text = path;
+            self.start_scan();
+        }
+        self.prefs_window(&ctx);
         self.elevation_help_window(&ctx);
         let entries = Self::palette_entries(&infos);
         if let Some(id) = palette::show(&ctx, &mut self.state, &self.tokens, &entries) {
@@ -371,6 +468,70 @@ impl DirustatApp {
         }
         if self.quit_requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// The search bar under the top bar; runs the search when it is due.
+    fn search_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let wait = {
+            let mut session = lock_session(&self.session);
+            self.state.search.update(&mut session, std::time::Instant::now())
+        };
+        if let Some(wait) = wait {
+            ctx.request_repaint_after(wait);
+        }
+        if !self.state.search.open {
+            return;
+        }
+        let mut actions = search_panel::BarActions::default();
+        egui::Panel::top("search_bar").show(ui, |ui| {
+            actions = search_panel::show_bar(ui, &mut self.state.search, &self.tokens);
+        });
+        if actions.clear {
+            let _ = self.run_command("search.clear");
+        }
+        if actions.close {
+            self.state.search.open = false;
+        }
+    }
+
+    /// The result list above the status bar; a click selects the hit in the tree and the treemap.
+    fn search_results(&mut self, ui: &mut egui::Ui) {
+        let search = &self.state.search;
+        if !search.open || !search.searched {
+            return;
+        }
+        let selected = lock_session(&self.session).selection().map(|n| n.index());
+        let mut clicked = None;
+        egui::Panel::bottom("search_results").resizable(true).default_size(150.0).size_range(60.0..=400.0).show(
+            ui,
+            |ui| {
+                clicked = search_panel::show_results(ui, &self.state.search, selected, &self.tokens);
+            },
+        );
+        if let Some(id) = clicked {
+            let _ = lock_session(&self.session).execute("select.node", &json!({ "id": id }));
+        }
+    }
+
+    /// The preferences window with the exclusions editor.
+    fn prefs_window(&mut self, ctx: &egui::Context) {
+        if !self.state.prefs_open {
+            return;
+        }
+        let exclude = lock_session(&self.session).settings().exclude.clone();
+        let mut open = true;
+        let action = prefs::show(
+            ctx,
+            &mut open,
+            &mut self.state.exclude_input,
+            self.state.prefs_error.as_deref(),
+            &exclude,
+            &self.tokens,
+        );
+        self.state.prefs_open = open;
+        if let Some(action) = action {
+            self.apply_prefs_action(action);
         }
     }
 
@@ -395,7 +556,7 @@ impl DirustatApp {
         let typing = ctx.egui_wants_keyboard_input();
         let mut hits: Vec<(String, egui::KeyboardShortcut)> = Vec::new();
         for i in infos.iter().filter(|i| i.enabled && Self::runnable_without_form(i)) {
-            if let Some(sc) = i.shortcut.and_then(commands::parse_shortcut) {
+            if let Some(sc) = Self::shortcut_of(i).and_then(commands::parse_shortcut) {
                 hits.push((i.id.to_owned(), sc));
             }
         }
@@ -420,8 +581,8 @@ impl DirustatApp {
         let engine = infos.iter().filter(|i| Self::runnable_without_form(i)).map(|i| PaletteEntry {
             id: i.id.to_owned(),
             label: i.label.to_owned(),
-            menu: i.menu.to_owned(),
-            shortcut: i.shortcut.map(str::to_owned),
+            menu: Self::menu_of(i).to_owned(),
+            shortcut: Self::shortcut_of(i).map(str::to_owned),
             enabled: i.enabled,
         });
         let shell = UI_COMMANDS.iter().map(|c| PaletteEntry {
@@ -451,11 +612,26 @@ impl DirustatApp {
                 items.push(item);
             }
         };
-        for i in infos.iter().filter(|i| !i.menu.is_empty() && Self::runnable_without_form(i)) {
-            let label = i.menu.split_once('/').map_or(i.label, |(_, l)| l).to_owned();
-            let item =
-                MenuItem { id: i.id.to_owned(), label, shortcut: i.shortcut, enabled: i.enabled, checked: false };
-            add(i.menu, item);
+        let (has_selection, has_hits) = {
+            let session = lock_session(&self.session);
+            (session.selection().is_some(), !session.search_hits().is_empty())
+        };
+        for i in infos.iter().filter(|i| !Self::menu_of(i).is_empty() && Self::runnable_without_form(i)) {
+            let menu = Self::menu_of(i);
+            let label = menu.split_once('/').map_or(i.label, |(_, l)| l).to_owned();
+            let satisfied = match commands::engine_menu(i.id).map_or(Needs::Nothing, |e| e.needs) {
+                Needs::Nothing => true,
+                Needs::Selection => has_selection,
+                Needs::SearchHits => has_hits,
+            };
+            let item = MenuItem {
+                id: i.id.to_owned(),
+                label,
+                shortcut: Self::shortcut_of(i),
+                enabled: i.enabled && satisfied,
+                checked: false,
+            };
+            add(menu, item);
         }
         for c in UI_COMMANDS.iter().filter(|c| !c.menu.is_empty()) {
             let label = c.menu.split_once('/').map_or(c.label, |(_, l)| l).to_owned();
@@ -500,6 +676,7 @@ impl DirustatApp {
             (session.is_scanning(), session.map_size_mode())
         };
         let mut run: Option<&str> = None;
+        let mut picked: Option<String> = None;
         let size_label = match mode {
             SizeMode::Allocated => "Size: allocated",
             SizeMode::Logical => "Size: logical",
@@ -528,8 +705,20 @@ impl DirustatApp {
                 if ui.button(size_label).on_hover_text("Toggle logical / allocated sizes").clicked() {
                     run = Some("view.size_mode");
                 }
+                ui.add_enabled_ui(!scanning, |ui| {
+                    ui.menu_button("Drives", |ui| {
+                        if let Some(root) = drive_picker::show_list(ui, &self.state.drives, &self.tokens) {
+                            picked = Some(root);
+                            ui.close();
+                        }
+                    });
+                });
             });
         });
+        if let Some(root) = picked {
+            self.state.path_text = root;
+            run = Some("scan.start");
+        }
         if let Some(id) = run {
             let _ = self.run_command(id);
         }
@@ -579,6 +768,11 @@ impl DirustatApp {
                         ui.colored_label(Tokens::color(tokens.error), message);
                     }
                 }
+                if let Some(space) = &self.state.free_space {
+                    ui.separator();
+                    ui.label(format!("Free: {} of {}", human_size(space.free), human_size(space.total)))
+                        .on_hover_text(format!("Volume of {}", space.path));
+                }
                 if let Some(notice) = &self.state.notice {
                     ui.separator();
                     ui.colored_label(Tokens::color(tokens.error), notice);
@@ -603,8 +797,10 @@ impl DirustatApp {
         });
     }
 
-    fn central(&mut self, ui: &mut egui::Ui) {
+    /// Draws the panels; returns the root of a drive picked on the start screen.
+    fn central(&mut self, ui: &mut egui::Ui) -> Option<String> {
         let panels = self.state.panels;
+        let mut picked = None;
         let mut session = lock_session(&self.session);
         let area = ui.available_rect_before_wrap();
         let layout = SideLayout::for_width(ui.available_width(), panels.map);
@@ -624,8 +820,12 @@ impl DirustatApp {
             });
         }
         let mut map_area = 0.0;
+        let nothing_to_show = session.tree().len() <= 1
+            && matches!(self.state.scan, ScanStatus::Idle | ScanStatus::Cancelled | ScanStatus::Failed { .. });
         egui::CentralPanel::default().show(ui, |ui| {
-            if panels.map {
+            if nothing_to_show {
+                picked = drive_picker::show_start_screen(ui, &self.state.drives, &self.tokens);
+            } else if panels.map {
                 let size = ui.available_size();
                 map_area = size.x.max(0.0) * size.y.max(0.0);
                 map_panel::show(ui, &mut session, &mut self.state);
@@ -635,6 +835,7 @@ impl DirustatApp {
         if matches!(self.state.scan, ScanStatus::Running { .. }) && session.tree().len() > 1 {
             stale_overlay(ui, area, &self.tokens);
         }
+        picked
     }
 }
 
@@ -1032,6 +1233,185 @@ mod tests {
             }
             assert_eq!(app.ext_collapsed, collapsed, "width {w}");
         }
+    }
+
+    fn app_with_fake() -> (DirustatApp, std::sync::Arc<dirustat_platform::FakePlatform>) {
+        let fake = std::sync::Arc::new(dirustat_platform::FakePlatform::new());
+        let mut session = Session::new();
+        session.set_platform(fake.clone());
+        (DirustatApp::with_session(session), fake)
+    }
+
+    /// Scans `dir` through frames until the scan is done.
+    fn scan_dir(app: &mut DirustatApp, ctx: &egui::Context, dir: &std::path::Path) {
+        app.state_mut().path_text = dir.to_string_lossy().into_owned();
+        app.start_scan();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.is_scanning() && Instant::now() < deadline {
+            let _ = frame(app, ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = frame(app, ctx);
+        let _ = frame(app, ctx);
+    }
+
+    fn fixture_dir() -> Option<tempfile::TempDir> {
+        let dir = tempfile::tempdir().ok()?;
+        std::fs::create_dir(dir.path().join("docs")).ok()?;
+        std::fs::write(dir.path().join("docs").join("report.txt"), vec![0u8; 3000]).ok()?;
+        std::fs::write(dir.path().join("big.bin"), vec![0u8; 9000]).ok()?;
+        std::fs::write(dir.path().join("small.bin"), vec![0u8; 10]).ok()?;
+        Some(dir)
+    }
+
+    #[test]
+    fn drive_picker_lists_fake_drives_and_refreshes() {
+        use dirustat_platform::DriveInfo;
+        let (mut app, fake) = app_with_fake();
+        fake.set_drives(vec![DriveInfo { path: "Z:\\".into(), label: "Fake".into(), total: 1000, free: 250 }]);
+        let ctx = egui::Context::default();
+        for theme in [ThemeKind::Dark, ThemeKind::Light] {
+            app.state_mut().theme = theme;
+            assert!(frame(&mut app, &ctx) > 0, "the start screen builds");
+        }
+        assert_eq!(app.state().drives.len(), 1);
+        assert_eq!(app.state().drives.first().map(|d| d.used_tenths()), Some(750));
+        assert_eq!(app.ui_state_json()["drives"][0]["path"], "Z:\\");
+        fake.set_drives(vec![]);
+        assert!(app.run_command("ui.refresh_drives").is_ok());
+        let _ = frame(&mut app, &ctx);
+        assert!(app.state().drives.is_empty());
+    }
+
+    #[test]
+    fn picking_a_drive_scans_its_root_and_free_space_reaches_the_status_bar() {
+        let Some(dir) = fixture_dir() else { return };
+        let (mut app, fake) = app_with_fake();
+        fake.set_space(dirustat_platform::SpaceInfo { total: 1000, free: 250 });
+        let ctx = egui::Context::default();
+        // A pick sets the path and runs the same scan.start command as the Scan button.
+        scan_dir(&mut app, &ctx, dir.path());
+        assert_eq!(app.state().scan, ScanStatus::Done { errors: 0 });
+        let space = app.state().free_space.clone();
+        assert_eq!(space.map(|s| (s.total, s.free)), Some((1000, 250)));
+        assert!(fake.calls().contains(&dirustat_platform::PlatformCall::FreeSpace(dir.path().to_path_buf())));
+        // The reading is cached per scan root and revision, not repeated every frame.
+        let before = fake.calls().len();
+        let _ = frame(&mut app, &ctx);
+        assert_eq!(fake.calls().len(), before, "no platform call per frame");
+        // A new scan drops the old reading.
+        app.start_scan();
+        assert!(app.state().free_space.is_none());
+    }
+
+    #[test]
+    fn search_flow_on_a_scanned_tree() {
+        let Some(dir) = fixture_dir() else { return };
+        let (mut app, _fake) = app_with_fake();
+        let ctx = egui::Context::default();
+        scan_dir(&mut app, &ctx, dir.path());
+        assert!(app.run_command("ui.toggle_search").is_ok());
+        assert!(app.state().search.open);
+        app.state_mut().search.query = "bin".to_owned();
+        app.state_mut().search.search_now();
+        for theme in [ThemeKind::Dark, ThemeKind::Light] {
+            app.state_mut().theme = theme;
+            assert!(frame(&mut app, &ctx) > 0);
+        }
+        let names: Vec<String> = app.state().search.hits.iter().map(|h| h.name.clone()).collect();
+        assert_eq!(names, ["big.bin", "small.bin"]);
+        assert_eq!(app.session().search_hits().len(), 2);
+        // Selecting a hit goes through select.node; the tree reveals it on the next frame.
+        let first = app.state().search.hits.first().map(|h| h.id).unwrap_or_default();
+        assert!(app.session().execute("select.node", &json!({ "id": first })).is_ok());
+        let _ = frame(&mut app, &ctx);
+        assert_eq!(app.session().selection().map(|n| n.index()), Some(first));
+        // Clear: the engine command runs and the panel forgets the result and the criteria.
+        assert!(app.run_command("search.clear").is_ok());
+        assert!(app.session().search_hits().is_empty());
+        assert!(app.state().search.hits.is_empty() && app.state().search.query.is_empty());
+        let _ = frame(&mut app, &ctx);
+        assert!(!app.state().search.searched);
+    }
+
+    #[test]
+    fn invalid_regex_shows_a_message_and_a_frame_still_builds() {
+        let Some(mut app) = demo_app() else { return };
+        let ctx = egui::Context::default();
+        let patch = json!({"search": {"open": true, "query": "(", "mode": "regex"}});
+        assert!(app.apply_ui_patch(&patch).is_ok());
+        app.state_mut().search.search_now();
+        assert!(frame(&mut app, &ctx) > 0);
+        let error = app.state().search.error.clone().unwrap_or_default();
+        assert!(error.starts_with("Invalid regular expression"), "{error}");
+        assert_eq!(app.ui_state_json()["search"]["error"], error.as_str());
+        assert!(app.apply_ui_patch(&json!({"search": {"bogus": 1}})).is_err());
+        assert!(app.apply_ui_patch(&json!({"search": {"mode": "fuzzy"}})).is_err());
+    }
+
+    #[test]
+    fn edit_menu_has_the_search_and_platform_commands_with_enabling_rules() {
+        let Some(mut app) = demo_app() else { return };
+        let infos = app.session().commands();
+        let find = |app: &DirustatApp, id: &str| {
+            app.menu_groups(&infos).into_iter().flat_map(|(_, items)| items).find(|i| i.id == id)
+        };
+        let find_item = find(&app, "ui.toggle_search");
+        assert!(find_item.is_some_and(|i| i.shortcut == Some("Ctrl+F") && i.enabled));
+        assert!(find(&app, "search.clear").is_some_and(|i| !i.enabled), "nothing to clear yet");
+        assert!(find(&app, "platform.reveal").is_some_and(|i| !i.enabled && i.shortcut == Some("Ctrl+Shift+R")));
+        assert!(find(&app, "platform.properties").is_some_and(|i| !i.enabled));
+        let err = app.run_command("platform.reveal").err().unwrap_or_default();
+        assert_eq!(err, SELECT_FIRST_MESSAGE);
+        let root = app.session().tree().root().index();
+        assert!(app.session().execute("select.node", &json!({ "id": root })).is_ok());
+        assert!(find(&app, "platform.reveal").is_some_and(|i| i.enabled));
+        // The demo paths do not exist on disk, so the (fake) platform refuses them: the command was reached.
+        assert!(app.run_command("platform.reveal").err().is_some_and(|m| m != SELECT_FIRST_MESSAGE));
+        assert!(app.run_command("ui.copy_path").is_ok());
+        assert!(app.pending_copy.is_some());
+        let entries = DirustatApp::palette_entries(&infos);
+        assert!(entries.iter().any(|e| e.id == "platform.properties" && e.menu == "Edit/Properties"));
+    }
+
+    #[test]
+    fn exclusion_editor_changes_the_setting_and_reports_errors() {
+        let (mut app, _fake) = app_with_fake();
+        let ctx = egui::Context::default();
+        assert!(app.run_command("ui.preferences").is_ok());
+        for theme in [ThemeKind::Dark, ThemeKind::Light] {
+            app.state_mut().theme = theme;
+            assert!(frame(&mut app, &ctx) > 0);
+        }
+        app.apply_prefs_action(prefs::PrefsAction::Add(" node_modules ".into()));
+        app.apply_prefs_action(prefs::PrefsAction::Add("*.tmp".into()));
+        assert_eq!(app.session().settings().exclude, ["node_modules", "*.tmp"]);
+        assert_eq!(app.state().prefs_error, None);
+        app.apply_prefs_action(prefs::PrefsAction::Add("*.tmp".into()));
+        assert!(app.state().prefs_error.is_some(), "duplicates are refused");
+        app.apply_prefs_action(prefs::PrefsAction::Add("a\u{0}b".into()));
+        assert!(app.state().prefs_error.is_some(), "the engine rejects hostile patterns");
+        assert_eq!(app.session().settings().exclude.len(), 2);
+        let _ = frame(&mut app, &ctx);
+        app.apply_prefs_action(prefs::PrefsAction::Remove(0));
+        app.apply_prefs_action(prefs::PrefsAction::Remove(99));
+        assert_eq!(app.session().settings().exclude, ["*.tmp"]);
+        assert_eq!(app.ui_state_json()["prefs_open"], true);
+    }
+
+    #[test]
+    fn exclusions_apply_to_the_next_scan() {
+        let Some(dir) = fixture_dir() else { return };
+        let (mut app, _fake) = app_with_fake();
+        let ctx = egui::Context::default();
+        app.apply_prefs_action(prefs::PrefsAction::Add("*.bin".into()));
+        scan_dir(&mut app, &ctx, dir.path());
+        let session = app.session();
+        let tree = session.tree();
+        let names: Vec<String> =
+            tree.children(tree.root()).filter_map(|c| tree.get(c).map(|n| n.name().to_owned())).collect();
+        assert!(!names.iter().any(|n| n.ends_with(".bin")), "{names:?}");
+        assert!(names.iter().any(|n| n == "docs"));
     }
 
     #[test]

@@ -79,7 +79,9 @@ impl Shell {
 /// Builds the session from the launch arguments: demo data or saved settings, then `--size-mode`.
 #[allow(clippy::print_stderr)]
 fn build_session(args: &LaunchArgs) -> Result<Session, String> {
-    let mut session = if args.demo {
+    let mut session = if args.demo && std::env::var_os("DIRUSTAT_DEMO_EMPTY").is_some() {
+        dirustat_ui::demo::empty_demo_session()
+    } else if args.demo {
         dirustat_ui::demo::demo_session().map_err(|m| format!("cannot build demo data: {m}"))?
     } else {
         let mut session = Session::new();

@@ -11,6 +11,8 @@ use crate::theme::ThemeKind;
 pub enum UiEffect {
     None,
     Quit,
+    /// Copy the path of the selected node to the clipboard (needs the session, done by the app).
+    CopyPath,
 }
 
 /// A shell-only command.
@@ -79,11 +81,62 @@ fn elevated_help(s: &mut UiState) -> UiEffect {
 fn quit(_: &mut UiState) -> UiEffect {
     UiEffect::Quit
 }
+fn toggle_search(s: &mut UiState) -> UiEffect {
+    s.search.toggle();
+    UiEffect::None
+}
+fn preferences(s: &mut UiState) -> UiEffect {
+    s.prefs_open = !s.prefs_open;
+    UiEffect::None
+}
+fn refresh_drives(s: &mut UiState) -> UiEffect {
+    s.drives_loaded = false;
+    UiEffect::None
+}
+fn copy_path(_: &mut UiState) -> UiEffect {
+    UiEffect::CopyPath
+}
 
 const NONE: &str = "none";
 
 /// All shell-only commands.
 pub const UI_COMMANDS: &[UiCommand] = &[
+    UiCommand {
+        id: "ui.toggle_search",
+        label: "Find",
+        menu: "Edit/Find",
+        shortcut: Some("Ctrl+F"),
+        params_doc: NONE,
+        checked: Some(|s| s.search.open),
+        run: toggle_search,
+    },
+    UiCommand {
+        id: "ui.copy_path",
+        label: "Copy path",
+        menu: "Edit/Copy path",
+        shortcut: Some("Ctrl+Shift+C"),
+        params_doc: NONE,
+        checked: None,
+        run: copy_path,
+    },
+    UiCommand {
+        id: "ui.preferences",
+        label: "Preferences",
+        menu: "Edit/Preferences",
+        shortcut: Some("Ctrl+,"),
+        params_doc: NONE,
+        checked: Some(|s| s.prefs_open),
+        run: preferences,
+    },
+    UiCommand {
+        id: "ui.refresh_drives",
+        label: "Refresh drives",
+        menu: "File/Refresh drives",
+        shortcut: None,
+        params_doc: NONE,
+        checked: None,
+        run: refresh_drives,
+    },
     UiCommand {
         id: "ui.quit",
         label: "Quit",
@@ -193,6 +246,48 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         run: elevated_help,
     },
 ];
+
+/// What an engine command with a UI menu entry needs before it can run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Needs {
+    /// Always available.
+    Nothing,
+    /// A selected node (its id becomes the command parameter).
+    Selection,
+    /// A held search result.
+    SearchHits,
+}
+
+/// Menu entry the shell gives to an engine command that has none in the registry.
+#[derive(Clone, Copy, Debug)]
+pub struct EngineMenu {
+    pub id: &'static str,
+    pub menu: &'static str,
+    pub shortcut: Option<&'static str>,
+    pub needs: Needs,
+}
+
+/// Menu entries, shortcuts and enabling rules of the `platform.*` and `search.*` commands.
+pub const ENGINE_MENU: &[EngineMenu] = &[
+    EngineMenu { id: "search.clear", menu: "Edit/Clear search", shortcut: None, needs: Needs::SearchHits },
+    EngineMenu {
+        id: "platform.reveal",
+        menu: "Edit/Reveal in file manager",
+        shortcut: Some("Ctrl+Shift+R"),
+        needs: Needs::Selection,
+    },
+    EngineMenu {
+        id: "platform.properties",
+        menu: "Edit/Properties",
+        shortcut: Some("Alt+Enter"),
+        needs: Needs::Selection,
+    },
+];
+
+/// The shell's menu entry for an engine command, if any.
+pub fn engine_menu(id: &str) -> Option<&'static EngineMenu> {
+    ENGINE_MENU.iter().find(|e| e.id == id)
+}
 
 /// Looks a shell command up by id.
 pub fn find(id: &str) -> Option<&'static UiCommand> {

@@ -334,6 +334,7 @@ pub(crate) fn arrow(painter: &egui::Painter, center: egui::Pos2, half: f32, dir:
 #[derive(Default)]
 struct Actions {
     select: Option<NodeId>,
+    menu: Option<(NodeId, crate::context_menu::MenuAction)>,
     toggle: Option<NodeId>,
     sort: Option<TreeColumn>,
 }
@@ -382,6 +383,7 @@ fn draw_row(
     row_h: f32,
     mode: SizeMode,
     selected: Option<NodeId>,
+    hits: &std::collections::HashSet<usize>,
     tokens: &Tokens,
     actions: &mut Actions,
 ) {
@@ -393,12 +395,22 @@ fn draw_row(
     let painter = ui.painter_at(rect);
     if selected == Some(row.node) {
         painter.rect_filled(rect, 0.0, Tokens::color(tokens.accent).gamma_multiply(0.35));
+    } else if hits.contains(&row.node.index()) {
+        painter.rect_filled(rect, 0.0, Tokens::color(tokens.warning).gamma_multiply(0.25));
     } else if resp.hovered() {
         painter.rect_filled(rect, 0.0, Tokens::color(tokens.surface));
     }
     if resp.clicked() {
         actions.select = Some(row.node);
     }
+    if resp.secondary_clicked() {
+        actions.select = Some(row.node);
+    }
+    resp.context_menu(|ui| {
+        if let Some(action) = crate::context_menu::menu_ui(ui) {
+            actions.menu = Some((row.node, action));
+        }
+    });
     if resp.double_clicked() && row.expandable {
         actions.toggle = Some(row.node);
     }
@@ -527,11 +539,12 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
     {
         area = area.vertical_scroll_offset((i as f32 * row_h - row_h * 2.0).max(0.0));
     }
+    let hits = state.search.hit_set();
     let tree = session.tree();
     area.show_rows(ui, row_h, total_rows, |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for row in cache.flat.rows.get(range).unwrap_or_default() {
-            draw_row(ui, tree, *row, widths, row_h, mode, selection, tokens, &mut actions);
+            draw_row(ui, tree, *row, widths, row_h, mode, selection, hits, tokens, &mut actions);
         }
     });
     if cache.flat.truncated {
@@ -543,6 +556,9 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
     }
     if let Some(id) = actions.toggle {
         toggle(state, id);
+    }
+    if let Some((node, action)) = actions.menu {
+        crate::context_menu::perform(ui.ctx(), session, state, node, action);
     }
     if let Some(id) = actions.select
         && session.execute("select.node", &serde_json::json!({ "id": id.index() })).is_ok()

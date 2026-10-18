@@ -62,6 +62,29 @@ pub fn demo_session() -> Result<Session, String> {
     result
 }
 
+/// Synthetic volumes and free space, so demo screenshots show no real drive and the demo can never
+/// launch the file manager or touch the recycle bin.
+fn demo_platform() -> std::sync::Arc<dyn dirustat_platform::PlatformServices> {
+    use dirustat_platform::{DriveInfo, FakePlatform, SpaceInfo};
+    const GIB: u64 = 1 << 30;
+    let fake = FakePlatform::new();
+    fake.set_drives(vec![
+        DriveInfo { path: "C:\\".to_owned(), label: "System".to_owned(), total: 476 * GIB, free: 118 * GIB },
+        DriveInfo { path: "D:\\".to_owned(), label: "Data".to_owned(), total: 1863 * GIB, free: 1204 * GIB },
+        DriveInfo { path: "E:\\".to_owned(), label: "Backup".to_owned(), total: 931 * GIB, free: 22 * GIB },
+    ]);
+    fake.set_space(SpaceInfo { total: 476 * GIB, free: 118 * GIB });
+    std::sync::Arc::new(fake)
+}
+
+/// A session without a tree and with the synthetic platform: the start screen with the drive picker
+/// for screenshots (`DIRUSTAT_DEMO_EMPTY=1 dirustat --demo`).
+pub fn empty_demo_session() -> Session {
+    let mut session = Session::new();
+    session.set_platform(demo_platform());
+    session
+}
+
 /// Label of the demo root, so screenshots never show the temporary directory path.
 pub const DEMO_ROOT_NAME: &str = "demo";
 
@@ -80,6 +103,7 @@ fn scan_demo(dir: &Path) -> Result<Session, String> {
     let root = tree.root();
     tree.set_node_name(root, DEMO_ROOT_NAME).map_err(|e| e.to_string())?;
     let mut session = Session::new();
+    session.set_platform(demo_platform());
     session.replace_tree(tree);
     Ok(session)
 }

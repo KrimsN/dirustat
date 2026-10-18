@@ -1,6 +1,6 @@
 # UI design
 
-> Status: 2026-10-13 · revision 2 · draft (implementation in M1/M5).
+> Status: 2026-10-18 · revision 3 · draft (implementation in M1/M5).
 
 ## Layout
 
@@ -19,6 +19,8 @@
 ```
 
 Panels dock and hide (`view.*` commands); the layout is saved in settings. The window opens in under 300 ms and stays responsive during a scan.
+
+Additional surfaces (M4.4): the **search bar** (`ui.toggle_search`, Ctrl+F) under the top bar with criteria rows and a result list above the status bar; hits are highlighted in the tree (tinted row) and the treemap (warning outline); the **drive picker** (start screen when nothing is scanned, and the Drives menu in the top bar) with fill bars from `list.drives`; the **context menu** of tree rows and treemap tiles (Reveal in file manager, Properties, Copy path; no delete entry yet); the **Preferences** window (`ui.preferences`) with the scan exclusion editor; free space of the scanned volume in the status bar. Evidence: `docs/qa/evidence/ui-m44-*.png`.
 
 ## Tokens and themes
 

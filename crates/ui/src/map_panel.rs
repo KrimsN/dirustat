@@ -190,6 +190,14 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
             }
         }
     }
+    if !state.search.hit_set().is_empty() {
+        let warn = Stroke::new(1.5, Tokens::color(tokens.warning));
+        for tile in tiles.iter().filter(|t| state.search.hit_set().contains(&t.node.index())) {
+            if tile.rect.w >= MIN_TILE_PX && tile.rect.h >= MIN_TILE_PX {
+                painter.rect_stroke(to_screen(origin, tile.rect), 0.0, warn, StrokeKind::Inside);
+            }
+        }
+    }
     if let Some((screen, leaf)) = hovered_rect {
         let fill = Tokens::color(tokens.text);
         if leaf {
@@ -233,6 +241,38 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
                 let _ = session.execute("select.clear", &serde_json::json!({}));
             }
         }
+    }
+    context_menu(ui, &response, session, state, (origin, bounds));
+}
+
+/// Right click: selects the tile under the pointer and offers the node context menu for it.
+fn context_menu(
+    ui: &mut egui::Ui,
+    response: &egui::Response,
+    session: &mut Session,
+    state: &mut UiState,
+    (origin, bounds): (Pos2, Rect),
+) {
+    let slot = ui.id().with("map_context_node");
+    if response.secondary_clicked() {
+        let node = response
+            .interact_pointer_pos()
+            .and_then(|p| pointer_to_bounds((origin.x, origin.y), (bounds.w, bounds.h), (p.x, p.y)))
+            .and_then(|(x, y)| session.tile_at(x, y));
+        ui.data_mut(|d| d.insert_temp(slot, node));
+        if let Some(n) = node {
+            let _ = session.execute("select.node", &serde_json::json!({ "id": n.index() }));
+        }
+    }
+    let mut chosen = None;
+    response.context_menu(|ui| match ui.data(|d| d.get_temp::<Option<NodeId>>(slot)).flatten() {
+        Some(node) => chosen = crate::context_menu::menu_ui(ui).map(|a| (node, a)),
+        None => {
+            ui.weak("No item here");
+        }
+    });
+    if let Some((node, action)) = chosen {
+        crate::context_menu::perform(ui.ctx(), session, state, node, action);
     }
 }
 

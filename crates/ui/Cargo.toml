@@ -16,6 +16,7 @@ dirustat-treemap.workspace = true
 dirustat-control.workspace = true
 dirustat-scan.workspace = true
 dirustat-model.workspace = true
+dirustat-platform.workspace = true
 egui.workspace = true
 eframe.workspace = true
 serde.workspace = true

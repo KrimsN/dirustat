@@ -111,6 +111,38 @@ pub struct UiState {
     /// Whether the "administrator rights" explanation window (`ui.relaunch_elevated_help`) is open.
     #[serde(default)]
     pub elevation_help_open: bool,
+    /// Search bar criteria and the last result (`ui.toggle_search`, `search.find`).
+    #[serde(default)]
+    pub search: crate::search_panel::SearchState,
+    /// Volumes shown by the drive picker (`list.drives`); read-only for patches.
+    #[serde(default)]
+    pub drives: Vec<crate::drive_picker::DriveEntry>,
+    /// The drive list is up to date; cleared to reload it (`ui.refresh_drives`, scan end).
+    #[serde(skip)]
+    pub drives_loaded: bool,
+    /// Capacity of the volume of the last finished scan (`platform.free_space`).
+    #[serde(default)]
+    pub free_space: Option<FreeSpace>,
+    /// Scan root and tree revision `free_space` was read for.
+    #[serde(skip)]
+    pub free_key: Option<(String, u64)>,
+    /// Whether the preferences window (`ui.preferences`) is open.
+    #[serde(default)]
+    pub prefs_open: bool,
+    /// Text in the "add exclusion" field.
+    #[serde(default)]
+    pub exclude_input: String,
+    /// Inline error of the exclusion editor.
+    #[serde(default)]
+    pub prefs_error: Option<String>,
+}
+
+/// Total and free bytes of the scanned volume.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FreeSpace {
+    pub path: String,
+    pub total: u64,
+    pub free: u64,
 }
 
 /// Status-bar hint shown while [`UiState::elevation_hint`] is set.
@@ -150,6 +182,14 @@ impl Default for UiState {
             notice: None,
             elevation_hint: None,
             elevation_help_open: false,
+            search: crate::search_panel::SearchState::default(),
+            drives: Vec::new(),
+            drives_loaded: false,
+            free_space: None,
+            free_key: None,
+            prefs_open: false,
+            exclude_input: String::new(),
+            prefs_error: None,
         }
     }
 }
@@ -185,6 +225,22 @@ struct UiPatch {
     zoom_percent: Option<u16>,
     palette_open: Option<bool>,
     palette_query: Option<String>,
+    search: Option<SearchPatch>,
+    prefs_open: Option<bool>,
+}
+
+/// Patch of the search bar criteria (the result fields are outputs and not patchable).
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchPatch {
+    open: Option<bool>,
+    query: Option<String>,
+    mode: Option<crate::search_panel::SearchMode>,
+    case_sensitive: Option<bool>,
+    match_path: Option<bool>,
+    min_size: Option<String>,
+    max_size: Option<String>,
+    extensions: Option<String>,
 }
 
 impl UiState {
@@ -206,9 +262,37 @@ impl UiState {
             return Err(format!("zoom_percent must be within {MIN_ZOOM_PERCENT}..={MAX_ZOOM_PERCENT}"));
         }
         let too_long = |s: &Option<String>| s.as_ref().is_some_and(|t| t.len() > MAX_TEXT_LEN);
-        if too_long(&p.path_text) || too_long(&p.palette_query) || p.selected_ext.iter().any(too_long) {
+        let search_texts_long = p
+            .search
+            .as_ref()
+            .is_some_and(|s| [&s.query, &s.min_size, &s.max_size, &s.extensions].into_iter().any(too_long));
+        if too_long(&p.path_text)
+            || too_long(&p.palette_query)
+            || p.selected_ext.iter().any(too_long)
+            || search_texts_long
+        {
             return Err(format!("text fields are limited to {MAX_TEXT_LEN} bytes"));
         }
+        if let Some(s) = p.search {
+            let t = &mut self.search;
+            t.open = s.open.unwrap_or(t.open);
+            t.mode = s.mode.unwrap_or(t.mode);
+            t.case_sensitive = s.case_sensitive.unwrap_or(t.case_sensitive);
+            t.match_path = s.match_path.unwrap_or(t.match_path);
+            if let Some(v) = s.query {
+                t.query = v;
+            }
+            if let Some(v) = s.min_size {
+                t.min_size = v;
+            }
+            if let Some(v) = s.max_size {
+                t.max_size = v;
+            }
+            if let Some(v) = s.extensions {
+                t.extensions = v;
+            }
+        }
+        self.prefs_open = p.prefs_open.unwrap_or(self.prefs_open);
         if let Some(v) = p.path_text {
             self.path_text = v;
         }
@@ -248,6 +332,44 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap_or_default();
         let back: Result<UiState, _> = serde_json::from_str(&json);
         assert_eq!(back.ok(), Some(state));
+    }
+
+    #[test]
+    fn new_panels_round_trip_and_patch_atomically() {
+        let mut state = UiState::default();
+        state.search.open = true;
+        state.search.query = "x".into();
+        state.drives.push(crate::drive_picker::DriveEntry {
+            path: "C:\\".into(),
+            label: "L".into(),
+            total: 9,
+            free: 3,
+        });
+        state.free_space = Some(FreeSpace { path: "C:\\".into(), total: 9, free: 3 });
+        state.prefs_open = true;
+        state.exclude_input = "*.tmp".into();
+        let json = serde_json::to_string(&state).unwrap_or_default();
+        let back: Result<UiState, _> = serde_json::from_str(&json);
+        assert_eq!(back.ok(), Some(state.clone()));
+        // Old saved states without the new fields still load.
+        let old: Result<UiState, _> = serde_json::from_str(
+            "{\"path_text\":\"\",\"panels\":{\"tree\":true,\"map\":true,\"extensions\":true,\"status_bar\":true},\
+             \"scan\":{\"state\":\"idle\"},\"theme\":\"dark\"}",
+        );
+        assert!(old.is_ok());
+        let ok =
+            serde_json::json!({"search": {"open": false, "min_size": "1 MB", "extensions": "rs"}, "prefs_open": false});
+        assert!(state.apply_patch(&ok).is_ok());
+        assert!(!state.search.open && state.search.min_size == "1 MB" && !state.prefs_open);
+        let before = state.clone();
+        for bad in [
+            serde_json::json!({"search": {"hits": []}, "zoom_percent": 120}),
+            serde_json::json!({"search": {"query": "x".repeat(MAX_TEXT_LEN + 1)}}),
+            serde_json::json!({"drives": []}),
+        ] {
+            assert!(state.apply_patch(&bad).is_err(), "{bad}");
+            assert_eq!(state, before);
+        }
     }
 
     #[test]
