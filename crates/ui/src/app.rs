@@ -37,6 +37,8 @@ pub struct DirustatApp {
     probe: Option<Receiver<(String, FastPathStatus)>>,
     /// The file types panel is enabled but collapsed because the window is too narrow.
     ext_collapsed: bool,
+    /// The path field takes keyboard focus on the next frame (Scan folder without a path).
+    focus_path: bool,
 }
 
 /// Share of the window width the treemap always keeps, and its absolute floor in points.
@@ -65,6 +67,33 @@ impl SideLayout {
         let budget = if map_visible { (total - (total * MAP_MIN_FRACTION).max(MAP_MIN_W)).max(0.0) } else { total };
         let ext_max = budget * (1.0 - TREE_SHARE);
         Self { show_ext: ext_max >= EXT_MIN_W, tree_max: budget * TREE_SHARE, ext_max }
+    }
+}
+
+/// Status text when a scan is requested without a path.
+const EMPTY_PATH_MESSAGE: &str = "Type or paste a folder path first";
+
+/// Drops the internal `invalid params: ` prefix of an engine error.
+fn strip_prefix(message: &str) -> String {
+    message.strip_prefix("invalid params: ").unwrap_or(message).to_owned()
+}
+
+/// Turns a `scan.start` failure into text a user can act on (no internal prefixes, no localized
+/// OS error text).
+fn friendly_scan_error(path: &str, message: &str) -> String {
+    let m = strip_prefix(message);
+    if m == EMPTY_PATH_MESSAGE || m == "path is empty" {
+        EMPTY_PATH_MESSAGE.to_owned()
+    } else if m.contains("not a directory") {
+        format!("Not a folder: {path}")
+    } else if m.contains("cannot read scan root") {
+        if m.contains("os error 2") || m.contains("os error 3") {
+            format!("Folder not found: {path}")
+        } else {
+            format!("Cannot open folder: {path}")
+        }
+    } else {
+        m
     }
 }
 
@@ -98,6 +127,7 @@ impl DirustatApp {
             quit_requested: false,
             probe: None,
             ext_collapsed: false,
+            focus_path: false,
         }
     }
 
@@ -157,7 +187,9 @@ impl DirustatApp {
     /// Runs a command by id: shell commands change `UiState`, everything else goes to
     /// `Session::execute`. Errors are also shown in the status bar.
     pub fn run_command(&mut self, id: &str) -> Result<Value, String> {
-        let result = self.dispatch(id);
+        let result = self.dispatch(id).map_err(|m| {
+            if id == "scan.start" { friendly_scan_error(self.state.path_text.trim(), &m) } else { strip_prefix(&m) }
+        });
         match &result {
             Ok(_) => self.state.notice = None,
             Err(message) => {
@@ -172,6 +204,10 @@ impl DirustatApp {
     }
 
     fn dispatch(&mut self, id: &str) -> Result<Value, String> {
+        if id == "scan.start" && self.state.path_text.trim().is_empty() {
+            self.focus_path = true;
+            return Err(EMPTY_PATH_MESSAGE.to_owned());
+        }
         if let Some(effect) = commands::run(&mut self.state, id) {
             if effect == UiEffect::Quit {
                 self.quit_requested = true;
@@ -275,7 +311,8 @@ impl DirustatApp {
                 }
                 Ok(_) => ctx.request_repaint_after(SCAN_REPAINT),
                 Err(err) => {
-                    self.state.scan = ScanStatus::Failed { message: err.to_string() };
+                    let message = friendly_scan_error(self.state.path_text.trim(), &err.to_string());
+                    self.state.scan = ScanStatus::Failed { message };
                     ctx.request_repaint();
                 }
             }
@@ -465,6 +502,9 @@ impl DirustatApp {
                         .desired_width(width)
                         .hint_text("Folder to scan"),
                 );
+                if std::mem::take(&mut self.focus_path) {
+                    edit.request_focus();
+                }
                 let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if scanning {
                     if ui.button("Stop").clicked() {
@@ -635,6 +675,38 @@ mod tests {
         app.state_mut().path_text = "/definitely/not/here/\u{0}".to_owned();
         app.start_scan();
         assert!(matches!(app.state().scan, ScanStatus::Failed { .. }) || app.is_scanning());
+    }
+
+    #[test]
+    fn scan_errors_are_actionable() {
+        let mut app = DirustatApp::new();
+        app.start_scan();
+        assert_eq!(app.state().scan, ScanStatus::Failed { message: EMPTY_PATH_MESSAGE.to_owned() });
+        assert!(app.focus_path, "an empty path moves focus to the path field");
+        let ctx = egui::Context::default();
+        let settle = |app: &mut DirustatApp| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while matches!(app.state().scan, ScanStatus::Running { .. }) && Instant::now() < deadline {
+                app.poll_scan(&ctx);
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        app.state_mut().path_text = "E:/nonexistent_zzz_dirustat".to_owned();
+        app.start_scan();
+        settle(&mut app);
+        assert_eq!(
+            app.state().scan,
+            ScanStatus::Failed { message: "Folder not found: E:/nonexistent_zzz_dirustat".to_owned() }
+        );
+        let Ok(dir) = tempfile::tempdir() else { return };
+        let file = dir.path().join("f.txt");
+        assert!(std::fs::write(&file, b"x").is_ok());
+        app.state_mut().path_text = file.to_string_lossy().into_owned();
+        app.start_scan();
+        settle(&mut app);
+        assert!(matches!(&app.state().scan, ScanStatus::Failed { message } if message.starts_with("Not a folder: ")));
+        assert_eq!(strip_prefix("invalid params: x"), "x");
+        assert_eq!(friendly_scan_error("p", "invalid params: path is empty"), EMPTY_PATH_MESSAGE);
     }
 
     #[test]
