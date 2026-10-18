@@ -4,11 +4,12 @@
 //! shell-only `UI_COMMANDS`, buttons and shortcuts dispatch by id (`DirustatApp::run_command`).
 
 use crate::commands::{self, Needs, UI_COMMANDS, UiEffect};
+use crate::delete_dialog::{self, DeleteMode, DialogEvent, DialogRequest};
 use crate::palette::{self, PaletteEntry};
 use crate::screenshot::{Region, SaveOptions, ScreenshotStatus, Screenshots};
 use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
-use crate::{drive_picker, ext_panel, map_panel, prefs, search_panel, tree_panel};
+use crate::{cleanups_ui, drive_picker, ext_panel, journal_ui, map_panel, prefs, search_panel, toast, tree_panel};
 use dirustat_control::{SharedSession, lock_session, share};
 use dirustat_engine::{CommandInfo, FastPathStatus, Session};
 use dirustat_model::SizeMode;
@@ -21,7 +22,7 @@ use std::time::Duration;
 const SCAN_REPAINT: Duration = Duration::from_millis(50);
 
 /// Top-level menus in display order; other groups follow in registration order.
-const MENU_ORDER: [&str; 5] = ["File", "Edit", "View", "Cleanup", "Help"];
+const MENU_ORDER: [&str; 6] = ["File", "Edit", "View", "Tools", "Cleanup", "Help"];
 
 /// The egui application. The scan runs inside the session; the UI only polls it.
 #[derive(Debug)]
@@ -111,6 +112,8 @@ struct MenuItem {
     shortcut: Option<&'static str>,
     enabled: bool,
     checked: bool,
+    /// Tooltip of a disabled item that says why (for example a network scan root).
+    disabled_reason: Option<&'static str>,
 }
 
 impl DirustatApp {
@@ -216,6 +219,18 @@ impl DirustatApp {
         if id == "scan.start" && self.state.path_text.trim().is_empty() {
             self.focus_path = true;
             return Err(EMPTY_PATH_MESSAGE.to_owned());
+        }
+        let delete_mode = match id {
+            "file.delete" => Some(DeleteMode::Recycle),
+            "file.delete_permanent" => Some(DeleteMode::Permanent),
+            _ => None,
+        };
+        if let Some(mode) = delete_mode {
+            // Delete from the menu, a shortcut or the palette only opens the confirmation dialog
+            // (after a read-only preview); the destructive command is sent by its confirm button.
+            let mut session = lock_session(&self.session);
+            delete_dialog::open_for_selection(&mut session, &mut self.state, mode)?;
+            return Ok(json!({ "ok": true, "dialog": "open" }));
         }
         if let Some(effect) = commands::run(&mut self.state, id) {
             match effect {
@@ -369,8 +384,15 @@ impl DirustatApp {
 
     /// Whether a command can run without a parameter form.
     fn runnable_without_form(info: &CommandInfo) -> bool {
-        matches!(info.id, "scan.start" | "view.size_mode" | "platform.reveal" | "platform.properties")
-            || info.params_doc.trim_start().starts_with("none")
+        matches!(
+            info.id,
+            "scan.start"
+                | "view.size_mode"
+                | "platform.reveal"
+                | "platform.properties"
+                | "file.delete"
+                | "file.delete_permanent"
+        ) || info.params_doc.trim_start().starts_with("none")
     }
 
     /// Starts a scan of the path in the text field. Errors become the scan status, never a panic.
@@ -446,6 +468,8 @@ impl DirustatApp {
             ctx.copy_text(text);
         }
         let infos = lock_session(&self.session).commands();
+        self.handle_dialog_request();
+        self.handle_cleanup_request();
         self.handle_shortcuts(&ctx, &infos);
         if let Some(id) = self.menu_bar(ui, &infos) {
             let _ = self.run_command(&id);
@@ -462,6 +486,10 @@ impl DirustatApp {
         }
         self.prefs_window(&ctx);
         self.elevation_help_window(&ctx);
+        self.cleanups_window(&ctx);
+        self.journal_window(&ctx);
+        self.delete_dialog_window(&ctx);
+        toast::show(&ctx, &mut self.state, &self.tokens);
         let entries = Self::palette_entries(&infos);
         if let Some(id) = palette::show(&ctx, &mut self.state, &self.tokens, &entries) {
             let _ = self.run_command(&id);
@@ -535,6 +563,157 @@ impl DirustatApp {
         }
     }
 
+    /// Executes a `delete_dialog` request of `ui.set_state`: the same path as the Delete key, so
+    /// it can open the dialog (after the read-only preview) or close it, and never confirm it.
+    fn handle_dialog_request(&mut self) {
+        let Some(request) = self.state.dialog_request.take() else { return };
+        let _ = match request {
+            DialogRequest::Recycle => self.run_command("file.delete"),
+            DialogRequest::Permanent => self.run_command("file.delete_permanent"),
+            DialogRequest::Close => {
+                self.state.delete_dialog = None;
+                Ok(Value::Null)
+            }
+        };
+    }
+
+    /// Executes a `cleanups_preview` request of `ui.set_state`: opens the window on that cleanup and
+    /// runs the read-only preview (what the Select and Preview buttons do). Never runs a cleanup.
+    fn handle_cleanup_request(&mut self) {
+        let Some(id) = self.state.cleanup_request.take() else { return };
+        self.state.cleanups.open = true;
+        let mut session = lock_session(&self.session);
+        if !self.state.cleanups.loaded {
+            cleanups_ui::load(&mut session, &mut self.state);
+        }
+        self.state.cleanups.selected = Some(id.clone());
+        if let Err(message) = cleanups_ui::preview(&mut session, &mut self.state, &id) {
+            toast::push(&mut self.state, toast::ToastKind::Error, message);
+        }
+    }
+
+    /// Restarts the scan of the current scan root (after a stale-tree refusal).
+    fn rescan(&mut self) {
+        let root = {
+            let session = lock_session(&self.session);
+            session.node_path(session.tree().root())
+        };
+        if let Some(root) = root {
+            self.state.path_text = root;
+        }
+        self.start_scan();
+    }
+
+    /// The modal delete confirmation. The destructive command leaves only from the confirm click.
+    fn delete_dialog_window(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.state.delete_dialog.take() else { return };
+        let event = delete_dialog::show(ctx, &mut dialog, &self.tokens);
+        self.state.delete_dialog = Some(dialog);
+        match event {
+            DialogEvent::None => {}
+            DialogEvent::Cancel => self.state.delete_dialog = None,
+            DialogEvent::Confirm => {
+                let mut session = lock_session(&self.session);
+                delete_dialog::confirm(&mut session, &mut self.state);
+                drop(session);
+                ctx.request_repaint();
+            }
+            DialogEvent::Rescan => {
+                self.state.delete_dialog = None;
+                self.rescan();
+            }
+            DialogEvent::SwitchToPermanent => {
+                let mut session = lock_session(&self.session);
+                delete_dialog::switch_to_permanent(&mut session, &mut self.state);
+            }
+        }
+    }
+
+    /// Tools > Cleanups.
+    fn cleanups_window(&mut self, ctx: &egui::Context) {
+        if !self.state.cleanups.open {
+            return;
+        }
+        let mut session = lock_session(&self.session);
+        if !self.state.cleanups.loaded {
+            cleanups_ui::load(&mut session, &mut self.state);
+        }
+        let block = delete_dialog::block_reason(&session);
+        let revision = session.revision();
+        let action = cleanups_ui::show(ctx, &mut self.state.cleanups, &self.tokens, block, revision);
+        if let Some(action) = action {
+            Self::apply_cleanups_action(&mut self.state, &mut session, action);
+            ctx.request_repaint();
+        }
+    }
+
+    fn apply_cleanups_action(state: &mut UiState, session: &mut Session, action: cleanups_ui::CleanupsAction) {
+        use cleanups_ui::CleanupsAction as A;
+        let result = match action {
+            A::Reload => {
+                state.cleanups.loaded = false;
+                Ok(())
+            }
+            A::Select(id) => {
+                state.cleanups.selected = Some(id);
+                state.cleanups.preview = None;
+                state.cleanups.confirm_remove = None;
+                Ok(())
+            }
+            A::Preview(id) => cleanups_ui::preview(session, state, &id),
+            A::Run(id) => cleanups_ui::open_run_dialog(session, state, &id),
+            A::DryRun(id) => cleanups_ui::dry_run(session, state, &id),
+            A::New => {
+                state.cleanups.form = Some(cleanups_ui::CleanupForm::default());
+                Ok(())
+            }
+            A::Edit(id) => {
+                state.cleanups.form =
+                    state.cleanups.entries.iter().find(|e| e.id == id && !e.builtin).map(cleanups_ui::form_from_entry);
+                Ok(())
+            }
+            A::AskRemove(id) => {
+                state.cleanups.confirm_remove = Some(id);
+                Ok(())
+            }
+            A::Remove(id) => {
+                cleanups_ui::remove(session, state, &id);
+                Ok(())
+            }
+            A::CancelRemove => {
+                state.cleanups.confirm_remove = None;
+                Ok(())
+            }
+            A::Save => {
+                cleanups_ui::save_form(session, state);
+                Ok(())
+            }
+            A::CancelEdit => {
+                state.cleanups.form = None;
+                Ok(())
+            }
+        };
+        if let Err(message) = result {
+            toast::push(state, toast::ToastKind::Error, message);
+        }
+    }
+
+    /// Tools > Journal.
+    fn journal_window(&mut self, ctx: &egui::Context) {
+        if !self.state.journal.open {
+            return;
+        }
+        if !self.state.journal.loaded {
+            journal_ui::load(&mut lock_session(&self.session), &mut self.state.journal);
+        }
+        match journal_ui::show(ctx, &mut self.state.journal, &self.tokens) {
+            Some(journal_ui::JournalAction::Refresh) => self.state.journal.loaded = false,
+            Some(journal_ui::JournalAction::Previous) => self.state.journal.turn(false),
+            Some(journal_ui::JournalAction::Next) => self.state.journal.turn(true),
+            None => {}
+        }
+    }
+
     /// Non-modal explanation opened by `ui.relaunch_elevated_help`. It performs no elevation.
     fn elevation_help_window(&mut self, ctx: &egui::Context) {
         if !self.state.elevation_help_open {
@@ -553,6 +732,10 @@ impl DirustatApp {
 
     /// Consumes keyboard shortcuts of enabled commands; plain keys are ignored while typing.
     fn handle_shortcuts(&mut self, ctx: &egui::Context, infos: &[CommandInfo]) {
+        // A modal dialog owns the keyboard: no shortcut (Delete included) acts behind it.
+        if self.state.delete_dialog.is_some() {
+            return;
+        }
         let typing = ctx.egui_wants_keyboard_input();
         let mut hits: Vec<(String, egui::KeyboardShortcut)> = Vec::new();
         for i in infos.iter().filter(|i| i.enabled && Self::runnable_without_form(i)) {
@@ -612,17 +795,28 @@ impl DirustatApp {
                 items.push(item);
             }
         };
-        let (has_selection, has_hits) = {
+        let (has_selection, has_hits, delete_block) = {
             let session = lock_session(&self.session);
-            (session.selection().is_some(), !session.search_hits().is_empty())
+            let selection = session.selection();
+            let block = match selection {
+                Some(node) => delete_dialog::node_block_reason(&session, node),
+                None => delete_dialog::block_reason(&session),
+            };
+            (selection.is_some(), !session.search_hits().is_empty(), block)
         };
         for i in infos.iter().filter(|i| !Self::menu_of(i).is_empty() && Self::runnable_without_form(i)) {
             let menu = Self::menu_of(i);
-            let label = menu.split_once('/').map_or(i.label, |(_, l)| l).to_owned();
-            let satisfied = match commands::engine_menu(i.id).map_or(Needs::Nothing, |e| e.needs) {
+            let label = match i.id {
+                "file.delete" => "Move to Recycle Bin".to_owned(),
+                "file.delete_permanent" => "Delete permanently...".to_owned(),
+                _ => menu.split_once('/').map_or(i.label, |(_, l)| l).to_owned(),
+            };
+            let needs = commands::engine_menu(i.id).map_or(Needs::Nothing, |e| e.needs);
+            let satisfied = match needs {
                 Needs::Nothing => true,
                 Needs::Selection => has_selection,
                 Needs::SearchHits => has_hits,
+                Needs::Deletable => has_selection && delete_block.is_none(),
             };
             let item = MenuItem {
                 id: i.id.to_owned(),
@@ -630,13 +824,24 @@ impl DirustatApp {
                 shortcut: Self::shortcut_of(i),
                 enabled: i.enabled && satisfied,
                 checked: false,
+                disabled_reason: if needs == Needs::Deletable && has_selection { delete_block } else { None },
             };
             add(menu, item);
         }
         for c in UI_COMMANDS.iter().filter(|c| !c.menu.is_empty()) {
             let label = c.menu.split_once('/').map_or(c.label, |(_, l)| l).to_owned();
             let checked = c.checked.is_some_and(|f| f(&self.state));
-            add(c.menu, MenuItem { id: c.id.to_owned(), label, shortcut: c.shortcut, enabled: true, checked });
+            add(
+                c.menu,
+                MenuItem {
+                    id: c.id.to_owned(),
+                    label,
+                    shortcut: c.shortcut,
+                    enabled: true,
+                    checked,
+                    disabled_reason: None,
+                },
+            );
         }
         groups.retain(|(_, items)| !items.is_empty());
         groups
@@ -658,7 +863,11 @@ impl DirustatApp {
                             if let Some(sc) = item.shortcut {
                                 button = button.shortcut_text(sc);
                             }
-                            if ui.add_enabled(item.enabled, button).clicked() {
+                            let mut response = ui.add_enabled(item.enabled, button);
+                            if let Some(reason) = item.disabled_reason {
+                                response = response.on_disabled_hover_text(reason);
+                            }
+                            if response.clicked() {
                                 clicked = Some(item.id.clone());
                                 ui.close();
                             }
@@ -917,6 +1126,9 @@ pub(crate) fn human_size(bytes: u64) -> String {
         format!("{whole}.{tenth} {name}")
     }
 }
+
+#[cfg(test)]
+mod flow_tests;
 
 #[cfg(test)]
 mod tests {

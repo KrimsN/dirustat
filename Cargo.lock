@@ -795,6 +795,8 @@ dependencies = [
  "dirustat-control",
  "dirustat-engine",
  "dirustat-model",
+ "dirustat-platform",
+ "dirustat-scan",
  "dirustat-ui",
  "eframe",
  "serde_json",

@@ -2,11 +2,14 @@
 //! Colours and radii come only from `theme::Tokens`, never hard-coded. Nothing below L4 knows about egui.
 
 mod app;
+pub mod cleanups_ui;
 pub mod commands;
 pub mod context_menu;
+pub mod delete_dialog;
 pub mod demo;
 pub mod drive_picker;
 pub mod ext_panel;
+pub mod journal_ui;
 pub mod map_panel;
 pub mod palette;
 pub mod prefs;
@@ -14,6 +17,7 @@ pub mod screenshot;
 pub mod search_panel;
 pub mod state;
 pub mod theme;
+pub mod toast;
 pub mod tree_panel;
 
 pub use app::DirustatApp;

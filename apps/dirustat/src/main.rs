@@ -9,7 +9,7 @@ mod bridge;
 
 use bridge::UiEndpoint;
 use dirustat_control::{ControlServer, SharedSession, default_key_dir, lock_session};
-use dirustat_engine::{LAUNCH_USAGE, LaunchArgs, Session, Settings, settings_path};
+use dirustat_engine::{LAUNCH_USAGE, LaunchArgs, Session, Settings, settings_dir, settings_path};
 use dirustat_ui::{DirustatApp, ScreenshotStatus, WINDOW_TITLE};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -76,6 +76,15 @@ impl Shell {
     }
 }
 
+/// Mirrors the destructive-action journal to `<dir>/journal.jsonl` (best effort: without the
+/// directory the journal stays in memory). Never called for demo runs, which must not write files.
+fn enable_journal(session: &mut Session, dir: Option<std::path::PathBuf>) {
+    let Some(dir) = dir else { return };
+    // The engine never creates the directory itself; this is the app's own settings folder.
+    let _ = std::fs::create_dir_all(&dir);
+    session.set_journal_file(Some(dir.join("journal.jsonl")));
+}
+
 /// Builds the session from the launch arguments: demo data or saved settings, then `--size-mode`.
 #[allow(clippy::print_stderr)]
 fn build_session(args: &LaunchArgs) -> Result<Session, String> {
@@ -92,6 +101,7 @@ fn build_session(args: &LaunchArgs) -> Result<Session, String> {
             }
             session.apply_settings(loaded.settings);
         }
+        enable_journal(&mut session, settings_dir());
         session
     };
     if let Some(mode) = args.size_mode {
@@ -210,6 +220,27 @@ mod tests {
         assert!(a.demo && a.exit_after_screenshot && a.size == Some((800, 600)));
         assert!(parse(&["--scan", "x", "--control", "0", "--size-mode", "logical"]).is_ok());
         assert!(parse(&["--bogus"]).is_err());
+    }
+
+    #[test]
+    fn journal_is_mirrored_to_a_file_in_the_settings_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"data").unwrap();
+        let mut session = Session::new();
+        let fake = std::sync::Arc::new(dirustat_platform::FakePlatform::new());
+        session.set_platform(fake);
+        let handle = dirustat_scan::start(&root, dirustat_scan::ScanOptions::default()).unwrap();
+        assert_eq!(session.finish_scan(handle), Ok(true));
+        let settings = dir.path().join("cfg").join("dirustat");
+        enable_journal(&mut session, Some(settings.clone()));
+        let path = root.join("a.txt").to_string_lossy().into_owned();
+        session.execute("file.delete", &serde_json::json!({ "path": path, "confirm": true })).unwrap();
+        let text = std::fs::read_to_string(settings.join("journal.jsonl")).unwrap();
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(text.contains("file.delete"));
+        enable_journal(&mut session, None);
     }
 
     #[test]

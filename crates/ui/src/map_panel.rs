@@ -265,8 +265,13 @@ fn context_menu(
         }
     }
     let mut chosen = None;
+    let block = crate::delete_dialog::block_reason(session);
+    let root = session.tree().root();
     response.context_menu(|ui| match ui.data(|d| d.get_temp::<Option<NodeId>>(slot)).flatten() {
-        Some(node) => chosen = crate::context_menu::menu_ui(ui).map(|a| (node, a)),
+        Some(node) => {
+            let block = block.or_else(|| (node == root).then_some(crate::delete_dialog::ROOT_REASON));
+            chosen = crate::context_menu::menu_ui(ui, block).map(|a| (node, a));
+        }
         None => {
             ui.weak("No item here");
         }

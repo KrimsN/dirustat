@@ -45,6 +45,14 @@ Shell-only commands (`ui.*`, `dirustat_ui::UI_COMMANDS`: panel toggles, theme, z
 
 UI strings live in a catalog `crates/ui/locales/`; the source language is English, other languages are translations. Keys are English identifiers. Strings from other programs are never copied.
 
+## Destructive actions UI (M4.7)
+
+- Delete never happens from a click: every entry (context menu, Edit menu, `Delete`, `Shift+Delete`) runs `file.delete_preview` and opens a modal dialog (`crates/ui/src/delete_dialog.rs`). Only the dialog buttons send `file.delete` / `file.delete_permanent` with `confirm`; this send is UI-only and not a UI command, `ui.set_state` can open or close the dialog but never confirm it.
+- Dialog content: name and path, item count, total size, the first paths, a partial-tree warning. Recycle mode says it can be restored; permanent mode has a red border, an irreversible warning and an "I understand this cannot be undone" checkbox (plus one for partial trees). Cancel has the initial focus and `Enter` never confirms a permanent deletion.
+- Ids always travel with the session revision. A network (UNC) scan root and the scan root itself disable the entries with a tooltip reason. Errors become friendly toasts or an inline hint (`stale_tree`: scan again, `unsupported`: offer permanent deletion).
+- Tools > Cleanups (list, preview, dry run, confirmed run, editor for user cleanups, per-node results) and Tools > Journal (paged `file.journal`) are windows driven by `ui.set_state` fields `cleanups_open`, `cleanups_preview`, `journal_open`.
+- Evidence: `docs/qa/evidence/ui-m47-{delete-recycle,delete-permanent,cleanups,journal}-{dark,light}.png`.
+
 ## Verification
 
 After UI changes: `ui.screenshot` (or the offscreen example) → PNG → inspect it in both themes at 100 % / 150 % scale. Demo data is synthetic.

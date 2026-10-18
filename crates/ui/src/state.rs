@@ -135,6 +135,29 @@ pub struct UiState {
     /// Inline error of the exclusion editor.
     #[serde(default)]
     pub prefs_error: Option<String>,
+    /// The delete confirmation dialog, when open. Read-only for patches: it opens through
+    /// `delete_dialog` requests (like pressing Delete) and is confirmed only by a click.
+    #[serde(default)]
+    pub delete_dialog: Option<crate::delete_dialog::DeleteDialog>,
+    /// A request from `ui.set_state` to open or close the delete dialog, handled on the next frame.
+    #[serde(skip)]
+    pub dialog_request: Option<crate::delete_dialog::DialogRequest>,
+    /// A request from `ui.set_state` to open the Cleanups window on a cleanup and run its read-only
+    /// preview, handled on the next frame.
+    #[serde(skip)]
+    pub cleanup_request: Option<String>,
+    /// The notice shown in the corner (outcome of a delete or a cleanup run).
+    #[serde(default)]
+    pub toast: Option<crate::toast::Toast>,
+    /// When the toast appeared.
+    #[serde(skip)]
+    pub toast_since: Option<std::time::Instant>,
+    /// The Cleanups window (`ui.cleanups`).
+    #[serde(default)]
+    pub cleanups: crate::cleanups_ui::CleanupsState,
+    /// The Journal window (`ui.journal`).
+    #[serde(default)]
+    pub journal: crate::journal_ui::JournalState,
 }
 
 /// Total and free bytes of the scanned volume.
@@ -190,6 +213,13 @@ impl Default for UiState {
             prefs_open: false,
             exclude_input: String::new(),
             prefs_error: None,
+            delete_dialog: None,
+            dialog_request: None,
+            cleanup_request: None,
+            toast: None,
+            toast_since: None,
+            cleanups: crate::cleanups_ui::CleanupsState::default(),
+            journal: crate::journal_ui::JournalState::default(),
         }
     }
 }
@@ -227,6 +257,12 @@ struct UiPatch {
     palette_query: Option<String>,
     search: Option<SearchPatch>,
     prefs_open: Option<bool>,
+    cleanups_open: Option<bool>,
+    journal_open: Option<bool>,
+    /// Opens the Cleanups window, selects this cleanup and runs its (read-only) preview.
+    cleanups_preview: Option<String>,
+    /// Opens (or closes) the delete dialog for the selected node. Never confirms.
+    delete_dialog: Option<crate::delete_dialog::DialogRequest>,
 }
 
 /// Patch of the search bar criteria (the result fields are outputs and not patchable).
@@ -268,6 +304,7 @@ impl UiState {
             .is_some_and(|s| [&s.query, &s.min_size, &s.max_size, &s.extensions].into_iter().any(too_long));
         if too_long(&p.path_text)
             || too_long(&p.palette_query)
+            || too_long(&p.cleanups_preview)
             || p.selected_ext.iter().any(too_long)
             || search_texts_long
         {
@@ -293,6 +330,14 @@ impl UiState {
             }
         }
         self.prefs_open = p.prefs_open.unwrap_or(self.prefs_open);
+        self.cleanups.open = p.cleanups_open.unwrap_or(self.cleanups.open);
+        self.journal.open = p.journal_open.unwrap_or(self.journal.open);
+        if p.delete_dialog.is_some() {
+            self.dialog_request = p.delete_dialog;
+        }
+        if let Some(id) = p.cleanups_preview {
+            self.cleanup_request = Some(id);
+        }
         if let Some(v) = p.path_text {
             self.path_text = v;
         }

@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-18 · revision 9 · WinDirStat done 7/34 (partial 16), WizTree done 2/12 (partial 4). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-18 · revision 10 · WinDirStat done 10/34 (partial 13), WizTree done 2/12 (partial 4). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -33,10 +33,10 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 23 | Sort the extension list | `ext.sort` | M1 | partial (sortable columns; not a command yet) |
 | 24 | Open a file | `file.open` | M4 | missing |
 | 25 | Reveal in file manager | `file.reveal` | M4 | missing |
-| 26 | Delete to recycle bin | `file.delete` | M4 | partial 2026-10-18 (engine command with dry run, protected paths, stale check, journal; no UI) |
-| 27 | Delete permanently | `file.delete_permanent` | M4 | partial 2026-10-18 (engine command, double confirmation; no UI) |
+| 26 | Delete to recycle bin | `file.delete` | M4 | done 2026-10-19 (M4.7: confirmation dialog from the context menu, Edit menu and Delete; preview first, never from a click; toast with count and size; screenshots `docs/qa/evidence/ui-m47-delete-*.png`) |
+| 27 | Delete permanently | `file.delete_permanent` | M4 | done 2026-10-19 (M4.7: red irreversible warning, "I understand" checkbox, extra one for partial trees, Enter never confirms; screenshots `ui-m47-delete-permanent-*.png`) |
 | 28 | Copy path | `file.copy_path` | M4 | missing |
-| 29 | User-defined cleanups | `cleanup.list` / `cleanup.save` / `cleanup.remove` / `cleanup.preview` / `cleanup.run` | M4 | partial 2026-10-18 (engine commands, 3 built-in examples, per-node safety checks and journal; no UI) |
+| 29 | User-defined cleanups | `cleanup.list` / `cleanup.save` / `cleanup.remove` / `cleanup.preview` / `cleanup.run` | M4 | done 2026-10-19 (M4.7: Tools > Cleanups window with preview, dry run, confirmed run, editor and per-node results; Tools > Journal; screenshots `ui-m47-cleanups-*.png`, `ui-m47-journal-*.png`) |
 | 30 | File/folder properties | `file.properties` | M4 | missing |
 | 31 | Search by name | `search.find` | M4 | missing |
 | 32 | Filter by name/size/date | `search.find`, filters on `tree.children` / `list.largest_files` | M4 | partial 2026-10-18 (name, size and extension filters in the search bar (Ctrl+F) with tree and treemap highlight, screenshots `docs/qa/evidence/ui-m44-search-*.png`; no date filter) |
@@ -83,3 +83,4 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 - 2026-10-18 · r7: G-015 landed in the engine. A26 and A27 moved to `partial` (commands and tests only, no UI). WinDirStat partial 15.
 - 2026-10-18 · r8: G-017 landed in the engine. A29 moved to `partial` (commands and tests only, no UI). WinDirStat partial 16.
 - 2026-10-18 · r9: M4.4 UI part 1. B5 (search UI) and B10 (drive picker) moved to `done` with screenshots; A6 and A32 stay `partial` (exclusion editor and search bar landed; no date filter, editor not yet screenshotted). Recounted from rows: WizTree done 2, partial 4 (B1, B2, B4, B11); WinDirStat unchanged.
+- 2026-10-19 · r10: M4.7 UI part 2. Rows 26 (delete to recycle bin), 27 (delete permanently) and 29 (user-defined cleanups) moved `partial` -> `done` with screenshots. Recounted: WinDirStat done 10/34, partial 13.

@@ -18,4 +18,6 @@ eframe.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+dirustat-platform.workspace = true
+dirustat-scan.workspace = true
 tempfile.workspace = true

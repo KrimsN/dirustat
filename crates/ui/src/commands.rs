@@ -96,6 +96,15 @@ fn refresh_drives(s: &mut UiState) -> UiEffect {
 fn copy_path(_: &mut UiState) -> UiEffect {
     UiEffect::CopyPath
 }
+fn cleanups(s: &mut UiState) -> UiEffect {
+    s.cleanups.open = !s.cleanups.open;
+    UiEffect::None
+}
+fn journal(s: &mut UiState) -> UiEffect {
+    s.journal.open = !s.journal.open;
+    s.journal.loaded = false;
+    UiEffect::None
+}
 
 const NONE: &str = "none";
 
@@ -127,6 +136,24 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params_doc: NONE,
         checked: Some(|s| s.prefs_open),
         run: preferences,
+    },
+    UiCommand {
+        id: "ui.cleanups",
+        label: "Cleanups",
+        menu: "Tools/Cleanups",
+        shortcut: None,
+        params_doc: NONE,
+        checked: Some(|s| s.cleanups.open),
+        run: cleanups,
+    },
+    UiCommand {
+        id: "ui.journal",
+        label: "Journal",
+        menu: "Tools/Journal",
+        shortcut: None,
+        params_doc: NONE,
+        checked: Some(|s| s.journal.open),
+        run: journal,
     },
     UiCommand {
         id: "ui.refresh_drives",
@@ -256,6 +283,8 @@ pub enum Needs {
     Selection,
     /// A held search result.
     SearchHits,
+    /// A selected node that may be deleted: not the scan root, no running scan, no network root.
+    Deletable,
 }
 
 /// Menu entry the shell gives to an engine command that has none in the registry.
@@ -270,6 +299,15 @@ pub struct EngineMenu {
 /// Menu entries, shortcuts and enabling rules of the `platform.*` and `search.*` commands.
 pub const ENGINE_MENU: &[EngineMenu] = &[
     EngineMenu { id: "search.clear", menu: "Edit/Clear search", shortcut: None, needs: Needs::SearchHits },
+    // The registry gives these their menu path and shortcut; the shell adds the enabling rule. They
+    // open the confirmation dialog, they never delete directly.
+    EngineMenu { id: "file.delete", menu: "File/Delete", shortcut: Some("Delete"), needs: Needs::Deletable },
+    EngineMenu {
+        id: "file.delete_permanent",
+        menu: "File/Delete permanently",
+        shortcut: Some("Shift+Delete"),
+        needs: Needs::Deletable,
+    },
     EngineMenu {
         id: "platform.reveal",
         menu: "Edit/Reveal in file manager",

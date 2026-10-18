@@ -337,6 +337,8 @@ struct Actions {
     menu: Option<(NodeId, crate::context_menu::MenuAction)>,
     toggle: Option<NodeId>,
     sort: Option<TreeColumn>,
+    /// Why the delete entries of the context menu are off (network root, running scan), if they are.
+    delete_block: Option<String>,
 }
 
 fn header(ui: &mut egui::Ui, widths: Widths, state: &UiState, tokens: &Tokens, actions: &mut Actions) {
@@ -407,7 +409,11 @@ fn draw_row(
         actions.select = Some(row.node);
     }
     resp.context_menu(|ui| {
-        if let Some(action) = crate::context_menu::menu_ui(ui) {
+        let block = actions
+            .delete_block
+            .as_deref()
+            .or_else(|| (row.node == tree.root()).then_some(crate::delete_dialog::ROOT_REASON));
+        if let Some(action) = crate::context_menu::menu_ui(ui, block) {
             actions.menu = Some((row.node, action));
         }
     });
@@ -525,7 +531,8 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
 
     let row_h = tokens.font_body + ROW_PAD * 2.0;
     let widths = Widths::new(ui.available_width());
-    let mut actions = Actions::default();
+    let mut actions =
+        Actions { delete_block: crate::delete_dialog::block_reason(session).map(str::to_owned), ..Actions::default() };
 
     if session.tree().len() <= 1 {
         ui.weak(empty_tree_message(&state.scan));
