@@ -475,7 +475,10 @@ impl DirustatApp {
                 for (name, items) in &groups {
                     ui.menu_button(name, |ui| {
                         for item in items {
-                            let mut button = egui::Button::new(&item.label).selected(item.checked);
+                            // A bullet marks a checked item (the filled-button style reads as a stray bar).
+                            let label =
+                                if item.checked { format!("\u{2022} {}", item.label) } else { item.label.clone() };
+                            let mut button = egui::Button::new(label);
                             if let Some(sc) = item.shortcut {
                                 button = button.shortcut_text(sc);
                             }

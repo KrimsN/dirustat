@@ -481,6 +481,16 @@ fn draw_row(
     );
 }
 
+/// Hint shown above a tree that has only the root: after a finished scan the folder is empty,
+/// otherwise nothing was scanned yet.
+fn empty_tree_message(scan: &crate::state::ScanStatus) -> &'static str {
+    if matches!(scan, crate::state::ScanStatus::Done { .. }) {
+        "The scanned folder is empty."
+    } else {
+        "No data. Enter a folder path and press Scan."
+    }
+}
+
 /// Draws the panel.
 pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, tokens: &Tokens) {
     let revision = session.revision();
@@ -506,7 +516,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
     let mut actions = Actions::default();
 
     if session.tree().len() <= 1 {
-        ui.weak("No data. Enter a folder path and press Scan.");
+        ui.weak(empty_tree_message(&state.scan));
     }
     header(ui, widths, state, tokens, &mut actions);
 
@@ -569,6 +579,13 @@ mod tests {
         let narrow = Widths::new(190.0);
         assert!(narrow.bar == 0.0 && narrow.files == 0.0 && narrow.date == 0.0 && narrow.name >= NAME_MIN_W);
         assert!(Widths::new(f32::NAN).name >= NAME_MIN_W);
+    }
+
+    #[test]
+    fn empty_tree_message_depends_on_the_scan_state() {
+        use crate::state::ScanStatus;
+        assert!(empty_tree_message(&ScanStatus::Done { errors: 0 }).contains("empty"));
+        assert!(empty_tree_message(&ScanStatus::Idle).starts_with("No data"));
     }
 
     fn names(tree: &Tree, flat: &Flat) -> Vec<String> {
