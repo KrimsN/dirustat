@@ -11,7 +11,7 @@ enforce = false
 [scan_mft_1m_files_ntfs]
 # Measured 2026-10-15 (Windows 11, release, elevated, 1,000,029-node NTFS fixture on a dynamic VHDX on NVMe,
 # MFT 977 MiB): 0.31 s, 0.74 s, 3.26 s (3 runs). CPU part (parse+merge+build) is ~0.25 s; the rest is raw reads.
-# Run 3 exceeded the budget with ~2.7 s unexplained inside collect (G-038). Same fixture on a VHDX placed on a
+# Run 3 exceeded the budget with ~2.7 s unexplained inside collect (G-052). Same fixture on a VHDX placed on a
 # Storage Space (HDD-backed): 10-65 s, i.e. bound by that disk (22-55 MB/s), not by the code.
 # enforce stays false until the outlier is explained.
 budget_seconds = 3.0

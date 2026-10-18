@@ -2,12 +2,19 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-18 · QA fixes · Claude
+- Landed (20 commits, grouped by crate): treemap QA-2 (tiles expanded largest-first, cap cuts the smallest), QA-1 (undrawable children merged into a remainder tile), QA-102 (layout bounds quantized, cached tiles rescaled on resize). scan QA-3 (Windows hardlinks deduplicated via the safe `dirustat_ntfs::file_identity` wrapper), QA-5 (allocated-size policy documented and pinned). control QA-4 (UNC guard for every spelling and every path-taking command), QA-6 (pre-auth slots and rate budget separate), QA-7 (`ui.screenshot` targets restricted for remote callers), QA-8 (`session.tree` rejects limit 0), QA-9 (protocol docs fixed, float request ids rejected), QA-112 (scan root normalized, `tree.path` joined with one separator). ui QA-103, QA-104, QA-105, QA-106, QA-107, QA-108, QA-109, QA-113 (too-small hint), QA-115 (partial).
+- Numbers: portable scan of the 100k fixture 0.04 s -> about 1.1 s because every non-empty file is now opened for its hardlink identity (G-040). `cargo xtask ci` green.
+- Closed gaps: G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048. The duplicate G-038 (MFT outlier) is now G-052.
+- Still open: G-040 (identity cost), G-042 (layout still on the UI thread at a quantization step crossing), G-045 (allocated-size parity), G-053 (treemap tooltip joins with `/`), G-054 (`select.node` cleared when a scan finishes), G-055 (QA-115 skipped items), G-049, G-050, G-051.
+- NOT verified visually: maximized `100k-seed1` and `1m-seed1` screenshot re-test of the treemap, scan dimming of stale views, the "too small" hint.
+
 ## 2026-10-15 · M3.5 measurement · human run + Claude
 - Landed: parallel prefetching MFT reader (<= 4 readers, 8 MiB requests, unbuffered second handle), rayon record parsing, per-phase timings in `MftStats`/`mft_bench`, synthetic CPU bench `mft_synth_bench` (1M records in memory: 0.53-0.65 s total, was 1.1-1.4 s).
 - Numbers (release, elevated, 1,000,029-node fixture, MFT 977 MiB, dynamic VHDX on NVMe): MFT backend 0.31 s / 0.74 s / 3.26 s over 3 runs; parse 44 ms, merge 30 ms, build ~157 ms. Portable walk on the same volume: 5.76 s / 0.84 s / 2.31 s. Same fixture on a VHDX that lives on a Storage Space (HDD-backed, thin): MFT 65 s / 10 s / 54 s, read 25-29 MiB/s per thread, CPU phases unchanged (~0.25 s), so that run measured the disk.
 - Verified: MFT and portable trees agree (1,000,029 vs 1,000,026 nodes); `orphan_links=0`, `cycle_entries=0`, `corrupt=0`, so the 3-node difference is not an orphan effect (the portable walk marks one unreadable folder as an error and does not enter it; MFT sees the system files too). Not yet explained exactly: which nodes differ.
-- Exit criterion (<= 3 s per 1M): met in 2 of 3 runs, missed once (3.26 s, ~2.7 s unexplained inside `collect` while parse was 44 ms and disk wait 325 ms). Budget `enforce` stays false (G-038). Physical floor: ~1 GB of MFT needs >= 350 MB/s sustained, so an HDD cannot meet 3 s.
-- Still open: G-038 (outlier), extension-record merging, ADS sizes, `$MFT::$BITMAP` to skip unused records, a node-diff check MFT vs portable.
+- Exit criterion (<= 3 s per 1M): met in 2 of 3 runs, missed once (3.26 s, ~2.7 s unexplained inside `collect` while parse was 44 ms and disk wait 325 ms). Budget `enforce` stays false (G-052). Physical floor: ~1 GB of MFT needs >= 350 MB/s sustained, so an HDD cannot meet 3 s.
+- Still open: G-052 (outlier), extension-record merging, ADS sizes, `$MFT::$BITMAP` to skip unused records, a node-diff check MFT vs portable.
 
 ## 2026-10-13 · M3.5 (partial) · human run + Claude
 - Verified on a real volume (elevated shell, debug build): `cargo test -p dirustat-ntfs -- --ignored` passes (`reads_the_ntfs_boot_sector`: the boot sector of `C:` carries the `NTFS    ` signature). `cargo test -p dirustat-scan -- --ignored`: `real_volume_scan_uses_the_mft` passes, i.e. a scan of `C:\` ran on the MFT backend without fallback and produced more than 1000 nodes; it took 26.15 s in a debug build on a real system volume (not a budget measurement).
