@@ -8,7 +8,7 @@ diRUSTat reads other people's disks: huge, damaged, changing under its feet. A c
 
 1. **No panics in non-test code:** `unwrap`, `expect`, `panic!`, `unreachable!`, `todo!`, `unimplemented!` are forbidden by lints (`deny`). An unfinished function returns `Unsupported`.
 2. **No indexing:** `v[i]` and `s[a..b]` are forbidden (`indexing_slicing = deny`). Use `get()`, iterators, `split_at_checked`; slice strings only at char boundaries.
-3. **No `unsafe`** except in `dirustat-ntfs` (ADR 0002): a block needs a `// SAFETY:` proof; parsing is safe code.
+3. **No `unsafe`** except in the two isolated crates `dirustat-ntfs` (ADR 0002) and `dirustat-platform` (ADR 0009, only `win32.rs`): a block needs a `// SAFETY:` proof; parsing is safe code.
 4. **Numbers are hostile:** `checked_add/mul`, `saturating_*`, `try_from`; check division by zero and NaN/inf; cap allocation sizes (name length in an MFT record, attribute count, read buffer size).
 5. **Bound recursion** or replace it with iteration; filesystem cycles (junctions, symlinks, hardlinked directories) must not loop (seen-set by file id, depth limit).
 6. **Filesystem errors are data, not exceptions:** access denied, file vanished, path too long, invalid names are marked on the node/in the report and the walk continues.

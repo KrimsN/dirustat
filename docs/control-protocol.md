@@ -1,6 +1,6 @@
 # Control protocol and MCP
 
-> Status: 2026-10-13 · revision 3 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
+> Status: 2026-10-19 · revision 5 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
 
 Goal: any action a human can take is available to an agent; the app can be launched, scan a test folder, run commands and take a screenshot without a mouse or keyboard.
 
@@ -66,8 +66,13 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 
 ## Destructive file commands (`docs/safety.md`)
 
-- `file.delete_preview {id|path, mode?: "recycle"|"permanent"}` (read-only, no confirm) and the dry run of the destructive commands return the report `{dry_run, mode, path, kind, count, files, dirs, links, size, size_logical, size_allocated, paths (<= 200, target first), truncated}`.
-- `file.delete {id|path, dry_run?, confirm: true}` sends to the recycle bin; `file.delete_permanent {id|path, dry_run?, i_understand_permanent: true, confirm: true}` deletes for good (a UI must show a warning first; links are removed themselves, never followed); `file.move {id|path, destination, dry_run?, confirm: true}` renames without overwriting. The registry demands `confirm: true` even for `dry_run`.
+- **Addressing.** `path` (absolute, exactly one node of the current tree) or `id` **together with the required `revision`** (u64): the `revision` returned next to the id by `tree.children`, `list.largest_files`, `search.find`, `cleanup.preview` or `session.state`. `id` without `revision` is `invalid_params`; a `revision` other than the session's current one is `stale_tree` (for `path` addressing too) and nothing happens, because arena ids change on every prune. Applies to `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`. `cleanup.run` addresses cleanups by string id and needs no node ids.
+- **Partial tree.** Reports (dry run, preview, result) carry `partial_tree: bool`: the scan used exclusions, or the subtree contains read errors, so entries that exist on disk may be missing from the tree. `file.delete_permanent` of a folder with `partial_tree: true` needs `i_understand_partial: true` in addition to `i_understand_permanent` (otherwise `confirmation_required`); `cleanup.run` takes the same flag and reports held-back nodes with status `needs_confirmation`. `session.state` shows `partial_scan` and `rescan_recommended` (a permanent removal failed half-way).
+- **Network scan roots.** When the scan root is a UNC path (`\\host\share`, `\\?\UNC\...`) every destructive command (`file.delete`, `file.delete_permanent`, `file.move`, `cleanup.run` without `dry_run`) is refused with `protected_path`; a UNC move destination is refused too. Administrative shares (`\\host\C$\Windows`) are treated as the local volume by the protected-path table.
+- Listings (`tree.children`, `list.largest_files`) also return `revision` and `budget_exhausted` (the 10 s name-filter budget ran out and the list is partial).
+
+- `file.delete_preview {id+revision|path, mode?: "recycle"|"permanent"}` (read-only, no confirm) and the dry run of the destructive commands return the report `{dry_run, mode, path, kind, count, files, dirs, links, size, size_logical, size_allocated, paths (<= 200, target first), truncated, partial_tree}`.
+- `file.delete {id+revision|path, dry_run?, confirm: true}` sends to the recycle bin; `file.delete_permanent {id+revision|path, dry_run?, i_understand_permanent: true, i_understand_partial?, confirm: true}` deletes for good (a UI must show a warning first; links are removed themselves, never followed); `file.move {id+revision|path, destination, dry_run?, confirm: true}` renames with a no-replace primitive (`MoveFileExW` without `REPLACE_EXISTING`; unsupported where the platform has none). The registry demands `confirm: true` even for `dry_run`.
 - Pre-flight, in order: the target must resolve to a node of the current tree (`invalid_params` otherwise); protected paths are refused with `protected_path` (volume root, the scan root, `Windows` and everything below it, `Program Files`, `Program Files (x86)`, `ProgramData`, `Users`, an entire user profile, 8.3 spellings, env-configured roots, and the real location when a link or junction is on the way); the object on disk must still match the tree (kind, file size, modification time), otherwise `stale_tree` and nothing changes. Links are never recycled (`invalid_params`; use `file.delete_permanent`).
 - On success the result adds `{done: true, tree_updated, revision, ids_invalidated}`: the node's subtree is cut out of the session tree, the revision is bumped, arena ids change and the selection is cleared. `file.move` adds `{destination, rescan_recommended}` (the destination is not added to the tree).
 - `file.journal {limit?, offset?}` lists the session journal newest first: `{total, offset, entries: [{time, op, path, destination, size, mode, ok, error}]}`, at most 10000 entries. Hosts may mirror it to a JSONL file with `Session::set_journal_file`.
@@ -87,4 +92,5 @@ Loopback only, mandatory key, request size limit, rate limit; destructive comman
 ## Revision history
 
 - 2026-10-13 · r3: documented `session.state` fields `progress.backend`, `progress.fallback_reason`, `last_scan{backend,fallback_reason}` (M3.4). Earlier revisions (r1, r2) predate this section.
+- 2026-10-19 · r5: `id` addressing of destructive commands requires `revision`; `partial_tree` and `i_understand_partial`; UNC scan roots refused; `revision`/`budget_exhausted` on listings (M4.6).
 - 2026-10-18 · r4: documented `search.find`, `search.clear`, the filters of `tree.children`/`list.largest_files`, and `scan.start` `exclude` / setting `scan.exclude` (M4.2, G-016).
