@@ -105,9 +105,10 @@ impl Dispatcher {
         };
         let id = match obj.get("id") {
             None | Some(Value::Null) => Value::Null,
-            Some(v @ (Value::Number(_) | Value::String(_))) => v.clone(),
+            Some(v @ Value::String(_)) => v.clone(),
+            Some(v @ Value::Number(n)) if n.is_i64() || n.is_u64() => v.clone(),
             Some(_) => {
-                let err = ControlError::new(error::BAD_REQUEST, "id must be a number or string");
+                let err = ControlError::new(error::BAD_REQUEST, "id must be an integer or string");
                 return (failure(&Value::Null, &err), false);
             }
         };
@@ -381,6 +382,18 @@ mod tests {
     fn code(v: &Value) -> &str {
         assert_eq!(v["ok"], false, "{v}");
         v["error"]["code"].as_str().unwrap()
+    }
+
+    #[test]
+    fn float_request_ids_are_rejected() {
+        let (d, _) = fake();
+        for id in [json!(1.5), json!(1.0e3), json!(true), json!([1])] {
+            let v = send(&d, &json!({"id": id, "method": "engine.commands"}));
+            assert_eq!(code(&v), "bad_request", "{id}");
+        }
+        for id in [json!(7), json!(-7), json!("abc"), Value::Null] {
+            assert_eq!(send(&d, &json!({"id": id, "method": "engine.commands"}))["ok"], true, "{id}");
+        }
     }
 
     #[test]

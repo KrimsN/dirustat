@@ -8,7 +8,7 @@ Goal: any action a human can take is available to an agent; the app can be launc
 
 - Launch: `dirustat --control <port>`. Listens only on `127.0.0.1:<port>`.
 - A window key is generated at start and written to `control-key.local-<port>` (Windows: `%APPDATA%\dirustat\`, Linux: `~/.config/dirustat/`, macOS: `~/Library/Application Support/diRUSTat/`). Every request must carry `key`. The key comes from the OS random generator (`getrandom`); if that fails the server does not start (fail closed). A stale key file is removed and the new one created exclusively (mode 0600 on Unix); it is removed again on shutdown.
-- Format: one JSON line per request, one per response.
+- Format: one JSON line per request, one per response. The request `id` is an integer or a string (a float such as `1.5` is `bad_request`); it is echoed back.
 
 ```json
 {"id":1,"key":"...","method":"engine.execute","params":{"command":"scan.start","params":{"path":"C:\\fixtures\\small"}}}
@@ -27,7 +27,7 @@ Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `
 | `engine.commands` | none | list of commands: id, label, menu, shortcut, params_doc, destructive |
 | `engine.execute` | `command`, `params` | command result; destructive ones require `confirm: true` |
 | `session.state` | `path?` | session state as JSON (top-level tree, selection, progress, revision) |
-| `session.tree` | `node?`, `depth?`, `limit?` | subtree with sizes (paginated, never the whole tree) |
+| `session.tree` | `node?`, `depth?`, `limit?` (1..), `offset?`, `mode?` | subtree with sizes (paginated, never the whole tree); `limit` 0 is `invalid_params` |
 | `ui.state` | none | serialized UI state (serde) |
 | `ui.set_state` | `patch` | change UI state (panels, sorting, zoom) |
 | `ui.screenshot` | `path`, `region?`, `overwrite?` | save a window PNG. An existing file is an error unless `overwrite: true`, and even then only an existing PNG (checked by its signature) is replaced, never another kind of file; UNC paths and system locations (Windows, Program Files, ProgramData, `/etc`, `/usr`, ...) are refused; missing parent directories are never created; the file is written to a temp file and renamed; captures above 64 megapixels are refused; a request with no capture within 60 s fails with a timeout |
@@ -52,12 +52,12 @@ Rules:
 ```sh
 dirustat-cli commands
 dirustat-cli scan <folder> --json out.json
-dirustat-cli run --scan <folder> --cmd 'export.csv={"path":"out.csv"}'
+dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 ```
 
 ## Command conventions
 
-- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`, `file.delete`, `export.csv`, `search.find`).
+- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; planned, not implemented yet: `file.delete`, `export.csv`, `search.find`).
 - Groups: `scan`, `view`, `select`, `tree`, `treemap`, `ext`, `file`, `cleanup`, `search`, `filter`, `export`, `snapshot`, `settings`, `ui` (shell only).
 - Parameters are a JSON object; every field is documented in `params_doc`; unknown fields are an `invalid_params` error.
 
