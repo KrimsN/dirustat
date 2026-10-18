@@ -420,13 +420,18 @@ fn draw_row(
         arrow(&painter, arrow_c, 3.5, if row.expanded { Arrow::Down } else { Arrow::Right }, muted);
     }
     let name_color = if node.data().error { Tokens::color(tokens.error) } else { text };
-    painter.with_clip_rect(name_cell).text(
-        egui::pos2(arrow_c.x + INDENT * 0.5 + 2.0, rect.center().y),
+    let name_pos = egui::pos2(arrow_c.x + INDENT * 0.5 + 2.0, rect.center().y);
+    let name_rect = painter.with_clip_rect(name_cell).text(
+        name_pos,
         egui::Align2::LEFT_CENTER,
         node.name(),
         font.clone(),
         name_color,
     );
+    if name_rect.right() > name_cell.right() {
+        // The name does not fit the column: the tooltip shows it in full.
+        resp.clone().on_hover_text(node.name());
+    }
 
     // Size.
     let total = node.total_size(mode);
