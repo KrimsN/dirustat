@@ -3,16 +3,22 @@
 //! frame ([`UiEndpoint::pump`]); the egui context is woken so an idle window still answers.
 
 use dirustat_control::{ControlError, ScreenshotRequest, UiBridge};
-use dirustat_ui::{DirustatApp, Region, SaveOptions, ScreenshotStatus};
+use dirustat_ui::{DirustatApp, Region, SaveOptions, ScreenshotStatus, UiState};
 use eframe::egui;
 use serde_json::{Value, json};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-/// How long a control thread waits for `ui.state`, `ui.set_state` and `app.quit`.
+/// How long a control thread waits for the UI thread to pick a request up. Frames normally run
+/// every few milliseconds; no pickup within this time means the window is not rendering (for
+/// example it is minimized), so the call fails fast with an actionable error.
+pub const ACK_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a control thread waits for the answer of a request the UI has picked up
+/// (`ui.set_state`, `app.quit`, and the margin after a screenshot).
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a screenshot may stay in flight before it is answered with a timeout error.
+/// How long a screenshot may stay in flight after the UI accepted it before it is answered with a
+/// timeout error. The control call can take this plus [`REPLY_TIMEOUT`] at most (40 s).
 pub const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 /// Requests handled per frame, so a flood cannot starve drawing.
 const MAX_PER_FRAME: usize = 32;
@@ -20,6 +26,8 @@ const MAX_PER_FRAME: usize = 32;
 const POLL_REPAINT: Duration = Duration::from_millis(30);
 
 type Reply = Result<Value, ControlError>;
+/// Latest serialized UI state, published by the UI thread whenever it changes.
+type Snapshot = Arc<Mutex<Option<Value>>>;
 type Wake = Arc<Mutex<Option<egui::Context>>>;
 
 #[derive(Debug)]
@@ -30,10 +38,17 @@ enum Request {
     Quit,
 }
 
+/// What the UI thread sends back: an interim pickup notice for slow requests, then the answer.
+#[derive(Debug)]
+enum Msg {
+    Accepted,
+    Done(Reply),
+}
+
 #[derive(Debug)]
 struct Envelope {
     request: Request,
-    reply: Sender<Reply>,
+    reply: Sender<Msg>,
 }
 
 /// Control-thread side.
@@ -41,6 +56,8 @@ struct Envelope {
 pub struct ChannelBridge {
     tx: Mutex<Sender<Envelope>>,
     wake: Wake,
+    snapshot: Snapshot,
+    ack_timeout: Duration,
     reply_timeout: Duration,
     screenshot_timeout: Duration,
 }
@@ -50,6 +67,8 @@ pub struct ChannelBridge {
 pub struct UiEndpoint {
     rx: Receiver<Envelope>,
     wake: Wake,
+    snapshot: Snapshot,
+    published: Option<UiState>,
     pending: Vec<PendingShot>,
     screenshot_timeout: Duration,
 }
@@ -58,7 +77,7 @@ pub struct UiEndpoint {
 struct PendingShot {
     ticket: u64,
     deadline: Instant,
-    reply: Sender<Reply>,
+    reply: Sender<Msg>,
 }
 
 /// Creates a connected bridge and endpoint with the default timeouts.
@@ -70,49 +89,104 @@ pub fn channel() -> (ChannelBridge, UiEndpoint) {
 pub fn channel_with_timeouts(reply_timeout: Duration, screenshot_timeout: Duration) -> (ChannelBridge, UiEndpoint) {
     let (tx, rx) = mpsc::channel();
     let wake: Wake = Arc::new(Mutex::new(None));
-    let bridge = ChannelBridge { tx: Mutex::new(tx), wake: Arc::clone(&wake), reply_timeout, screenshot_timeout };
-    let endpoint = UiEndpoint { rx, wake, pending: Vec::new(), screenshot_timeout };
+    let snapshot: Snapshot = Arc::new(Mutex::new(None));
+    let bridge = ChannelBridge {
+        tx: Mutex::new(tx),
+        wake: Arc::clone(&wake),
+        snapshot: Arc::clone(&snapshot),
+        ack_timeout: ACK_TIMEOUT.min(reply_timeout),
+        reply_timeout,
+        screenshot_timeout,
+    };
+    let endpoint = UiEndpoint { rx, wake, snapshot, published: None, pending: Vec::new(), screenshot_timeout };
     (bridge, endpoint)
 }
 
+/// Why a request got no answer in time.
+enum Wait {
+    /// The UI thread never picked the request up: the window is not rendering.
+    NotPickedUp,
+    Failed(ControlError),
+}
+
 impl ChannelBridge {
-    fn call(&self, request: Request, timeout: Duration) -> Reply {
+    /// Sends `request` and waits: up to `ack_timeout` for pickup, then up to `done_timeout` for the
+    /// answer when the UI announced a slow request.
+    fn call(&self, request: Request, done_timeout: Duration) -> Result<Reply, Wait> {
         let (reply_tx, reply_rx) = mpsc::channel();
         {
             let tx = self.tx.lock().unwrap_or_else(PoisonError::into_inner);
             tx.send(Envelope { request, reply: reply_tx })
-                .map_err(|_| ControlError::internal("the window is closed"))?;
+                .map_err(|_| Wait::Failed(ControlError::internal("the window is closed")))?;
         }
         if let Some(ctx) = self.wake.lock().unwrap_or_else(PoisonError::into_inner).as_ref() {
             ctx.request_repaint();
         }
-        match reply_rx.recv_timeout(timeout) {
+        let closed = || Wait::Failed(ControlError::internal("the window closed before answering"));
+        match reply_rx.recv_timeout(self.ack_timeout) {
+            Ok(Msg::Done(reply)) => Ok(reply),
+            Ok(Msg::Accepted) => match reply_rx.recv_timeout(done_timeout) {
+                Ok(Msg::Done(reply)) => Ok(reply),
+                Ok(Msg::Accepted) | Err(RecvTimeoutError::Timeout) => Err(Wait::Failed(ControlError::internal(
+                    format!("timeout: the UI did not finish within {}s", done_timeout.as_secs()),
+                ))),
+                Err(RecvTimeoutError::Disconnected) => Err(closed()),
+            },
+            Err(RecvTimeoutError::Timeout) => Err(Wait::NotPickedUp),
+            Err(RecvTimeoutError::Disconnected) => Err(closed()),
+        }
+    }
+
+    fn not_rendering(&self) -> ControlError {
+        ControlError::internal(format!(
+            "timeout: the window did not respond within {}s; it is probably minimized or hidden, restore it and retry",
+            self.ack_timeout.as_secs()
+        ))
+    }
+
+    /// Like [`Self::call`] with a plain error for an unpicked request.
+    fn call_or_error(&self, request: Request, done_timeout: Duration) -> Reply {
+        match self.call(request, done_timeout) {
             Ok(reply) => reply,
-            Err(RecvTimeoutError::Timeout) => {
-                Err(ControlError::internal(format!("timeout: the UI did not answer within {}s", timeout.as_secs())))
-            }
-            Err(RecvTimeoutError::Disconnected) => Err(ControlError::internal("the window closed before answering")),
+            Err(Wait::NotPickedUp) => Err(self.not_rendering()),
+            Err(Wait::Failed(e)) => Err(e),
         }
     }
 }
 
 impl UiBridge for ChannelBridge {
+    /// Served from the UI frame; when the window does not render (minimized) the last published
+    /// state is returned instead, marked with `"stale": true`.
     fn ui_state(&self) -> Reply {
-        self.call(Request::State, self.reply_timeout)
+        match self.call(Request::State, self.reply_timeout) {
+            Ok(reply) => reply,
+            Err(Wait::NotPickedUp) => {
+                let last = self.snapshot.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                match last {
+                    Some(Value::Object(mut map)) => {
+                        map.insert("stale".to_owned(), Value::Bool(true));
+                        Ok(Value::Object(map))
+                    }
+                    _ => Err(self.not_rendering()),
+                }
+            }
+            Err(Wait::Failed(e)) => Err(e),
+        }
     }
 
     fn ui_set_state(&self, patch: &Value) -> Reply {
-        self.call(Request::SetState(patch.clone()), self.reply_timeout)
+        self.call_or_error(Request::SetState(patch.clone()), self.reply_timeout)
     }
 
     fn ui_screenshot(&self, request: &ScreenshotRequest) -> Reply {
-        // The UI answers after the capture (its own deadline is `screenshot_timeout`); allow a margin.
+        // After pickup the UI answers once the capture is done (its own deadline is
+        // `screenshot_timeout`); allow a margin.
         let wait = self.screenshot_timeout.saturating_add(self.reply_timeout);
-        self.call(Request::Screenshot(request.clone()), wait)
+        self.call_or_error(Request::Screenshot(request.clone()), wait)
     }
 
     fn app_quit(&self) -> Reply {
-        self.call(Request::Quit, self.reply_timeout)
+        self.call_or_error(Request::Quit, self.reply_timeout)
     }
 }
 
@@ -140,12 +214,22 @@ impl UiEndpoint {
             self.handle(request, reply, app, ctx);
         }
         self.poll_screenshots(app);
+        self.publish(app);
         if !self.pending.is_empty() {
             ctx.request_repaint_after(POLL_REPAINT);
         }
     }
 
-    fn handle(&mut self, request: Request, reply: Sender<Reply>, app: &mut DirustatApp, ctx: &egui::Context) {
+    /// Publishes the serialized UI state for requests that arrive while no frame runs.
+    fn publish(&mut self, app: &DirustatApp) {
+        if self.published.as_ref() == Some(app.state()) {
+            return;
+        }
+        self.published = Some(app.state().clone());
+        *self.snapshot.lock().unwrap_or_else(PoisonError::into_inner) = Some(app.ui_state_json());
+    }
+
+    fn handle(&mut self, request: Request, reply: Sender<Msg>, app: &mut DirustatApp, ctx: &egui::Context) {
         let answer = match request {
             Request::State => Ok(app.ui_state_json()),
             Request::SetState(patch) => {
@@ -161,6 +245,7 @@ impl UiEndpoint {
                 match app.request_screenshot_with(&path, shot.region.map(region_f32), options) {
                     Ok(ticket) => {
                         let deadline = Instant::now() + self.screenshot_timeout;
+                        let _ = reply.send(Msg::Accepted);
                         self.pending.push(PendingShot { ticket, deadline, reply });
                         ctx.request_repaint();
                         return;
@@ -169,7 +254,7 @@ impl UiEndpoint {
                 }
             }
         };
-        let _ = reply.send(answer);
+        let _ = reply.send(Msg::Done(answer));
     }
 
     fn poll_screenshots(&mut self, app: &DirustatApp) {
@@ -184,7 +269,7 @@ impl UiEndpoint {
                 Some(ScreenshotStatus::Pending) => Err(ControlError::internal("timeout: screenshot was not captured")),
                 None => Err(ControlError::internal("screenshot request expired")),
             };
-            let _ = p.reply.send(answer);
+            let _ = p.reply.send(Msg::Done(answer));
             false
         });
     }
@@ -238,6 +323,26 @@ mod tests {
         drop(endpoint);
         assert_eq!(bridge.ui_state().unwrap_err().code(), "internal");
         assert_eq!(bridge.app_quit().unwrap_err().code(), "internal");
+    }
+
+    #[test]
+    fn minimized_window_gets_a_stale_state_and_a_fast_actionable_screenshot_error() {
+        let (bridge, mut endpoint) = channel_with_timeouts(Duration::from_millis(100), Duration::from_secs(30));
+        let mut app = DirustatApp::new();
+        // Before any frame there is no snapshot: plain timeout error.
+        assert!(bridge.ui_state().unwrap_err().message().contains("minimized"));
+        let ctx = egui::Context::default();
+        frame(&mut app, &mut endpoint, &ctx);
+        // No more frames (minimized): the last published state answers, marked stale.
+        let state = bridge.ui_state().unwrap();
+        assert_eq!(state["stale"], json!(true));
+        assert_eq!(state["panels"]["tree"], json!(true));
+        let dir = tempfile::tempdir().unwrap();
+        let request = ScreenshotRequest { path: dir.path().join("x.png"), region: None, overwrite: false };
+        let started = Instant::now();
+        let err = bridge.ui_screenshot(&request).unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(err.message().contains("restore it"), "{err}");
     }
 
     #[test]
