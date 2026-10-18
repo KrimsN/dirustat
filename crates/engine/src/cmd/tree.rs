@@ -1,6 +1,7 @@
 //! `tree.*` commands: paged children listing and path reconstruction. Everything is iterative and
 //! bounded; node ids are arena indices as reported by `session.state` and `select.node`.
 
+use super::search::listing_filter;
 use super::select::node_by_index;
 use super::{CommandSpec, always, parse_params};
 use crate::{CommandError, Session};
@@ -21,7 +22,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params_doc: "{\"node\"?: u64 (default: root), \"limit\"?: 1..=10000 (default 100), \"offset\"?: u64 \
                 (default 0), \"sort\"?: \"size\" (default, descending) | \"name\"} children of a node by the \
-                session size mode. Returns {node, total, offset, items: [{id, name, kind, size, files, error}]}.",
+                session size mode. Optional filters: \"extensions\"?: [string] (directories then never match), \"min_size\"?: u64, \"max_size\"?: u64, \"name\"?: wildcard pattern (case-insensitive); total counts the filtered children. Returns {node, total, offset, items: [{id, name, kind, size, files, error}]}.",
             destructive: false,
             enabled: always,
             run: run_children,
@@ -46,6 +47,10 @@ struct ChildrenParams {
     limit: Option<u64>,
     offset: Option<u64>,
     sort: Option<SortName>,
+    extensions: Option<Vec<String>>,
+    min_size: Option<u64>,
+    max_size: Option<u64>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize, Clone, Copy)]
@@ -74,7 +79,7 @@ fn resolve(session: &Session, index: u64) -> Result<NodeId, CommandError> {
     node_by_index(session.tree(), index).ok_or_else(|| CommandError::InvalidParams(format!("no node with id {index}")))
 }
 
-fn kind_name(kind: NodeKind) -> &'static str {
+pub(super) fn kind_name(kind: NodeKind) -> &'static str {
     match kind {
         NodeKind::Dir => "dir",
         NodeKind::File => "file",
@@ -92,8 +97,13 @@ fn run_children(session: &mut Session, params: &Value) -> Result<Value, CommandE
     };
     let mode = session.map_size_mode();
     let tree = session.tree();
-    let mut rows: Vec<(NodeId, u64, &str)> =
-        tree.children(parent).filter_map(|id| tree.get(id).map(|n| (id, n.total_size(mode), n.name()))).collect();
+    let filter = listing_filter(p.extensions.as_deref(), p.min_size, p.max_size, p.name.as_deref())?;
+    let mut rows: Vec<(NodeId, u64, &str)> = tree
+        .children(parent)
+        .filter_map(|id| tree.get(id).map(|n| (id, n.total_size(mode), n.name(), n.kind())))
+        .filter(|&(_, size, name, kind)| filter.matches(name, kind, size, &mut || None))
+        .map(|(id, size, name, _)| (id, size, name))
+        .collect();
     match p.sort.unwrap_or(SortName::Size) {
         SortName::Size => rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(b.2)).then_with(|| a.0.cmp(&b.0))),
         SortName::Name => rows.sort_by(|a, b| a.2.cmp(b.2).then_with(|| a.0.cmp(&b.0))),
@@ -188,6 +198,24 @@ mod tests {
                 (s.tree().get(node)?.name() == name).then_some(id)
             })
             .unwrap()
+    }
+
+    #[test]
+    fn children_accept_filters() {
+        let (_d, mut s) = scanned();
+        s.execute("view.size_mode", &json!({"mode": "logical"})).unwrap();
+        let names = |v: &Value| -> Vec<String> {
+            v["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap().to_owned()).collect()
+        };
+        let out = s.execute("tree.children", &json!({"extensions": ["bin", "MD"]})).unwrap();
+        assert_eq!(names(&out), ["big.bin", "small.md"]);
+        assert_eq!(out["total"], 2);
+        let out = s.execute("tree.children", &json!({"min_size": 100})).unwrap();
+        assert_eq!(names(&out), ["big.bin"]);
+        let out = s.execute("tree.children", &json!({"name": "S*"})).unwrap();
+        assert_eq!(names(&out), ["sub", "small.md"]);
+        let bad = json!({"min_size": 5, "max_size": 1});
+        assert_eq!(s.execute("tree.children", &bad).unwrap_err().code(), "invalid_params");
     }
 
     #[test]

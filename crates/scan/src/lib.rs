@@ -46,8 +46,10 @@ use std::time::UNIX_EPOCH;
 
 use dirustat_model::{NodeData, NodeId, NodeKind, Tree};
 
+mod glob;
 mod mft;
 
+pub use glob::{Excludes, Glob, GlobError, MAX_EXCLUDES, MAX_PATTERN_CHARS};
 #[doc(hidden)]
 pub use mft::bench_scan_mft_mem;
 pub use mft::{MftError, MftLimits, MftScan, MftStats, MftTimings};
@@ -74,11 +76,15 @@ pub struct ScanOptions {
     /// Try the NTFS MFT fast path first when the root is a whole volume; fall back to the portable
     /// walk on any failure.
     pub prefer_fast_path: bool,
+    /// Exclusion patterns (see [`Excludes`]): matching files and directories are skipped entirely, a
+    /// skipped directory is not descended and nothing in it is counted. The MFT fast path cannot
+    /// filter, so a non-empty list makes the scan use the portable walk.
+    pub exclude: Vec<String>,
 }
 
 impl Default for ScanOptions {
     fn default() -> Self {
-        Self { threads: None, cluster_size: 4096, prefer_fast_path: true }
+        Self { threads: None, cluster_size: 4096, prefer_fast_path: true, exclude: Vec::new() }
     }
 }
 
@@ -329,7 +335,11 @@ fn spawn_scan(root: &Path, opts: ScanOptions, check_in_thread: bool) -> Result<S
             if check_in_thread {
                 check_root(&root)?;
             }
-            let volume = if opts.prefer_fast_path { volume_root_of(&root.to_string_lossy()) } else { None };
+            let volume = if opts.prefer_fast_path && opts.exclude.is_empty() {
+                volume_root_of(&root.to_string_lossy())
+            } else {
+                None
+            };
             Ok(match volume {
                 Some(volume) => {
                     let label = root.to_string_lossy().into_owned();
@@ -382,14 +392,15 @@ fn run(
 ) -> ScanOutcome {
     let mut tree = Tree::new(&root.to_string_lossy());
     let cluster = opts.cluster_size.max(1);
+    let excludes = Arc::new(Excludes::new(&opts.exclude));
     let (tx, rx) = mpsc::channel::<Listing>();
     let mut pending = 0usize;
     let spawn = |dir: NodeId, path: PathBuf, pending: &mut usize| {
         *pending += 1;
-        let (tx, cancel) = (tx.clone(), Arc::clone(cancel));
+        let (tx, cancel, excludes) = (tx.clone(), Arc::clone(cancel), Arc::clone(&excludes));
         pool.spawn(move || {
             let fallback = path.clone();
-            let listing = panic::catch_unwind(AssertUnwindSafe(|| read_dir(dir, path, cluster, &cancel)))
+            let listing = panic::catch_unwind(AssertUnwindSafe(|| read_dir(dir, path, cluster, &cancel, &excludes)))
                 .unwrap_or_else(|_| Listing { dir, path: fallback, entries: Vec::new(), error: true });
             // The receiver outlives every task; a failed send means the builder is gone.
             let _ = tx.send(listing);
@@ -455,7 +466,7 @@ fn apply(
     subdirs
 }
 
-fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool) -> Listing {
+fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool, excludes: &Excludes) -> Listing {
     let mut listing = Listing { dir, path, entries: Vec::new(), error: false };
     if cancel.load(Ordering::Relaxed) {
         return listing;
@@ -473,6 +484,9 @@ fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool) -> Li
             continue;
         };
         let name = item.file_name().to_string_lossy().into_owned();
+        if !excludes.is_empty() && excludes.is_excluded(&name, &item.path()) {
+            continue;
+        }
         listing.entries.push(match item.metadata() {
             Ok(meta) => entry_from(name, &item.path(), &meta, cluster),
             Err(_) => Entry {
@@ -735,6 +749,47 @@ mod tests {
         tree.aggregate();
         assert_eq!(tree.get(tree.root()).unwrap().error_count(), 1);
         assert_eq!(counters.errors.load(Ordering::Relaxed), 1);
+    }
+
+    fn scan_excluding(path: &Path, patterns: &[&str]) -> ScanOutcome {
+        let exclude = patterns.iter().map(|p| (*p).to_owned()).collect();
+        start(path, ScanOptions { exclude, ..ScanOptions::default() }).unwrap().join().unwrap()
+    }
+
+    #[test]
+    fn excluded_directories_are_not_descended_or_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("keep/node_modules/deep")).unwrap();
+        fs::create_dir_all(tmp.path().join("node_modules/pkg")).unwrap();
+        write(&tmp.path().join("node_modules/pkg/big.bin"), 9000);
+        write(&tmp.path().join("keep/node_modules/deep/x.bin"), 100);
+        write(&tmp.path().join("keep/a.txt"), 10);
+        write(&tmp.path().join("scratch.tmp"), 5);
+        let out = scan_excluding(tmp.path(), &["node_modules", "*.tmp"]);
+        assert!(!out.cancelled);
+        let root = out.tree.get(out.tree.root()).unwrap();
+        // Only `keep` and `keep/a.txt` remain besides the root.
+        assert_eq!(out.tree.len(), 3);
+        assert_eq!(root.total_size(SizeMode::Logical), 10);
+        assert_eq!((root.dir_count(), root.file_count(), root.error_count()), (2, 1, 0));
+        let all = scan(tmp.path());
+        assert_eq!(all.tree.len(), 10);
+    }
+
+    #[test]
+    fn path_patterns_and_hostile_lists_do_not_fail_the_scan() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("a/skipme")).unwrap();
+        fs::create_dir_all(tmp.path().join("b/skipme")).unwrap();
+        write(&tmp.path().join("a/skipme/f"), 1);
+        write(&tmp.path().join("b/skipme/f"), 1);
+        let out = scan_excluding(
+            tmp.path(),
+            &["*/a/skipme", "", "x\0y", &"*".repeat(5000), &format!("{}z", "*".repeat(900))],
+        );
+        // `a/skipme` is gone, `b/skipme` stays.
+        assert_eq!(out.tree.len(), 1 + 2 + 2);
+        assert_eq!(out.tree.get(out.tree.root()).unwrap().error_count(), 0);
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 use super::{CommandSpec, no_params, parse_params};
 use crate::{CommandError, PendingScan, Session};
-use dirustat_scan::{ScanOptions, start_deferred};
+use dirustat_scan::{Glob, MAX_EXCLUDES, ScanOptions, start_deferred};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -14,7 +14,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Scan folder",
             menu: "File/Scan folder",
             shortcut: Some("Ctrl+O"),
-            params_doc: "{\"path\": string} folder to scan. Returns at once; read progress with session.state and finish with session.poll.",
+            params_doc: "{\"path\": string, \"exclude\"?: [string]} folder to scan. exclude: at most 256 wildcard patterns (* and ?); a pattern without a separator is matched against names, one with / or \\ against the whole path; matches are skipped, not descended and not counted; replaces the scan.exclude setting for this scan ([] = none); a non-empty list disables the MFT fast path. Returns at once; read progress with session.state and finish with session.poll.",
             destructive: false,
             enabled: |s| !s.is_scanning(),
             run: run_start,
@@ -36,12 +36,28 @@ pub(super) fn specs() -> Vec<CommandSpec> {
 #[serde(deny_unknown_fields)]
 struct StartParams {
     path: String,
+    exclude: Option<Vec<String>>,
 }
 
 fn run_start(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
     let p: StartParams = parse_params(params)?;
-    session.start_scan(&p.path)?;
+    let exclude = p.exclude.map(checked_excludes).transpose()?;
+    session.start_scan_excluding(&p.path, exclude)?;
     Ok(json!({ "scanning": true, "path": p.path }))
+}
+
+/// Validates an exclusion list from a command parameter: strict, so a typo is reported instead of
+/// silently scanning more than the caller wanted.
+pub(super) fn checked_excludes(list: Vec<String>) -> Result<Vec<String>, CommandError> {
+    if list.len() > MAX_EXCLUDES {
+        return Err(CommandError::InvalidParams(format!("exclude holds at most {MAX_EXCLUDES} patterns")));
+    }
+    for pattern in &list {
+        if let Err(e) = Glob::new(pattern, false) {
+            return Err(CommandError::InvalidParams(format!("bad exclude pattern: {e}")));
+        }
+    }
+    Ok(list)
 }
 
 fn run_cancel(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
@@ -59,6 +75,12 @@ impl Session {
     /// Starts a background scan of `path`; the tree is replaced when [`Session::poll_scan`]
     /// observes completion.
     pub fn start_scan(&mut self, path: &str) -> Result<(), CommandError> {
+        self.start_scan_excluding(path, None)
+    }
+
+    /// Like [`Session::start_scan`] with an explicit exclusion list; `None` uses the persistent
+    /// `exclude` setting.
+    pub fn start_scan_excluding(&mut self, path: &str, exclude: Option<Vec<String>>) -> Result<(), CommandError> {
         if self.scan.is_some() {
             return Err(CommandError::NotEnabled("scan.start".to_owned()));
         }
@@ -69,7 +91,8 @@ impl Session {
         // a long time and this runs under the session lock. A bad root surfaces when the scan is
         // polled (`session.poll` / `session.state`) as a scan error, and the session stays usable.
         // A whole-volume root tries the MFT fast path first and falls back to the portable walk on its own.
-        let opts = ScanOptions { prefer_fast_path: self.settings.prefer_fast_path, ..ScanOptions::default() };
+        let exclude = exclude.unwrap_or_else(|| self.settings.exclude.clone());
+        let opts = ScanOptions { prefer_fast_path: self.settings.prefer_fast_path, exclude, ..ScanOptions::default() };
         // The root name becomes the prefix of every reported path, so it is normalized first.
         let root = crate::normalize_scan_root(path);
         let handle = start_deferred(Path::new(&root), opts)
@@ -174,6 +197,57 @@ mod tests {
             assert_eq!(last["backend"], "portable");
             assert!(last["fallback_reason"].is_null());
         }
+    }
+
+    fn exclusion_fixture() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("cache/inner")).unwrap();
+        std::fs::write(dir.path().join("cache/inner/x.bin"), vec![0u8; 1000]).unwrap();
+        std::fs::write(dir.path().join("keep.txt"), b"hello").unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+        (dir, path)
+    }
+
+    #[test]
+    fn scan_start_exclude_param_skips_matches() {
+        let (_d, path) = exclusion_fixture();
+        let mut s = Session::new();
+        s.execute("scan.start", &json!({"path": path, "exclude": ["cache"]})).unwrap();
+        assert!(poll_until_done(&mut s));
+        assert_eq!(s.state_json()["nodes"], 2);
+        s.execute("scan.start", &json!({"path": path, "exclude": []})).unwrap();
+        assert!(poll_until_done(&mut s));
+        assert_eq!(s.state_json()["nodes"], 5);
+    }
+
+    #[test]
+    fn exclude_setting_applies_and_the_param_overrides_it() {
+        let (_d, path) = exclusion_fixture();
+        let mut s = Session::new();
+        s.execute("settings.set", &json!({"key": "scan.exclude", "value": ["*.txt"]})).unwrap();
+        assert_eq!(s.settings().exclude, ["*.txt"]);
+        s.execute("scan.start", &json!({"path": path})).unwrap();
+        assert!(poll_until_done(&mut s));
+        assert_eq!(s.state_json()["nodes"], 4);
+        s.execute("scan.start", &json!({"path": path, "exclude": []})).unwrap();
+        assert!(poll_until_done(&mut s));
+        assert_eq!(s.state_json()["nodes"], 5);
+    }
+
+    #[test]
+    fn bad_exclude_lists_are_invalid_params() {
+        let (_d, path) = exclusion_fixture();
+        let mut s = Session::new();
+        let many: Vec<String> = (0..=dirustat_scan::MAX_EXCLUDES).map(|i| format!("p{i}")).collect();
+        let long = "a".repeat(dirustat_scan::MAX_PATTERN_CHARS + 1);
+        for bad in [json!([""]), json!(["a\u{0}"]), json!([long]), json!(many), json!("cache"), json!([1])] {
+            let err = s.execute("scan.start", &json!({"path": path, "exclude": bad})).unwrap_err();
+            assert_eq!(err.code(), "invalid_params", "{bad}");
+            let err = s.execute("settings.set", &json!({"key": "scan.exclude", "value": bad})).unwrap_err();
+            assert_eq!(err.code(), "invalid_params", "{bad}");
+            assert!(!s.is_scanning());
+        }
+        assert!(s.settings().exclude.is_empty());
     }
 
     #[test]

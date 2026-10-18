@@ -14,7 +14,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Get settings",
             menu: "",
             shortcut: None,
-            params_doc: "none. Returns {settings}: version, size_mode, ext_sort, tree_sort, treemap, recent_paths.",
+            params_doc: "none. Returns {settings}: version, size_mode, ext_sort, tree_sort, treemap, recent_paths, prefer_fast_path, exclude.",
             destructive: false,
             enabled: always,
             run: run_get,
@@ -28,6 +28,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
                 ext_sort / tree_sort ({\"key\": \"size\"|\"name\"|\"count\", \"descending\": bool}), \
                 treemap.cushion / treemap.grid / treemap.show_free_space (bool), \
                 scan.prefer_fast_path (bool, default true), \
+                scan.exclude (array of at most 256 non-empty wildcard patterns, default []), \
                 recent_paths (array of at most 20 non-empty strings). Unknown key is invalid_params.",
             destructive: false,
             enabled: always,
@@ -81,6 +82,7 @@ fn apply_key(s: &mut Settings, key: &str, value: &Value) -> Result<(), CommandEr
         "treemap.grid" => s.treemap.grid = typed(key, value)?,
         "treemap.show_free_space" => s.treemap.show_free_space = typed(key, value)?,
         "scan.prefer_fast_path" => s.prefer_fast_path = typed(key, value)?,
+        "scan.exclude" => s.exclude = super::scan::checked_excludes(typed(key, value)?)?,
         "recent_paths" => s.recent_paths = paths(value)?,
         _ => return Err(invalid(format!("unknown settings key: {}", key.chars().take(100).collect::<String>()))),
     }

@@ -9,6 +9,7 @@ mod list;
 mod platform;
 mod privileges;
 mod scan;
+mod search;
 mod select;
 mod session;
 mod settings;
@@ -74,6 +75,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(tree::specs());
         all.extend(list::specs());
         all.extend(privileges::specs());
+        all.extend(search::specs());
         all.extend(platform::specs());
         #[cfg(test)]
         all.extend(testing::specs());

@@ -36,7 +36,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-052 | P1 | M3 | MFT scan outlier: 3.26 s run with ~2.7 s unexplained inside `collect` (parse 44 ms, disk wait 325 ms); suspects: reader backpressure or thread stalls, `NO_BUFFERING` handle fallback, antivirus, rayon contention | repeat 10+ runs with finer phase timers (consumer blocked-on-send, per-chunk latency histogram); budget met in all runs |
 | G-014 | P1 | M4 | Platform services: recycle bin, file manager, properties, free space. Landed 2026-10-18 (crate `dirustat-platform`, commands `platform.reveal|properties|free_space`, `list.drives` real); remaining: UI hooks (context menu, status bar free space), recycle command (G-015) |
 | G-015 | P0 | M4 | Destructive commands per `docs/safety.md` (confirm, dry-run, protected paths, journal) | tests for refusal without confirm and for protected paths |
-| G-016 | P2 | M4 | Search (substring/wildcard/regex), filters, scan exclusions | tests + hostile patterns |
+| G-016 | P2 | M4 | Search (substring/wildcard/regex), filters, scan exclusions. Landed 2026-10-18 in the engine (`search.find`, `search.clear`, filters on `tree.children`/`list.largest_files`, `scan.start` param `exclude`, setting `scan.exclude`); remaining: UI (search box, highlight of `Session::search_hits`, exclusion editor), date filter, exclusions for the MFT fast path | tests + hostile patterns (done); UI hooks |
 | G-017 | P2 | M4 | User-defined cleanups | commands + tests |
 | G-018 | P2 | M5 | Cushion shading and treemap parameters | screenshots, frame budget |
 | G-019 | P2 | M5 | CSV/JSON/PNG export, scan snapshots (save/load), comparison | round-trip tests |

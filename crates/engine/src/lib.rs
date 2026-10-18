@@ -12,6 +12,7 @@ mod guard;
 mod launch;
 mod map;
 mod paths;
+pub mod search;
 mod settings;
 
 pub use cmd::{CommandInfo, CommandSpec, FastPathStatus, fast_path_status, volume_root_of};
@@ -100,6 +101,8 @@ pub struct Session {
     /// Persistent user settings (`settings.*` commands).
     settings: Settings,
     drives: drives::DrivesProvider,
+    /// Last `search.find` result, valid for one tree revision.
+    search: search::SearchState,
     /// OS services (drives, recycle bin, file manager); the real one by default.
     platform: Arc<dyn PlatformServices>,
 }
@@ -128,6 +131,7 @@ impl Session {
             last_scan: None,
             settings: Settings::default(),
             drives: drives::DrivesProvider(None),
+            search: search::SearchState::default(),
             platform: dirustat_platform::default_platform(),
         }
     }
@@ -152,7 +156,7 @@ impl Session {
         ext::extension_stats(&self.tree, mode)
     }
 
-    /// Layout of the root's children inside `bounds` вЂ” a minimal model + treemap example.
+    /// Layout of the root's children inside `bounds` — a minimal model + treemap example.
     pub fn layout_root(&self, bounds: Rect) -> Vec<Rect> {
         let mut weights: Vec<u64> = self
             .tree

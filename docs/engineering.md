@@ -50,8 +50,9 @@ Every dependency is justified in the table below (add a row in the same change).
 | `windows-sys` 0.61 | ntfs (cfg windows) | raw bindings for `CreateFileW`, `DeviceIoControl`, `ReadFile` in the isolated unsafe module (ADR 0002); already in the tree via eframe; alternative: hand-written `extern` blocks (more unsafe surface) | MIT OR Apache-2.0 | accepted 2026-10-13 |
 | `windows-sys` 0.61 (more features) | platform (cfg windows) | drives, free space, shell properties in the isolated `win32.rs` (ADR 0009); same crate as above | MIT OR Apache-2.0 | accepted 2026-10-18 |
 | `trash` 5 | platform (cfg windows) | move to the recycle bin without own `unsafe`; alternative: `SHFileOperationW` by hand (more unsafe) | MIT | accepted 2026-10-18 |
+| `regex` 1 (std, perf, unicode) | engine | `search.find` regex mode; linear-time automata engine (no catastrophic backtracking), enforced `size_limit`, pattern length cap; alternative: hand-written matcher (error-prone) | MIT OR Apache-2.0 | accepted 2026-10-18 |
 
-Planned (decided in an ADR when introduced): `regex` (search), `image` (PNG export).
+Planned (decided in an ADR when introduced): `image` (PNG export).
 
 ## Versioning and releases
 

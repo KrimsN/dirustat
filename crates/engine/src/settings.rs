@@ -103,6 +103,9 @@ pub struct Settings {
     pub recent_paths: Vec<String>,
     /// Use the NTFS MFT fast path when it is available (otherwise always walk the filesystem).
     pub prefer_fast_path: bool,
+    /// Scan exclusion patterns (names or paths, `*` and `?`); see `dirustat_scan::Excludes`. Added
+    /// without a schema bump: files without the key load as empty.
+    pub exclude: Vec<String>,
 }
 
 impl Default for Settings {
@@ -115,8 +118,24 @@ impl Default for Settings {
             treemap: TreemapSettings::default(),
             recent_paths: Vec::new(),
             prefer_fast_path: true,
+            exclude: Vec::new(),
         }
     }
+}
+
+/// Keeps the valid, distinct exclusion patterns, at most `MAX_EXCLUDES` of them.
+fn sanitized_excludes(list: Vec<String>) -> Vec<String> {
+    let mut kept: Vec<String> = Vec::new();
+    for p in list {
+        let valid = !p.is_empty() && !p.contains('\0') && p.chars().count() <= dirustat_scan::MAX_PATTERN_CHARS;
+        if valid && !kept.contains(&p) {
+            kept.push(p);
+        }
+        if kept.len() >= dirustat_scan::MAX_EXCLUDES {
+            break;
+        }
+    }
+    kept
 }
 
 /// Result of [`Settings::load_from`]: always usable settings plus an optional warning.
@@ -154,6 +173,7 @@ impl Settings {
             kept.push(p);
         }
         self.recent_paths = kept;
+        self.exclude = sanitized_excludes(std::mem::take(&mut self.exclude));
     }
 
     /// Moves `path` to the front of the recent list (ignored when empty or too long).
@@ -437,6 +457,25 @@ mod tests {
         hostile.recent_paths.push(String::new());
         hostile.sanitize();
         assert_eq!(hostile.recent_paths.len(), MAX_RECENT_PATHS);
+    }
+
+    #[test]
+    fn exclude_defaults_empty_round_trips_and_is_sanitized() {
+        let old: Settings = serde_json::from_str(r#"{"version":1,"size_mode":"logical"}"#).unwrap();
+        assert!(old.exclude.is_empty());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let s = Settings { exclude: vec!["node_modules".into(), "*.tmp".into()], ..Settings::default() };
+        s.save_to(&path).unwrap();
+        assert_eq!(Settings::load_from(&path).settings.exclude, ["node_modules", "*.tmp"]);
+        let mut hostile = Settings {
+            exclude: vec!["a".into(), String::new(), "a".into(), "x\0".into(), "y".repeat(5000)],
+            ..Settings::default()
+        };
+        hostile.exclude.extend((0..1000).map(|i| format!("p{i}")));
+        hostile.sanitize();
+        assert_eq!(hostile.exclude.len(), dirustat_scan::MAX_EXCLUDES);
+        assert_eq!(hostile.exclude.first().map(String::as_str), Some("a"));
     }
 
     #[test]

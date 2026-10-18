@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-13 · revision 5 · WinDirStat done 7/34 (partial 11), WizTree done 0/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-18 · revision 6 · WinDirStat done 7/34 (partial 13), WizTree done 0/12 (partial 6). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -13,7 +13,7 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 3 | Cancel a scan | `scan.cancel` | M1 | done 2026-10-13 (registered command + Stop button; cancellation tests) |
 | 4 | Rescan / refresh | `scan.rescan` | M1 | partial (Scan on the same path; no dedicated rescan command) |
 | 5 | Progress and estimate display | status bar | M1 | partial (status bar progress; no estimate) |
-| 6 | Scan exclusions (masks, paths) | `scan.exclude` | M4 | missing |
+| 6 | Scan exclusions (masks, paths) | `scan.start` param `exclude`, setting `scan.exclude` | M4 | partial 2026-10-18 (name and path wildcards, tested on tempfile trees; no UI, MFT fast path is bypassed when a list is set) |
 | 7 | Expand/collapse the tree | `tree.expand` / `tree.collapse` | M1 | partial (mouse only, virtualized; no keyboard navigation; not commands yet) |
 | 8 | Sort by column | `tree.sort` | M1 | partial (sortable headers; not a command yet) |
 | 9 | Columns: name, share (bar), %, size, items, files, folders, modified, attributes | `tree.columns` | M1 | partial (name, size, % of parent, files, mtime; no share bar, items, folders, attributes) |
@@ -39,7 +39,7 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 29 | User-defined cleanups | `cleanup.run` | M4 | missing |
 | 30 | File/folder properties | `file.properties` | M4 | missing |
 | 31 | Search by name | `search.find` | M4 | missing |
-| 32 | Filter by name/size/date | `filter.set` | M4 | missing |
+| 32 | Filter by name/size/date | `search.find`, filters on `tree.children` / `list.largest_files` | M4 | partial 2026-10-18 (name, size and extension filters; no date filter, no UI) |
 | 33 | Persist settings | `settings.get` / `settings.set` / `settings.reset` | M2 | done 2026-10-13 (serde settings, atomic save, corrupt-file handling; tests) |
 | 34 | Launch from the command line with a path | `dirustat --scan <path>` | M2 | partial (`LaunchArgs`: `--scan`, `--demo`, `--size-mode`, `--screenshot`, `--control`; no bare positional path) |
 
@@ -51,7 +51,7 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 2 | Ask for administrator rights and fall back to a normal scan | `scan.elevate` | M3 | partial 2026-10-13 (transparent fallback MFT → portable with a reason in `session.state`; awareness only: `scan.fast_path_status`, status-bar hint, `ui.relaunch_elevated_help`; real elevation left for M6 packaging) |
 | 3 | Flat list of all files | `view.file_list` | M2 | missing |
 | 4 | Top largest files | `list.largest_files` | M2 | partial (engine command with tests, callable from CLI/control/MCP; no UI panel; O(n) per call, see G-025) |
-| 5 | Search with wildcard/regex | `search.find` (mode) | M4 | missing |
+| 5 | Search with wildcard/regex | `search.find` (mode) | M4 | partial 2026-10-18 (substring/wildcard/regex engine search with held highlight set; no UI box) |
 | 6 | CSV export | `export.csv` | M5 | missing |
 | 7 | Treemap image export | `export.image` | M5 | missing |
 | 8 | Save/load scan snapshots | `snapshot.save` / `snapshot.load` | M5 | missing |
@@ -79,3 +79,4 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 - 2026-10-13 · r3: after M1.7-M1.11, rows A1, A3, A4, A5, A7-A10, A13, A17, A18, A20-A23, B11 moved to `partial`; none is `done` because there is no screenshot verification (`ui.screenshot` arrives in M2.5), the actions are not commands yet (M2.2), and cushion shading, keyboard navigation and some columns are missing.
 - 2026-10-13 · r4: after M2, screenshot `docs/img/m1-main.png` exists and actions are registered commands. A1, A3, A10, A11, A13, A21, A33 moved to `done`; A34, B4, B10 moved to `partial`. Other partial rows stay partial (no commands for tree/ext actions, no keyboard navigation, no cushion, no UI for largest files/drives).
 - 2026-10-13 · r5: after M3.2-M3.6, B1 moved to `partial` (parser, tree builder and fallback tested on synthetic images only). Recounted from rows: WizTree partial rows are B1, B2, B4, B10, B11 = 5 (the previous header said 3, which missed B2 and B4/B10 bookkeeping). WinDirStat unchanged (7 done, 11 partial).
+- 2026-10-18 · r6: G-016 landed in the engine. A6, A32 and B5 moved to `missing` -> `partial` (commands and tests only, no UI). Recounted: WinDirStat partial 13, WizTree partial 6.

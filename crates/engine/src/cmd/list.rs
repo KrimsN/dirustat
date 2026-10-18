@@ -1,7 +1,9 @@
 //! `list.*` commands: flat top-N file list and mounted drives.
 
+use super::search::listing_filter;
 use super::tree::{MAX_PAGE, page_limit};
 use super::{CommandSpec, always, no_params, parse_params};
+use crate::search::{Filter, KindFilter};
 use crate::{CommandError, DriveInfo, MAX_DRIVES, Session, extension_of};
 use dirustat_model::{NodeId, NodeKind};
 use serde::Deserialize;
@@ -17,7 +19,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             menu: "View/Largest files",
             shortcut: None,
             params_doc: "{\"limit\"?: 1..=10000 (default 100), \"offset\"?: 0..=10000 (default 0), \"min_size\"?: \
-                u64 (default 0)} the largest files by the session size mode, descending. Returns {total_returned, \
+                u64 (default 0), \"max_size\"?: u64, \"extensions\"?: [string], \"name\"?: wildcard pattern (case-insensitive)} the largest files by the session size mode, descending. Returns {total_returned, \
                 offset, items: [{id, path, size, ext}]}.",
             destructive: false,
             enabled: always,
@@ -43,6 +45,9 @@ struct LargestParams {
     limit: Option<u64>,
     offset: Option<u64>,
     min_size: Option<u64>,
+    max_size: Option<u64>,
+    extensions: Option<Vec<String>>,
+    name: Option<String>,
 }
 
 /// Heap entry: ordered so that a larger size wins and, on ties, the smaller arena index wins.
@@ -58,8 +63,8 @@ fn run_largest(session: &mut Session, params: &Value) -> Result<Value, CommandEr
             .filter(|n| *n <= MAX_PAGE)
             .ok_or_else(|| CommandError::InvalidParams(format!("offset must be 0..={MAX_PAGE}")))?,
     };
-    let min_size = p.min_size.unwrap_or(0);
-    let found = session.largest_files(limit.saturating_add(offset), min_size);
+    let filter = listing_filter(p.extensions.as_deref(), Some(p.min_size.unwrap_or(0)), p.max_size, p.name.as_deref())?;
+    let found = session.largest_files_filtered(limit.saturating_add(offset), &filter);
     let mode = session.map_size_mode();
     let items: Vec<Value> = found
         .into_iter()
@@ -91,6 +96,12 @@ impl Session {
     /// (`Session::revision`, size mode, count, min_size) would make repeated calls O(count); it is
     /// deferred (not needed yet at the current call rates).
     pub fn largest_files(&self, count: usize, min_size: u64) -> Vec<NodeId> {
+        self.largest_files_filtered(count, &Filter::sized(KindFilter::Any, Some(min_size), None))
+    }
+
+    /// Like [`Session::largest_files`] but only files passing `filter` (its name matcher is applied to
+    /// names, never paths).
+    pub fn largest_files_filtered(&self, count: usize, filter: &Filter) -> Vec<NodeId> {
         let count = count.min(MAX_PAGE.saturating_mul(2));
         if count == 0 {
             return Vec::new();
@@ -106,7 +117,7 @@ impl Session {
                 continue;
             }
             let size = node.own_size(mode);
-            if size < min_size {
+            if !filter.matches(node.name(), node.kind(), size, &mut || None) {
                 continue;
             }
             let entry: Entry = (size, Reverse(id));
@@ -176,6 +187,24 @@ mod tests {
         assert_eq!(sizes(&all).len(), 10);
         let none = s.execute("list.largest_files", &json!({"min_size": u64::MAX})).unwrap();
         assert!(sizes(&none).is_empty());
+    }
+
+    #[test]
+    fn largest_files_accepts_filters() {
+        let (_d, mut s) = session_with_files(10);
+        let out = s.execute("list.largest_files", &json!({"max_size": 500, "min_size": 200})).unwrap();
+        assert_eq!(sizes(&out), [500, 400, 300, 200]);
+        let out = s.execute("list.largest_files", &json!({"extensions": ["DAT"], "limit": 1})).unwrap();
+        assert_eq!(sizes(&out), [1000]);
+        let out = s.execute("list.largest_files", &json!({"extensions": ["rs"]})).unwrap();
+        assert!(sizes(&out).is_empty());
+        let out = s.execute("list.largest_files", &json!({"name": "F?.dat"})).unwrap();
+        assert_eq!(sizes(&out).len(), 10);
+        let out = s.execute("list.largest_files", &json!({"name": "f1*"})).unwrap();
+        assert_eq!(sizes(&out), [200]);
+        for bad in [json!({"min_size": 9, "max_size": 1}), json!({"extensions": [""]}), json!({"name": "a\u{0}"})] {
+            assert_eq!(s.execute("list.largest_files", &bad).unwrap_err().code(), "invalid_params", "{bad}");
+        }
     }
 
     #[test]

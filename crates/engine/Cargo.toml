@@ -18,6 +18,7 @@ dirustat-ntfs.workspace = true
 dirustat-platform.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
 tracing.workspace = true
 
 [dev-dependencies]
