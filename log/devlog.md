@@ -98,3 +98,8 @@ New entries go on top. Format: `docs/progress-docs.md`.
 - Numbers: tests: model 3, treemap 2, scan/engine/control/ui/ntfs 1-2 each, xtask 1; parity 0/34 and 0/12.
 - Verified: `cargo xtask ci` is green (wasm-core skipped locally: target not installed).
 - Still open: M1.1 (model), M1 dependencies, a human decision about reserving the name `dirustat`.
+
+## 2026-10-18 · M4.1 · Claude (platform services, G-014)
+- Landed: crate `dirustat-platform` (L1): trait `PlatformServices`, `PlatformError`, `SystemPlatform` (Windows: `trash` for the recycle bin, `explorer.exe /select` without a shell, drives/free space/properties in the isolated `win32.rs`; other OSes: `Unsupported`), `FakePlatform` for tests. `Session::set_platform`/`platform()`, `list.drives` now real by default, commands `platform.reveal`, `platform.properties`, `platform.free_space`, `CommandError::Platform`. ADR 0009.
+- Numbers: platform tests 13, engine tests +5.
+- Still open: UI hooks (context menu, status bar free space, drive picker), `file.recycle`/delete command (G-015, must use `move_to_recycle_bin` and `docs/safety.md`), `open_default` is `Unsupported` on the real platform, network drives are not listed, the properties window is not covered by an automated test (would open a real window).

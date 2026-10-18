@@ -28,6 +28,7 @@ pub use settings::{
 pub use ext::{ExtStat, NO_EXT_COLOR, ext_color, extension_of};
 
 use dirustat_model::{SizeMode, Tree};
+use dirustat_platform::PlatformServices;
 use dirustat_scan::{ScanBackend, ScanHandle, empty_tree};
 use dirustat_treemap::{Rect, squarify};
 use std::fmt;
@@ -50,6 +51,8 @@ pub enum CommandError {
     },
     /// The scan failed (root unreadable, thread pool, scan thread panic).
     Scan(String),
+    /// A platform service failed at the OS level (permission, launch failure, ...).
+    Platform(String),
 }
 
 impl CommandError {
@@ -61,7 +64,7 @@ impl CommandError {
             Self::Unsupported(_) => "unsupported",
             Self::ConfirmationRequired(_) => "confirmation_required",
             Self::NotEnabled(_) => "not_enabled",
-            Self::Panicked { .. } | Self::Scan(_) => "internal",
+            Self::Panicked { .. } | Self::Scan(_) | Self::Platform(_) => "internal",
         }
     }
 }
@@ -76,6 +79,7 @@ impl fmt::Display for CommandError {
             Self::NotEnabled(id) => write!(f, "command not enabled: {id}"),
             Self::Panicked { what, message } => write!(f, "internal error in {what}: {message}"),
             Self::Scan(why) => write!(f, "scan failed: {why}"),
+            Self::Platform(why) => write!(f, "platform service failed: {why}"),
         }
     }
 }
@@ -96,6 +100,8 @@ pub struct Session {
     /// Persistent user settings (`settings.*` commands).
     settings: Settings,
     drives: drives::DrivesProvider,
+    /// OS services (drives, recycle bin, file manager); the real one by default.
+    platform: Arc<dyn PlatformServices>,
 }
 
 /// Which backend produced the current tree and why the MFT fast path was abandoned, if it was.
@@ -122,11 +128,22 @@ impl Session {
             last_scan: None,
             settings: Settings::default(),
             drives: drives::DrivesProvider(None),
+            platform: dirustat_platform::default_platform(),
         }
     }
 
     pub fn tree(&self) -> &Tree {
         &self.tree
+    }
+
+    /// Replaces the platform services (tests pass `dirustat_platform::FakePlatform`).
+    pub fn set_platform(&mut self, platform: Arc<dyn PlatformServices>) {
+        self.platform = platform;
+    }
+
+    /// The platform services of this session (shared handle).
+    pub fn platform(&self) -> Arc<dyn PlatformServices> {
+        Arc::clone(&self.platform)
     }
 
     /// Per-extension statistics of the current tree, recomputed on every call (one iterative pass).
@@ -135,7 +152,7 @@ impl Session {
         ext::extension_stats(&self.tree, mode)
     }
 
-    /// Layout of the root's children inside `bounds` — a minimal model + treemap example.
+    /// Layout of the root's children inside `bounds` вЂ” a minimal model + treemap example.
     pub fn layout_root(&self, bounds: Rect) -> Vec<Rect> {
         let mut weights: Vec<u64> = self
             .tree

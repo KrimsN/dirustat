@@ -48,8 +48,10 @@ Every dependency is justified in the table below (add a row in the same change).
 | `png` 0.18 | ui | encode window screenshots (`ui.screenshot`); already in the tree via eframe, pure Rust; alternative: `image` (heavier) | MIT OR Apache-2.0 | accepted 2026-10-13 |
 | `getrandom` 0.4 | control | OS CSPRNG for the control window key; fails closed; already in the tree via tempfile; alternative: `/dev/urandom` (not portable) | MIT OR Apache-2.0 | accepted 2026-10-13 |
 | `windows-sys` 0.61 | ntfs (cfg windows) | raw bindings for `CreateFileW`, `DeviceIoControl`, `ReadFile` in the isolated unsafe module (ADR 0002); already in the tree via eframe; alternative: hand-written `extern` blocks (more unsafe surface) | MIT OR Apache-2.0 | accepted 2026-10-13 |
+| `windows-sys` 0.61 (more features) | platform (cfg windows) | drives, free space, shell properties in the isolated `win32.rs` (ADR 0009); same crate as above | MIT OR Apache-2.0 | accepted 2026-10-18 |
+| `trash` 5 | platform (cfg windows) | move to the recycle bin without own `unsafe`; alternative: `SHFileOperationW` by hand (more unsafe) | MIT | accepted 2026-10-18 |
 
-Planned (decided in an ADR when introduced): `windows` (platform services only; `windows-sys` is already accepted for `dirustat-ntfs`), `trash` (recycle bin), `regex` (search), `image` (PNG export).
+Planned (decided in an ADR when introduced): `regex` (search), `image` (PNG export).
 
 ## Versioning and releases
 

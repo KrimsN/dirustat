@@ -10,6 +10,7 @@ pub const LAYERS: &[(&str, u8)] = &[
     ("dirustat-treemap", 0),
     ("dirustat-ntfs", 0),
     ("dirustat-scan", 1),
+    ("dirustat-platform", 1),
     ("dirustat-engine", 2),
     ("dirustat-control", 3),
     ("dirustat-ui", 4),

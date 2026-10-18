@@ -32,3 +32,9 @@ impl fmt::Debug for DrivesProvider {
         f.write_str(if self.0.is_some() { "DrivesProvider(set)" } else { "DrivesProvider(none)" })
     }
 }
+
+impl From<dirustat_platform::DriveInfo> for DriveInfo {
+    fn from(d: dirustat_platform::DriveInfo) -> Self {
+        Self { path: d.path, label: d.label, total: d.total, free: d.free }
+    }
+}

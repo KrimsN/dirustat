@@ -56,7 +56,7 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 7 | Treemap image export | `export.image` | M5 | missing |
 | 8 | Save/load scan snapshots | `snapshot.save` / `snapshot.load` | M5 | missing |
 | 9 | Compare snapshots | `snapshot.compare` | M5 | missing |
-| 10 | Drive picker with fill bars | `list.drives` | M2 | partial (engine drives provider, default empty; real Win32 enumeration and free space need platform services, M4/G-014; no picker UI) |
+| 10 | Drive picker with fill bars | `list.drives` | M2 | partial (`list.drives` returns real Win32 drives by default via `dirustat-platform`, G-014; no picker UI) |
 | 11 | Scan non-NTFS / network paths | `scan.start` (backend `portable`) | M1 | partial (portable scan shown in the window, `scan.start` is a command; no network-path check) |
 | 12 | Portable mode (no install, settings alongside) | `settings.portable` | M6 | missing |
 

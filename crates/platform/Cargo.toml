@@ -1,0 +1,47 @@
+[package]
+name = "dirustat-platform"
+description = "L1: platform services (drives, recycle bin, file manager) behind a trait; isolated unsafe for Win32"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+trash.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Registry",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# Second isolated unsafe zone after dirustat-ntfs (docs/adr/0009-platform-crate.md): only `win32.rs`.
+# Every unsafe block must carry a `// SAFETY:` comment. Other lints match the workspace.
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unused_must_use = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+unimplemented = "deny"
+todo = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+dbg_macro = "deny"
+undocumented_unsafe_blocks = "deny"
+print_stdout = "warn"
+print_stderr = "warn"

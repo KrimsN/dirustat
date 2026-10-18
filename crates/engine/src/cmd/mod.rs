@@ -6,6 +6,7 @@
 //! unknown params fields with `InvalidParams` (use [`parse_params`] / [`no_params`]).
 
 mod list;
+mod platform;
 mod privileges;
 mod scan;
 mod select;
@@ -73,6 +74,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(tree::specs());
         all.extend(list::specs());
         all.extend(privileges::specs());
+        all.extend(platform::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all
@@ -187,6 +189,7 @@ mod tests {
             (CommandError::ConfirmationRequired(String::new()), "confirmation_required"),
             (CommandError::NotEnabled(String::new()), "not_enabled"),
             (CommandError::Scan(String::new()), "internal"),
+            (CommandError::Platform(String::new()), "internal"),
             (CommandError::Panicked { what: String::new(), message: String::new() }, "internal"),
         ];
         for (err, code) in codes {

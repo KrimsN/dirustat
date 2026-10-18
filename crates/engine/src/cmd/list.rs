@@ -28,8 +28,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Drives",
             menu: "",
             shortcut: None,
-            params_doc: "none. Returns {drives: [{path, label, total, free}]} from the shell's provider (empty when \
-                none is set).",
+            params_doc: "none. Returns {drives: [{path, label, total, free}]} from the custom provider if the \
+                shell set one, else from the platform services (empty when they fail or are unsupported).",
             destructive: false,
             enabled: always,
             run: run_drives,
@@ -122,16 +122,20 @@ impl Session {
         best.into_iter().map(|(_, Reverse(id))| id).collect()
     }
 
-    /// Installs the function that lists mounted volumes (`list.drives`). The engine itself uses
-    /// no platform calls; the shell supplies them. The default provider returns nothing.
+    /// Overrides the source of `list.drives` with a custom function. Without one the session's
+    /// platform services ([`Session::set_platform`]) answer.
     pub fn set_drives_provider(&mut self, provider: Box<dyn Fn() -> Vec<DriveInfo> + Send>) {
         self.drives.0 = Some(provider);
     }
 
-    /// Volumes from the provider, bounded to [`MAX_DRIVES`] with `free <= total`.
+    /// Volumes from the custom provider if set, else from the platform services (an error there
+    /// means "no drives"), bounded to [`MAX_DRIVES`] with `free <= total`.
     pub fn drives(&self) -> Vec<DriveInfo> {
-        let Some(provider) = &self.drives.0 else { return Vec::new() };
-        provider().into_iter().take(MAX_DRIVES).map(DriveInfo::sanitized).collect()
+        let raw: Vec<DriveInfo> = match &self.drives.0 {
+            Some(provider) => provider(),
+            None => self.platform.drives().unwrap_or_default().into_iter().map(DriveInfo::from).collect(),
+        };
+        raw.into_iter().take(MAX_DRIVES).map(DriveInfo::sanitized).collect()
     }
 }
 
@@ -213,8 +217,15 @@ mod tests {
     }
 
     #[test]
-    fn drives_default_empty_and_provider_is_sanitized() {
+    fn drives_come_from_platform_and_provider_overrides_and_is_sanitized() {
+        use dirustat_platform::{FakePlatform, PlatformError};
         let mut s = Session::new();
+        let fake = std::sync::Arc::new(FakePlatform::new());
+        s.set_platform(fake.clone());
+        let out = s.execute("list.drives", &json!({})).unwrap();
+        assert_eq!(out["drives"][0]["path"], "Z:\\");
+        assert_eq!(out["drives"][0]["total"], 100);
+        fake.set_failure(Some(PlatformError::Unsupported("drives")));
         assert_eq!(s.execute("list.drives", &json!({})).unwrap(), json!({"drives": []}));
         s.set_drives_provider(Box::new(|| {
             (0..1000)
