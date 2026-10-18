@@ -38,6 +38,10 @@ pub fn session_tree(tree: &Tree, params: &Value) -> Result<Value, ControlError> 
         Some(other) => return Err(ControlError::invalid_params(format!("unknown mode: {other}"))),
     };
     let depth = clamp_u32(p.depth, DEFAULT_DEPTH, MAX_DEPTH);
+    if p.limit == Some(0) {
+        // Same rule as `tree.children`.
+        return Err(ControlError::invalid_params("limit must be at least 1"));
+    }
     let limit = clamp_usize(p.limit, DEFAULT_LIMIT, MAX_LIMIT);
     let offset = usize::try_from(p.offset.unwrap_or(0)).unwrap_or(usize::MAX);
     let id = match p.node {
@@ -181,6 +185,13 @@ mod tests {
         assert_eq!(v["node"]["total_children"], 2);
         assert_eq!(v["truncated"], false);
         assert!(kids[1]["children"].is_null());
+    }
+
+    #[test]
+    fn zero_limit_is_invalid_params_like_tree_children() {
+        let err = session_tree(&sample(), &json!({"limit": 0})).unwrap_err();
+        assert_eq!(err.code(), crate::error::INVALID_PARAMS);
+        assert!(session_tree(&sample(), &json!({"limit": 1})).is_ok());
     }
 
     #[test]
