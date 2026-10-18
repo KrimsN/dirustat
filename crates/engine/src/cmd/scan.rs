@@ -70,9 +70,11 @@ impl Session {
         // polled (`session.poll` / `session.state`) as a scan error, and the session stays usable.
         // A whole-volume root tries the MFT fast path first and falls back to the portable walk on its own.
         let opts = ScanOptions { prefer_fast_path: self.settings.prefer_fast_path, ..ScanOptions::default() };
-        let handle = start_deferred(Path::new(path), opts)
+        // The root name becomes the prefix of every reported path, so it is normalized first.
+        let root = crate::normalize_scan_root(path);
+        let handle = start_deferred(Path::new(&root), opts)
             .map_err(|e| CommandError::InvalidParams(format!("cannot scan {path:?}: {e}")))?;
-        self.scan = Some(PendingScan { handle, root: path.to_owned() });
+        self.scan = Some(PendingScan { handle, root });
         Ok(())
     }
 
@@ -109,6 +111,32 @@ mod tests {
             assert!(Instant::now() < deadline, "scan did not finish");
             std::thread::sleep(Duration::from_millis(5));
         }
+    }
+
+    #[test]
+    fn root_is_normalized_and_paths_use_one_separator() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("f.txt"), b"x").unwrap();
+        let base = dir.path().to_string_lossy().replace('\\', "/");
+        // Forward slashes, a `..` detour and a trailing slash.
+        let messy = format!("{base}/sub/../sub/");
+        let mut s = Session::new();
+        s.execute("scan.start", &json!({"path": messy})).unwrap();
+        assert!(poll_until_done(&mut s));
+        let root = s.state_json()["root"].as_str().unwrap().to_owned();
+        assert!(!root.contains(".."), "{root}");
+        let tree = s.tree();
+        let file = (0..tree.len())
+            .filter_map(|i| tree.node_at(i))
+            .find(|id| tree.get(*id).is_some_and(|n| n.name() == "f.txt"))
+            .unwrap();
+        let path = s.node_path(file).unwrap();
+        if cfg!(windows) {
+            assert!(!path.contains('/'), "{path}");
+        }
+        assert!(!path.contains(".."), "{path}");
+        assert!(std::fs::metadata(&path).is_ok(), "{path}");
     }
 
     #[test]

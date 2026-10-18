@@ -158,7 +158,8 @@ fn join_path<'a>(parts: impl Iterator<Item = &'a str>) -> String {
             out.push_str(part);
         }
     }
-    out
+    // Windows names never contain `/`, so any left over came from the root spelling.
+    if cfg!(windows) { out.replace('/', "\\") } else { out }
 }
 
 #[cfg(test)]
@@ -227,6 +228,9 @@ mod tests {
     #[test]
     fn join_handles_trailing_separators_and_empty_root() {
         assert_eq!(join_path(["", "a"].into_iter()), "a");
+        if cfg!(windows) {
+            assert_eq!(join_path(["E:/a/b", "f"].into_iter()), "E:\\a\\b\\f");
+        }
         assert_eq!(join_path(["C:\\", "a"].into_iter()), "C:\\a");
         assert_eq!(join_path(["/", "a", "b"].into_iter()).replace('\\', "/"), "/a/b");
     }
