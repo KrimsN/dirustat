@@ -800,10 +800,12 @@ mod tests {
         app.state_mut().path_text = "E:/nonexistent_zzz_dirustat".to_owned();
         app.start_scan();
         settle(&mut app);
-        assert_eq!(
-            app.state().scan,
-            ScanStatus::Failed { message: "Folder not found: E:/nonexistent_zzz_dirustat".to_owned() }
-        );
+        // The scan root is normalized (QA-112), so the separator is platform-specific.
+        assert!(matches!(
+            &app.state().scan,
+            ScanStatus::Failed { message }
+                if message.starts_with("Folder not found: ") && message.ends_with("nonexistent_zzz_dirustat")
+        ));
         let Ok(dir) = tempfile::tempdir() else { return };
         let file = dir.path().join("f.txt");
         assert!(std::fs::write(&file, b"x").is_ok());
