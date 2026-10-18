@@ -60,7 +60,7 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 
 ## Command conventions
 
-- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; planned, not implemented yet: `export.csv`).
+- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; `cleanup.list`, `cleanup.save`, `cleanup.remove`, `cleanup.preview`, `cleanup.run`; planned, not implemented yet: `export.csv`).
 - Groups: `scan`, `view`, `select`, `tree`, `treemap`, `ext`, `file`, `cleanup`, `search`, `filter`, `export`, `snapshot`, `settings`, `ui` (shell only).
 - Parameters are a JSON object; every field is documented in `params_doc`; unknown fields are an `invalid_params` error.
 
@@ -71,6 +71,14 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 - Pre-flight, in order: the target must resolve to a node of the current tree (`invalid_params` otherwise); protected paths are refused with `protected_path` (volume root, the scan root, `Windows` and everything below it, `Program Files`, `Program Files (x86)`, `ProgramData`, `Users`, an entire user profile, 8.3 spellings, env-configured roots, and the real location when a link or junction is on the way); the object on disk must still match the tree (kind, file size, modification time), otherwise `stale_tree` and nothing changes. Links are never recycled (`invalid_params`; use `file.delete_permanent`).
 - On success the result adds `{done: true, tree_updated, revision, ids_invalidated}`: the node's subtree is cut out of the session tree, the revision is bumped, arena ids change and the selection is cleared. `file.move` adds `{destination, rescan_recommended}` (the destination is not added to the tree).
 - `file.journal {limit?, offset?}` lists the session journal newest first: `{total, offset, entries: [{time, op, path, destination, size, mode, ok, error}]}`, at most 10000 entries. Hosts may mirror it to a JSONL file with `Session::set_journal_file`.
+
+## Cleanups (`cleanup.*`, `docs/safety.md`)
+
+- Definition: `{id (slug [a-z0-9_-], <= 64), name (1..=128 chars), action: "recycle"|"permanent"|"empty_dir_contents"|"reveal", selector: {names?: [wildcard, <= 64, <= 256 chars, no separators], extensions?: [<= 64], min_size?, max_size?, kind?: "file"|"dir"|"any", only_under?: absolute path in the scan root, older_than_days?: 1..=36500 (needs a known mtime), empty?: bool (folders without files; needs kind "dir")}}`. At least one of names / extensions / min_size / max_size / older_than_days / empty is required. Stored in settings key `cleanups` (at most 64; invalid entries are dropped on load).
+- `cleanup.list {}` -> `{max, cleanups: [{id, name, action, selector, builtin}]}` (3 built-ins first; they cannot be edited or removed and never run by themselves).
+- `cleanup.save {definition}` -> `{saved, replaced, cleanups}`; `cleanup.remove {id}` -> `{removed, cleanups}`. Both only change settings (the shell persists them). Unknown fields, built-in ids, bad limits: `invalid_params`.
+- `cleanup.preview {id}` (read-only) -> `{id, name, action, revision, count, size, truncated, items: [{id, name, kind, path, size, status: "ok"|"protected"|"stale"|"invalid", error?}]}`, largest first, at most 10000. For `empty_dir_contents` the items are the entries inside the selected folders.
+- `cleanup.run {id, dry_run?, i_understand_permanent?, confirm: true}` -> `{id, action, dry_run, count, size, truncated, deleted, deleted_size, failed, not_attempted, stopped, results: [{id, path, ok, status: "ok"|"done"|"protected"|"stale"|"invalid"|"failed", error?}], done, tree_updated, rescan_recommended, revision, ids_invalidated}`. Not enabled without a scanned tree. `reveal` shows only the largest match. Ids are invalid after a run that deleted something.
 
 ## Channel security
 

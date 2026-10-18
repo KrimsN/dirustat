@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-18 · revision 7 · WinDirStat done 7/34 (partial 15), WizTree done 0/12 (partial 6). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-18 · revision 8 · WinDirStat done 7/34 (partial 16), WizTree done 0/12 (partial 6). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -36,7 +36,7 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 26 | Delete to recycle bin | `file.delete` | M4 | partial 2026-10-18 (engine command with dry run, protected paths, stale check, journal; no UI) |
 | 27 | Delete permanently | `file.delete_permanent` | M4 | partial 2026-10-18 (engine command, double confirmation; no UI) |
 | 28 | Copy path | `file.copy_path` | M4 | missing |
-| 29 | User-defined cleanups | `cleanup.run` | M4 | missing |
+| 29 | User-defined cleanups | `cleanup.list` / `cleanup.save` / `cleanup.remove` / `cleanup.preview` / `cleanup.run` | M4 | partial 2026-10-18 (engine commands, 3 built-in examples, per-node safety checks and journal; no UI) |
 | 30 | File/folder properties | `file.properties` | M4 | missing |
 | 31 | Search by name | `search.find` | M4 | missing |
 | 32 | Filter by name/size/date | `search.find`, filters on `tree.children` / `list.largest_files` | M4 | partial 2026-10-18 (name, size and extension filters; no date filter, no UI) |
@@ -81,3 +81,4 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 - 2026-10-13 · r5: after M3.2-M3.6, B1 moved to `partial` (parser, tree builder and fallback tested on synthetic images only). Recounted from rows: WizTree partial rows are B1, B2, B4, B10, B11 = 5 (the previous header said 3, which missed B2 and B4/B10 bookkeeping). WinDirStat unchanged (7 done, 11 partial).
 - 2026-10-18 · r6: G-016 landed in the engine. A6, A32 and B5 moved to `missing` -> `partial` (commands and tests only, no UI). Recounted: WinDirStat partial 13, WizTree partial 6.
 - 2026-10-18 · r7: G-015 landed in the engine. A26 and A27 moved to `partial` (commands and tests only, no UI). WinDirStat partial 15.
+- 2026-10-18 · r8: G-017 landed in the engine. A29 moved to `partial` (commands and tests only, no UI). WinDirStat partial 16.

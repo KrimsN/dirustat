@@ -5,6 +5,7 @@
 //! Rules for `run`: never open a dialog, never panic (the guard is a safety net only), reject
 //! unknown params fields with `InvalidParams` (use [`parse_params`] / [`no_params`]).
 
+mod cleanup;
 mod file;
 mod list;
 mod platform;
@@ -79,6 +80,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(search::specs());
         all.extend(platform::specs());
         all.extend(file::specs());
+        all.extend(cleanup::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all

@@ -6,7 +6,7 @@
 
 | Dimension | Value | Source |
 |---|---|---|
-| WinDirStat feature parity | 7 / 34 done (20.6 %), 11 partial | `docs/target-app-parity.md` |
+| WinDirStat feature parity | 7 / 34 done (20.6 %), 16 partial | `docs/target-app-parity.md` |
 | WizTree distinctive features | 0 / 12 done (0 %), 5 partial | `docs/target-app-parity.md` |
 | Skeleton crates | 7 + 2 apps + xtask | `docs/architecture.md` |
 | Platforms | Windows (primary), Linux/macOS (M6) | `docs/roadmap.md` |

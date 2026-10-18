@@ -13,6 +13,13 @@
 3. **Re-check before acting.** Before deleting, the path is re-validated (exists, same file id as in the tree, did not leave the scan root). A stale tree must never delete the wrong thing.
 4. **Journal.** Every destructive action is written to a session journal (path, size, time, mode) for recovery from the bin and for debugging.
 
+## Cleanups (`cleanup.*`, G-017)
+
+- A cleanup is a saved selector plus an action (`recycle`, `permanent`, `empty_dir_contents`, `reveal`). **Nothing runs automatically**: not at startup, not after a scan, not the 3 built-in examples (`temporary-files`, `empty-folders`, `build-output-folders`). Only an explicit `cleanup.run` with `confirm: true` acts; `cleanup.preview` and `dry_run` change nothing.
+- `cleanup.run` reuses the `file.*` pipeline per node, with no weaker variant: protected-path refusal (lexical and real location), the stale-tree re-check, recycle bin by default through the platform trait, permanent deletion only with `i_understand_permanent: true`, and one journal entry per node (`op: "cleanup.run"`). Refused nodes are reported with `status` and are never touched.
+- Extra guards: the scan root is never selected; a node inside an already selected node is not selected (ancestors only); at most 10000 nodes per run (`truncated`); `only_under` must be an absolute path inside the scan root without `.`/`..`; selectors need at least one real criterion; `empty` folders are re-checked on disk right before acting; a run stops on a missing recycle bin or after 5 consecutive platform failures.
+- The tree is pruned once at the end of a run (one revision bump, ids invalid); if pruning fails `rescan_recommended` is set. Agents test cleanups only on `tempfile` trees with `FakePlatform`.
+
 ## Rules for agents
 
 - **Never** run destructive commands on the user's real directories (`C:\Users\...`, Documents, Desktop, external drives). Test only on directories created by the test in a temp folder (`tempfile`) or by `cargo xtask fixtures`.

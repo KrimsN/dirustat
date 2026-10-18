@@ -5,6 +5,7 @@
 //!
 //! Status: command registry in place (milestone M2); see `cmd`.
 
+pub mod cleanup;
 mod cmd;
 mod drives;
 mod ext;

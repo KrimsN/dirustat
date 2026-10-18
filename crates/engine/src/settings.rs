@@ -106,6 +106,10 @@ pub struct Settings {
     /// Scan exclusion patterns (names or paths, `*` and `?`); see `dirustat_scan::Excludes`. Added
     /// without a schema bump: files without the key load as empty.
     pub exclude: Vec<String>,
+    /// User-defined cleanups (G-017), at most `cleanup::MAX_CLEANUPS`. Added without a schema
+    /// bump: files without the key load as empty, entries that do not parse are dropped.
+    #[serde(deserialize_with = "crate::cleanup::lenient_list")]
+    pub cleanups: Vec<crate::cleanup::CleanupDef>,
 }
 
 impl Default for Settings {
@@ -119,6 +123,7 @@ impl Default for Settings {
             recent_paths: Vec::new(),
             prefer_fast_path: true,
             exclude: Vec::new(),
+            cleanups: Vec::new(),
         }
     }
 }
@@ -174,6 +179,7 @@ impl Settings {
         }
         self.recent_paths = kept;
         self.exclude = sanitized_excludes(std::mem::take(&mut self.exclude));
+        self.cleanups = crate::cleanup::sanitized(std::mem::take(&mut self.cleanups));
     }
 
     /// Moves `path` to the front of the recent list (ignored when empty or too long).

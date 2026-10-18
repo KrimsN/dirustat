@@ -4,13 +4,23 @@
 //! indices change; callers bump the revision.
 
 use dirustat_model::{NodeId, Tree};
+use std::collections::HashSet;
 
 /// `tree` without `remove` and everything below it; `None` for the root or an unknown node.
 pub(crate) fn without_subtree(tree: &Tree, remove: NodeId) -> Option<Tree> {
-    if remove == tree.root() {
-        return None;
+    without_subtrees(tree, &[remove])
+}
+
+/// `tree` without every node in `remove` and everything below them, in one pass; `None` when the
+/// list contains the root or an unknown node.
+pub(crate) fn without_subtrees(tree: &Tree, remove: &[NodeId]) -> Option<Tree> {
+    let removed: HashSet<NodeId> = remove.iter().copied().collect();
+    for &id in &removed {
+        if id == tree.root() {
+            return None;
+        }
+        tree.get(id)?;
     }
-    tree.get(remove)?;
     let root = tree.get(tree.root())?;
     let mut out = Tree::new(root.name());
     if root.data().error {
@@ -20,7 +30,7 @@ pub(crate) fn without_subtree(tree: &Tree, remove: NodeId) -> Option<Tree> {
     let mut stack: Vec<(NodeId, NodeId)> = vec![(tree.root(), out.root())];
     while let Some((old_parent, new_parent)) = stack.pop() {
         for child in tree.children(old_parent) {
-            if child == remove {
+            if removed.contains(&child) {
                 continue;
             }
             let node = tree.get(child)?;

@@ -110,14 +110,14 @@ fn has_tree(session: &Session) -> bool {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode {
+pub(super) enum Mode {
     Recycle,
     Permanent,
     Move,
 }
 
 impl Mode {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Recycle => "recycle",
             Self::Permanent => "permanent",
@@ -218,7 +218,7 @@ fn resolve_node(session: &Session, id: Option<u64>, path: Option<&str>) -> Resul
 }
 
 /// Walks the tree from the root along the normalized `path`; case-insensitive on Windows.
-fn node_for_path(session: &Session, path: &str) -> Result<NodeId, CommandError> {
+pub(super) fn node_for_path(session: &Session, path: &str) -> Result<NodeId, CommandError> {
     let windows = cfg!(windows);
     let tree = session.tree();
     let outside = || CommandError::InvalidParams("path does not resolve to a node of the scanned tree".to_owned());
@@ -283,9 +283,15 @@ fn build_report(session: &Session, node: NodeId, path: &str) -> Report {
     report
 }
 
-/// The shared pre-flight of every destructive command; touches nothing.
-fn plan(session: &Session, id: Option<u64>, path: Option<&str>, mode: Mode) -> Result<Plan, CommandError> {
-    let node = resolve_node(session, id, path)?;
+/// The safety checks every destructive operation passes before anything is touched: protected
+/// paths (lexical and real location), then the stale-tree re-check of the object on disk and the
+/// link rule. Returns the node's path. Reads the disk, never changes it.
+pub(super) fn preflight(
+    session: &Session,
+    node: NodeId,
+    protected: &ProtectedPaths,
+    mode: Mode,
+) -> Result<String, CommandError> {
     let tree = session.tree();
     let target = tree.get(node).ok_or_else(|| CommandError::InvalidParams("unknown node".to_owned()))?;
     let node_path =
@@ -293,9 +299,8 @@ fn plan(session: &Session, id: Option<u64>, path: Option<&str>, mode: Mode) -> R
     let scan_root = session
         .node_path(tree.root())
         .ok_or_else(|| CommandError::InvalidParams("the tree has no root path".to_owned()))?;
-    let protected = ProtectedPaths::from_env();
     protected.check(&node_path, &scan_root).map_err(CommandError::ProtectedPath)?;
-    fsops::verify_location(&node_path, &scan_root, &protected, cfg!(windows))?;
+    fsops::verify_location(&node_path, &scan_root, protected, cfg!(windows))?;
     fsops::verify_matches(Path::new(&node_path), target.kind(), target.data())?;
     if mode == Mode::Recycle && target.kind() == NodeKind::Link {
         return Err(CommandError::InvalidParams(
@@ -304,8 +309,20 @@ fn plan(session: &Session, id: Option<u64>, path: Option<&str>, mode: Mode) -> R
                 .to_owned(),
         ));
     }
+    Ok(node_path)
+}
+
+/// The shared pre-flight of every destructive command; touches nothing.
+fn plan(session: &Session, id: Option<u64>, path: Option<&str>, mode: Mode) -> Result<Plan, CommandError> {
+    let node = resolve_node(session, id, path)?;
+    let tree = session.tree();
+    let kind = tree.get(node).ok_or_else(|| CommandError::InvalidParams("unknown node".to_owned()))?.kind();
+    let scan_root = session
+        .node_path(tree.root())
+        .ok_or_else(|| CommandError::InvalidParams("the tree has no root path".to_owned()))?;
+    let node_path = preflight(session, node, &ProtectedPaths::from_env(), mode)?;
     let report = build_report(session, node, &node_path);
-    Ok(Plan { node, path: node_path, scan_root, kind: target.kind(), report })
+    Ok(Plan { node, path: node_path, scan_root, kind, report })
 }
 
 fn report_json(session: &Session, plan: &Plan, mode: Mode, dry_run: bool) -> Value {
@@ -424,27 +441,8 @@ fn execute(
     if dry_run {
         return Ok(out);
     }
-    let target = Path::new(&plan.path);
-    let result = match mode {
-        Mode::Recycle => session.platform().move_to_recycle_bin(target).map_err(platform_error),
-        Mode::Permanent => fsops::remove_permanently(target)
-            .map_err(|e| CommandError::Platform(format!("permanent deletion failed: {e}"))),
-        Mode::Move => destination.map_or(Ok(()), |dest| {
-            std::fs::rename(target, dest).map_err(|e| CommandError::Platform(format!("move failed: {e}")))
-        }),
-    };
     let size = plan.report.size(session.map_size_mode());
-    session.journal.record(JournalEntry {
-        time: now_secs(),
-        op: op.to_owned(),
-        path: plan.path.clone(),
-        destination: destination.map(str::to_owned),
-        size,
-        mode: mode.name().to_owned(),
-        ok: result.is_ok(),
-        error: result.as_ref().err().map(ToString::to_string),
-    });
-    result?;
+    perform(session, op, mode, &plan.path, destination, size)?;
     let updated = session.forget_node(plan.node);
     if let Some(map) = out.as_object_mut() {
         map.insert("done".to_owned(), json!(true));
@@ -453,6 +451,38 @@ fn execute(
         map.insert("ids_invalidated".to_owned(), json!(updated));
     }
     Ok(out)
+}
+
+/// Performs one already-checked operation on `path` (recycle, permanent removal or move) and
+/// journals the outcome, success or failure. The tree is not touched; callers prune afterwards.
+pub(super) fn perform(
+    session: &mut Session,
+    op: &str,
+    mode: Mode,
+    path: &str,
+    destination: Option<&str>,
+    size: u64,
+) -> Result<(), CommandError> {
+    let target = Path::new(path);
+    let result = match mode {
+        Mode::Recycle => session.platform().move_to_recycle_bin(target).map_err(platform_error),
+        Mode::Permanent => fsops::remove_permanently(target)
+            .map_err(|e| CommandError::Platform(format!("permanent deletion failed: {e}"))),
+        Mode::Move => destination.map_or(Ok(()), |dest| {
+            std::fs::rename(target, dest).map_err(|e| CommandError::Platform(format!("move failed: {e}")))
+        }),
+    };
+    session.journal.record(JournalEntry {
+        time: now_secs(),
+        op: op.to_owned(),
+        path: path.to_owned(),
+        destination: destination.map(str::to_owned),
+        size,
+        mode: mode.name().to_owned(),
+        ok: result.is_ok(),
+        error: result.as_ref().err().map(ToString::to_string),
+    });
+    result
 }
 
 fn run_journal(session: &mut Session, params: &Value) -> Result<Value, CommandError> {

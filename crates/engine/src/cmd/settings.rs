@@ -14,7 +14,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Get settings",
             menu: "",
             shortcut: None,
-            params_doc: "none. Returns {settings}: version, size_mode, ext_sort, tree_sort, treemap, recent_paths, prefer_fast_path, exclude.",
+            params_doc: "none. Returns {settings}: version, size_mode, ext_sort, tree_sort, treemap, recent_paths, prefer_fast_path, exclude, cleanups (edit them with cleanup.save / cleanup.remove).",
             destructive: false,
             enabled: always,
             run: run_get,
