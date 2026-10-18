@@ -39,6 +39,8 @@ pub struct DirustatApp {
     ext_collapsed: bool,
     /// The path field takes keyboard focus on the next frame (Scan folder without a path).
     focus_path: bool,
+    /// Pixel area of the treemap panel in the last frame (for the "too small" selection hint).
+    map_area_px: f32,
 }
 
 /// Share of the window width the treemap always keeps, and its absolute floor in points.
@@ -128,6 +130,7 @@ impl DirustatApp {
             probe: None,
             ext_collapsed: false,
             focus_path: false,
+            map_area_px: 0.0,
         }
     }
 
@@ -577,6 +580,13 @@ impl DirustatApp {
                     ui.separator();
                     ui.colored_label(Tokens::color(tokens.error), notice);
                 }
+                let selected_total = session.selection().and_then(|id| tree.get(id)).map(|n| n.total_size(mode));
+                if self.state.panels.map
+                    && selected_total.is_some_and(|t| selection_too_small(t, total, self.map_area_px))
+                {
+                    ui.separator();
+                    ui.colored_label(Tokens::color(tokens.text_muted), "Selection is too small to show in the treemap");
+                }
                 if self.ext_collapsed {
                     ui.separator();
                     ui.colored_label(Tokens::color(tokens.text_muted), "File types hidden: window too narrow");
@@ -610,15 +620,36 @@ impl DirustatApp {
                 ext_panel::show(ui, &session, &mut self.state);
             });
         }
+        let mut map_area = 0.0;
         egui::CentralPanel::default().show(ui, |ui| {
             if panels.map {
+                let size = ui.available_size();
+                map_area = size.x.max(0.0) * size.y.max(0.0);
                 map_panel::show(ui, &mut session, &mut self.state);
             }
         });
+        self.map_area_px = map_area;
         if matches!(self.state.scan, ScanStatus::Running { .. }) && session.tree().len() > 1 {
             stale_overlay(ui, area, &self.tokens);
         }
     }
+}
+
+/// Smallest tile area (2 x 2 px) the treemap draws.
+const MIN_TILE_AREA_PX: f32 = 4.0;
+
+/// Whether a node of `size` bytes in a tree of `root_total` bytes gets a tile smaller than the
+/// treemap's drawing threshold in a panel of `area_px` pixels (an estimate from the size share).
+fn selection_too_small(size: u64, root_total: u64, area_px: f32) -> bool {
+    if root_total == 0 || !area_px.is_finite() || area_px <= 0.0 {
+        return false;
+    }
+    // Precision loss is irrelevant for an estimate.
+    #[allow(clippy::cast_precision_loss)]
+    let share = size as f64 / root_total as f64;
+    #[allow(clippy::cast_possible_truncation)]
+    let px = (share * f64::from(area_px)) as f32;
+    px < MIN_TILE_AREA_PX
 }
 
 /// Dims the panels that still show the previous scan while a new scan runs, and says so.
@@ -738,6 +769,15 @@ mod tests {
         assert!(matches!(app.state().scan, ScanStatus::Running { .. }));
         // The previous (demo) tree is still shown: frames with the overlay build.
         assert!(frame(&mut app, &ctx) > 0);
+    }
+
+    #[test]
+    fn tiny_selection_is_flagged() {
+        assert!(selection_too_small(295, 5_000_000_000, 600_000.0));
+        assert!(!selection_too_small(2_500_000, 5_000_000, 600_000.0));
+        assert!(!selection_too_small(1, 0, 600_000.0));
+        assert!(!selection_too_small(1, 10, f32::NAN));
+        assert!(!selection_too_small(1, 10, 0.0));
     }
 
     #[test]
