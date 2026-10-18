@@ -328,6 +328,12 @@ impl DirustatApp {
         let get = |k: &str| state.get("progress").and_then(|p| p.get(k)).and_then(Value::as_u64).unwrap_or(0);
         let (dirs, files, bytes, errors) = (get("dirs"), get("files"), get("bytes"), get("errors"));
         ui_state.scan = ScanStatus::Running { dirs, files, bytes, errors };
+        // A scan started through the control channel: show its path in the (disabled) path box.
+        if let Some(root) = state.get("scan_root").and_then(Value::as_str)
+            && ui_state.path_text != root
+        {
+            root.clone_into(&mut ui_state.path_text);
+        }
         errors
     }
 
@@ -531,16 +537,24 @@ impl DirustatApp {
                 let tree = session.tree();
                 let mode = session.map_size_mode();
                 let total = tree.get(tree.root()).map_or(0, |n| n.total_size(mode));
-                ui.label(format!("{} nodes", tree.len()));
-                ui.separator();
-                ui.label(human_size(total));
+                let running = matches!(self.state.scan, ScanStatus::Running { .. });
+                if running && tree.len() > 1 {
+                    let muted = Tokens::color(tokens.text_muted);
+                    ui.colored_label(muted, format!("previous scan: {} nodes", tree.len()));
+                    ui.separator();
+                    ui.colored_label(muted, human_size(total));
+                } else {
+                    ui.label(format!("{} nodes", tree.len()));
+                    ui.separator();
+                    ui.label(human_size(total));
+                }
                 ui.separator();
                 match &self.state.scan {
                     ScanStatus::Idle => {
                         ui.colored_label(Tokens::color(tokens.text_muted), "Idle");
                     }
                     ScanStatus::Running { dirs, files, bytes, errors } => {
-                        ui.spinner();
+                        busy_indicator(ui, Tokens::color(tokens.accent));
                         ui.label(format!("Scanning: {dirs} folders, {files} files, {}", human_size(*bytes)));
                         if *errors > 0 {
                             ui.colored_label(Tokens::color(tokens.warning), format!("{errors} errors"));
@@ -579,6 +593,7 @@ impl DirustatApp {
     fn central(&mut self, ui: &mut egui::Ui) {
         let panels = self.state.panels;
         let mut session = lock_session(&self.session);
+        let area = ui.available_rect_before_wrap();
         let layout = SideLayout::for_width(ui.available_width(), panels.map);
         self.ext_collapsed = panels.extensions && !layout.show_ext;
         if panels.tree {
@@ -600,7 +615,40 @@ impl DirustatApp {
                 map_panel::show(ui, &mut session, &mut self.state);
             }
         });
+        if matches!(self.state.scan, ScanStatus::Running { .. }) && session.tree().len() > 1 {
+            stale_overlay(ui, area, &self.tokens);
+        }
     }
+}
+
+/// Dims the panels that still show the previous scan while a new scan runs, and says so.
+fn stale_overlay(ui: &egui::Ui, area: egui::Rect, tokens: &Tokens) {
+    let layer = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("stale_scan_overlay"));
+    let painter = ui.ctx().layer_painter(layer).with_clip_rect(area);
+    let [r, g, b, _] = tokens.background;
+    painter.rect_filled(area, 0.0, egui::Color32::from_rgba_unmultiplied(r, g, b, 150));
+    painter.text(
+        area.center_top() + egui::vec2(0.0, 28.0),
+        egui::Align2::CENTER_CENTER,
+        "Previous scan - new scan in progress",
+        egui::FontId::proportional(tokens.font_body),
+        Tokens::color(tokens.text),
+    );
+}
+
+/// A small rotating arc drawn from line segments (the UI font has no spinner glyph).
+fn busy_indicator(ui: &mut egui::Ui, color: egui::Color32) {
+    let size = 14.0;
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let t = ui.input(|i| i.time) as f32;
+    let start = t * 6.0;
+    let points: Vec<egui::Pos2> = (0..=12)
+        .map(|i| {
+            let a = start + (i as f32) * 0.35;
+            rect.center() + egui::vec2(a.cos(), a.sin()) * (size * 0.4)
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(points, egui::Stroke::new(2.0, color)));
 }
 
 impl Default for DirustatApp {
@@ -675,6 +723,21 @@ mod tests {
         app.state_mut().path_text = "/definitely/not/here/\u{0}".to_owned();
         app.start_scan();
         assert!(matches!(app.state().scan, ScanStatus::Failed { .. }) || app.is_scanning());
+    }
+
+    #[test]
+    fn control_started_scan_fills_the_path_box_and_dims_stale_views() {
+        let Ok(dir) = tempfile::tempdir() else { return };
+        let Some(app) = demo_app() else { return };
+        let mut app = app;
+        let path = dir.path().to_string_lossy().into_owned();
+        assert!(app.session().execute("scan.start", &json!({ "path": path })).is_ok());
+        let ctx = egui::Context::default();
+        app.poll_scan(&ctx);
+        assert_eq!(app.state().path_text, path);
+        assert!(matches!(app.state().scan, ScanStatus::Running { .. }));
+        // The previous (demo) tree is still shown: frames with the overlay build.
+        assert!(frame(&mut app, &ctx) > 0);
     }
 
     #[test]
