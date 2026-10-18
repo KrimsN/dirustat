@@ -1,8 +1,10 @@
 # diRUSTat
 
+**diRUSTat** = **Dir** + **Rust** + **Stat**: directory statistics, written in Rust (and a nod to WinDirStat).
+
 A fast disk-space analyzer in pure Rust: "where did my space go?" in the style of WinDirStat, at WizTree speed.
 
-> Status: **M0 (bootstrap)**: workspace skeleton, rules and documentation for agent-driven development. The app only prints a banner for now; the first window is milestone M1. See [ROADMAP.md](ROADMAP.md).
+> Status: **M1 and M2 done, M3 (NTFS MFT fast path) code-complete.** Working desktop app (egui/eframe on wgpu): directory tree, treemap, file-type list, scan, logical/allocated size modes, command palette, JSON control channel, CLI and MCP server. Remaining for M3: the 1M-file MFT measurement outlier. Next: M4 (delete to recycle bin, reveal in file manager, cleanups, search, filters). A QA pass found 23 bugs, 20 of them are fixed. Details: [ROADMAP.md](ROADMAP.md), [plan/STATUS.md](plan/STATUS.md).
 
 ![diRUSTat main window: directory tree, treemap and file-type list (synthetic demo data)](docs/img/main-dark.png)
 
