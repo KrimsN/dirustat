@@ -8,10 +8,14 @@
 mod cmd;
 mod drives;
 mod ext;
+mod fsops;
 mod guard;
+mod journal;
 mod launch;
 mod map;
 mod paths;
+mod protected;
+mod prune;
 pub mod search;
 mod settings;
 
@@ -27,6 +31,7 @@ pub use settings::{
 };
 
 pub use ext::{ExtStat, NO_EXT_COLOR, ext_color, extension_of};
+pub use journal::{JournalEntry, MAX_JOURNAL_ENTRIES};
 
 use dirustat_model::{SizeMode, Tree};
 use dirustat_platform::PlatformServices;
@@ -54,6 +59,10 @@ pub enum CommandError {
     Scan(String),
     /// A platform service failed at the OS level (permission, launch failure, ...).
     Platform(String),
+    /// A destructive command was refused for a protected path (`docs/safety.md`).
+    ProtectedPath(String),
+    /// The tree no longer matches the disk; nothing was changed. Rescan and retry.
+    StaleTree(String),
 }
 
 impl CommandError {
@@ -65,6 +74,8 @@ impl CommandError {
             Self::Unsupported(_) => "unsupported",
             Self::ConfirmationRequired(_) => "confirmation_required",
             Self::NotEnabled(_) => "not_enabled",
+            Self::ProtectedPath(_) => "protected_path",
+            Self::StaleTree(_) => "stale_tree",
             Self::Panicked { .. } | Self::Scan(_) | Self::Platform(_) => "internal",
         }
     }
@@ -81,6 +92,8 @@ impl fmt::Display for CommandError {
             Self::Panicked { what, message } => write!(f, "internal error in {what}: {message}"),
             Self::Scan(why) => write!(f, "scan failed: {why}"),
             Self::Platform(why) => write!(f, "platform service failed: {why}"),
+            Self::ProtectedPath(why) => write!(f, "refused, protected path: {why}"),
+            Self::StaleTree(why) => write!(f, "stale tree, nothing changed: {why}"),
         }
     }
 }
@@ -105,6 +118,8 @@ pub struct Session {
     search: search::SearchState,
     /// OS services (drives, recycle bin, file manager); the real one by default.
     platform: Arc<dyn PlatformServices>,
+    /// Journal of destructive actions (`file.journal`).
+    journal: journal::Journal,
 }
 
 /// Which backend produced the current tree and why the MFT fast path was abandoned, if it was.
@@ -133,7 +148,14 @@ impl Session {
             drives: drives::DrivesProvider(None),
             search: search::SearchState::default(),
             platform: dirustat_platform::default_platform(),
+            journal: journal::Journal::new(),
         }
+    }
+
+    /// Mirrors the destructive-action journal into a JSONL file (best effort, appended; the
+    /// directory is not created). Hosts pass `settings_dir()/journal.jsonl`; `None` keeps it in memory.
+    pub fn set_journal_file(&mut self, file: Option<std::path::PathBuf>) {
+        self.journal.set_file(file);
     }
 
     pub fn tree(&self) -> &Tree {

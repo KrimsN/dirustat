@@ -5,6 +5,7 @@
 //! Rules for `run`: never open a dialog, never panic (the guard is a safety net only), reject
 //! unknown params fields with `InvalidParams` (use [`parse_params`] / [`no_params`]).
 
+mod file;
 mod list;
 mod platform;
 mod privileges;
@@ -77,6 +78,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(privileges::specs());
         all.extend(search::specs());
         all.extend(platform::specs());
+        all.extend(file::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all
@@ -192,6 +194,8 @@ mod tests {
             (CommandError::NotEnabled(String::new()), "not_enabled"),
             (CommandError::Scan(String::new()), "internal"),
             (CommandError::Platform(String::new()), "internal"),
+            (CommandError::ProtectedPath(String::new()), "protected_path"),
+            (CommandError::StaleTree(String::new()), "stale_tree"),
             (CommandError::Panicked { what: String::new(), message: String::new() }, "internal"),
         ];
         for (err, code) in codes {

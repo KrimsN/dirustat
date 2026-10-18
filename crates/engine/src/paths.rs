@@ -24,7 +24,7 @@ pub fn normalize_scan_root(path: &str) -> String {
     normalize_root_for(path, cfg!(windows))
 }
 
-fn normalize_root_for(path: &str, windows: bool) -> String {
+pub(crate) fn normalize_root_for(path: &str, windows: bool) -> String {
     let sep = if windows { '\\' } else { '/' };
     let mut s = if windows { path.replace('/', "\\") } else { path.to_owned() };
     if windows {

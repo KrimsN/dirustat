@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-18 · revision 14 · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048); G-040, G-042, G-045 partial; G-052 (MFT outlier, renumbered) and G-053-G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-18 · revision 15 (G-015 closed) · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048); G-040, G-042, G-045 partial; G-052 (MFT outlier, renumbered) and G-053-G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -35,7 +35,6 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-037 | P3 | M3 | The UI does not show `fallback_reason` (only the elevation hint) | reason visible in the status bar or about window; screenshot |
 | G-052 | P1 | M3 | MFT scan outlier: 3.26 s run with ~2.7 s unexplained inside `collect` (parse 44 ms, disk wait 325 ms); suspects: reader backpressure or thread stalls, `NO_BUFFERING` handle fallback, antivirus, rayon contention | repeat 10+ runs with finer phase timers (consumer blocked-on-send, per-chunk latency histogram); budget met in all runs |
 | G-014 | P1 | M4 | Platform services: recycle bin, file manager, properties, free space. Landed 2026-10-18 (crate `dirustat-platform`, commands `platform.reveal|properties|free_space`, `list.drives` real); remaining: UI hooks (context menu, status bar free space), recycle command (G-015) |
-| G-015 | P0 | M4 | Destructive commands per `docs/safety.md` (confirm, dry-run, protected paths, journal) | tests for refusal without confirm and for protected paths |
 | G-016 | P2 | M4 | Search (substring/wildcard/regex), filters, scan exclusions. Landed 2026-10-18 in the engine (`search.find`, `search.clear`, filters on `tree.children`/`list.largest_files`, `scan.start` param `exclude`, setting `scan.exclude`); remaining: UI (search box, highlight of `Session::search_hits`, exclusion editor), date filter, exclusions for the MFT fast path | tests + hostile patterns (done); UI hooks |
 | G-017 | P2 | M4 | User-defined cleanups | commands + tests |
 | G-018 | P2 | M5 | Cushion shading and treemap parameters | screenshots, frame budget |
@@ -69,6 +68,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-046 | 2026-10-18 | QA-106: treemap keeps a minimum share, side panels get width ranges and collapse first |
 | G-047 | 2026-10-18 | QA-105: fail fast when the window does not render, stale `ui.state`, docs aligned |
 | G-048 | 2026-10-18 | QA-6: separate pre-auth slots and rate budget from authenticated clients |
+| G-015 | 2026-10-18 | M4.3: `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal` with confirm, dry run, protected paths, stale-tree re-check, journal (UI hooks remain under G-014) |
 
 ## Revision history
 
@@ -87,3 +87,4 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-15 · r12: M3.5 measurement recorded; G-038 added.
 - 2026-10-18 · r14: G-042 closed (background layout).
 - 2026-10-18 · r13: 20 QA fix commits landed. Closed G-038 (QA-2), G-039 (QA-1), G-041 (QA-4), G-043 (QA-103), G-044 (QA-104), G-046 (QA-106), G-047 (QA-105), G-048 (QA-6). Kept open with notes: G-040, G-042, G-045. Duplicate id fixed: the M3.5 MFT outlier row is now G-052 (was a second G-038); references updated in `plan/STATUS.md`, `log/devlog.md`, `perf/budgets.toml`. Added G-053 (QA-112 tooltip), G-054 (QA-113b), G-055 (QA-115 skipped items). QA-7, QA-8, QA-9 were fixed in the same batch and had no gap rows; QA-107, QA-108, QA-109 are fixed too (no gap rows).
+- 2026-10-18 · r15: G-015 closed (destructive file commands).

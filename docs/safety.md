@@ -1,6 +1,6 @@
 # User data safety
 
-> Status: 2026-10-13 · revision 2. Mandatory for humans and agents.
+> Status: 2026-10-18 · revision 3. Mandatory for humans and agents.
 
 ## Principles
 
@@ -29,3 +29,12 @@
 ## Privacy in logs
 
 User paths appear in logs only at `debug` level and not in release builds by default. Screenshots and reports meant for publication use synthetic data.
+
+## Implementation (revision 3)
+
+Commands: `file.delete` (recycle bin), `file.delete_permanent` (needs `confirm` and `i_understand_permanent`; UIs must warn first), `file.move` (rename, never overwrites), read-only `file.delete_preview` and `file.journal`. Details and result shapes: `docs/control-protocol.md`.
+
+- Pre-flight for all of them: the target resolves to a node of the current tree; `engine::protected` refuses the volume root, the scan root, `Windows` (and everything below), `Program Files`, `Program Files (x86)`, `ProgramData`, `Users`, an entire user profile, 8.3 spellings and the env-configured roots (`SystemRoot`, `ProgramFiles*`, `ProgramData`, `USERPROFILE`), lexically and again on the canonical location (a link or junction on the way is refused); the object on disk must match the tree (kind, size, mtime; the model stores no file id) or `stale_tree`.
+- Links and junctions are never followed; permanent deletion removes the link itself, recycling a link is refused.
+- After success the node is cut out of the session tree (arena ids change, revision bumped, selection cleared). Limitation: only the top object is re-validated against the disk, not every descendant.
+- Journal: in memory (newest 10000) and optionally appended to a JSONL file chosen by the host (`Session::set_journal_file`); write errors never fail a command. Paths are in the journal by design and never logged.

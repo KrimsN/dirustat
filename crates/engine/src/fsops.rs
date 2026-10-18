@@ -1,0 +1,246 @@
+//! Filesystem helpers behind the destructive file commands: re-validation of a tree node against
+//! the disk (`docs/safety.md`, principle 3) and link-safe permanent removal.
+//!
+//! Nothing here follows a symlink or junction when deleting: a link is removed itself, never its
+//! target, and walks use `symlink_metadata`. All walks are iterative.
+
+use crate::CommandError;
+use crate::protected::{Key, ProtectedPaths, key_of};
+use dirustat_model::{NodeData, NodeKind};
+use std::fs::{self, Metadata};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
+
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+
+#[cfg(windows)]
+fn attributes_of(meta: &Metadata) -> u32 {
+    std::os::windows::fs::MetadataExt::file_attributes(meta)
+}
+
+#[cfg(not(windows))]
+fn attributes_of(_meta: &Metadata) -> u32 {
+    0
+}
+
+/// Symlink, junction or any other reparse point.
+pub(crate) fn is_link(meta: &Metadata) -> bool {
+    meta.file_type().is_symlink() || attributes_of(meta) & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Modification time in whole seconds since the epoch, computed like the scanner does.
+fn mtime_secs(meta: &Metadata) -> Option<i64> {
+    let modified = meta.modified().ok()?;
+    match modified.duration_since(UNIX_EPOCH) {
+        Ok(after) => i64::try_from(after.as_secs()).ok(),
+        Err(before) => i64::try_from(before.duration().as_secs()).ok().map(i64::wrapping_neg),
+    }
+}
+
+fn stale(why: &str) -> CommandError {
+    CommandError::StaleTree(why.to_owned())
+}
+
+/// The object at `path` must still be what the tree says: it exists, has the same kind (file,
+/// directory, link), and for files the same size; where the tree knows a modification time it
+/// must match too. The model stores no file id, so size and mtime are the identity.
+pub(crate) fn verify_matches(path: &Path, kind: NodeKind, data: &NodeData) -> Result<(), CommandError> {
+    let meta = fs::symlink_metadata(path).map_err(|e| match e.kind() {
+        io::ErrorKind::NotFound => stale("the path no longer exists"),
+        _ => stale("the path cannot be inspected"),
+    })?;
+    let on_disk = if is_link(&meta) {
+        NodeKind::Link
+    } else if meta.is_dir() {
+        NodeKind::Dir
+    } else {
+        NodeKind::File
+    };
+    if on_disk != kind {
+        return Err(stale("the kind of the object changed since the scan"));
+    }
+    if kind == NodeKind::File && meta.len() != data.logical_size {
+        return Err(stale("the file size changed since the scan"));
+    }
+    if let (Some(seen), Some(now)) = (data.mtime, mtime_secs(&meta))
+        && seen != now
+    {
+        return Err(stale("the modification time changed since the scan"));
+    }
+    Ok(())
+}
+
+/// Resolves the parent of `path` on disk and checks that it is exactly where the lexical path
+/// says: below the real scan root, with no link or reparse point in between, and that the real
+/// target is not protected. Returns the real (canonical) key of the parent directory.
+pub(crate) fn verify_location(
+    path: &str,
+    root: &str,
+    protected: &ProtectedPaths,
+    windows: bool,
+) -> Result<Key, CommandError> {
+    let outside = || CommandError::InvalidParams("path is outside the scanned tree".to_owned());
+    let path_key = key_of(path, windows).ok_or_else(outside)?;
+    let root_key = key_of(root, windows).ok_or_else(outside)?;
+    if !path_key.starts_with(&root_key) {
+        return Err(outside());
+    }
+    let rel = path_key.comps.get(root_key.comps.len()..).unwrap_or_default();
+    let (name, rel_parent) = rel.split_last().ok_or_else(outside)?;
+    let parent = Path::new(path).parent().ok_or_else(outside)?;
+    let canon_parent = fs::canonicalize(parent).map_err(|_| stale("the parent directory cannot be resolved"))?;
+    let canon_root = fs::canonicalize(root).map_err(|_| stale("the scan root cannot be resolved"))?;
+    let mut expected = canon_root.clone();
+    for comp in rel_parent {
+        expected.push(comp);
+    }
+    let real_parent = key_of(&canon_parent.to_string_lossy(), windows).ok_or_else(outside)?;
+    let expected_key = key_of(&expected.to_string_lossy(), windows).ok_or_else(outside)?;
+    if real_parent != expected_key {
+        return Err(CommandError::ProtectedPath(
+            "the path reaches the target through a link or reparse point".to_owned(),
+        ));
+    }
+    let real_target = canon_parent.join(name);
+    protected
+        .check(&real_target.to_string_lossy(), &canon_root.to_string_lossy())
+        .map_err(|why| CommandError::ProtectedPath(format!("the real location is {why}")))?;
+    Ok(real_parent)
+}
+
+/// Clears the read-only attribute so Windows allows deleting the entry.
+#[cfg(windows)]
+#[allow(clippy::permissions_set_readonly_false)] // Windows semantics: only the read-only attribute.
+fn clear_readonly(path: &Path) {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        let mut perms = meta.permissions();
+        perms.set_readonly(false);
+        let _ = fs::set_permissions(path, perms);
+    }
+}
+
+#[cfg(not(windows))]
+fn clear_readonly(_path: &Path) {}
+
+fn remove_file_any(path: &Path) -> io::Result<()> {
+    fs::remove_file(path).or_else(|first| {
+        if first.kind() != io::ErrorKind::PermissionDenied {
+            return Err(first);
+        }
+        clear_readonly(path);
+        fs::remove_file(path)
+    })
+}
+
+fn remove_dir_any(path: &Path) -> io::Result<()> {
+    fs::remove_dir(path).or_else(|first| {
+        if first.kind() != io::ErrorKind::PermissionDenied {
+            return Err(first);
+        }
+        clear_readonly(path);
+        fs::remove_dir(path)
+    })
+}
+
+/// Removes a link itself: `remove_file` for file links, `remove_dir` for directory links and
+/// junctions. The target is never touched.
+fn remove_link(path: &Path) -> io::Result<()> {
+    fs::remove_file(path).or_else(|_| remove_dir_any(path))
+}
+
+/// Permanently deletes `path` and everything below it without following any link.
+pub(crate) fn remove_permanently(path: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if is_link(&meta) {
+        return remove_link(path);
+    }
+    if !meta.is_dir() {
+        return remove_file_any(path);
+    }
+    // Discovery order puts every directory after its parent, so removing in reverse is bottom-up.
+    let mut dirs: Vec<PathBuf> = vec![path.to_path_buf()];
+    let mut next = 0;
+    while let Some(dir) = dirs.get(next).cloned() {
+        next += 1;
+        for entry in fs::read_dir(&dir)? {
+            let child = entry?.path();
+            let child_meta = fs::symlink_metadata(&child)?;
+            if is_link(&child_meta) {
+                remove_link(&child)?;
+            } else if child_meta.is_dir() {
+                dirs.push(child);
+            } else {
+                remove_file_any(&child)?;
+            }
+        }
+    }
+    for dir in dirs.iter().rev() {
+        remove_dir_any(dir)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_tree_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let top = dir.path().join("top");
+        fs::create_dir_all(top.join("a").join("b")).unwrap();
+        fs::write(top.join("a").join("b").join("f.txt"), b"x").unwrap();
+        fs::write(top.join("g.txt"), b"y").unwrap();
+        let ro = top.join("ro.txt");
+        fs::write(&ro, b"z").unwrap();
+        let mut perms = fs::metadata(&ro).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&ro, perms).unwrap();
+        remove_permanently(&top).unwrap();
+        assert!(!top.exists());
+        assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn missing_path_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(remove_permanently(&dir.path().join("none")).is_err());
+    }
+
+    #[test]
+    fn verify_detects_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("f.bin");
+        fs::write(&f, b"12345").unwrap();
+        let meta = fs::metadata(&f).unwrap();
+        let data = NodeData { logical_size: 5, mtime: mtime_secs(&meta), ..NodeData::default() };
+        assert!(verify_matches(&f, NodeKind::File, &data).is_ok());
+        assert!(verify_matches(&f, NodeKind::Dir, &data).is_err());
+        let wrong_size = NodeData { logical_size: 6, ..data };
+        assert_eq!(verify_matches(&f, NodeKind::File, &wrong_size).unwrap_err().code(), "stale_tree");
+        let wrong_time = NodeData { mtime: data.mtime.map(|t| t + 10), ..data };
+        assert_eq!(verify_matches(&f, NodeKind::File, &wrong_time).unwrap_err().code(), "stale_tree");
+        fs::remove_file(&f).unwrap();
+        assert_eq!(verify_matches(&f, NodeKind::File, &data).unwrap_err().code(), "stale_tree");
+    }
+
+    #[test]
+    fn location_must_stay_inside_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub").join("f"), b"x").unwrap();
+        let protected = ProtectedPaths::from_env();
+        let root_s = root.to_string_lossy().into_owned();
+        let ok = root.join("sub").join("f").to_string_lossy().into_owned();
+        assert!(verify_location(&ok, &root_s, &protected, cfg!(windows)).is_ok());
+        let outside = dir.path().join("other").to_string_lossy().into_owned();
+        assert_eq!(verify_location(&outside, &root_s, &protected, cfg!(windows)).unwrap_err().code(), "invalid_params");
+        let missing_parent = root.join("nope").join("f").to_string_lossy().into_owned();
+        assert_eq!(
+            verify_location(&missing_parent, &root_s, &protected, cfg!(windows)).unwrap_err().code(),
+            "stale_tree"
+        );
+    }
+}

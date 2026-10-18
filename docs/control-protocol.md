@@ -16,7 +16,7 @@ Goal: any action a human can take is available to an agent; the app can be launc
 {"id":2,"ok":false,"error":{"code":"invalid_params","message":"path is empty"}}
 ```
 
-Stable error codes: `unknown_command`, `invalid_params`, `unsupported`, `confirmation_required`, `not_enabled`, `internal`; transport level: `unknown_method`, `bad_request` (malformed JSON or envelope), `unauthorized` (missing/wrong key), `too_large` (request over 1 MiB closes the connection; response over 8 MiB), `rate_limited` (200 requests/s per connection and 1000 requests/s over all connections). A connection that has not sent a request with the right key within 2 s is closed (idle and wrong-key peers free their slot). Unauthenticated connections have their own budget of 8 slots (the oldest is evicted when it is full) and 50 failed requests/s over all peers, a connection past that is closed; none of this touches the 16 authenticated connections or the 1000 requests/s authenticated budget. An authenticated connection may idle for 60 s.
+Stable error codes: `unknown_command`, `invalid_params`, `unsupported`, `confirmation_required`, `not_enabled`, `protected_path` (a destructive command refused a protected path), `stale_tree` (the tree no longer matches the disk; nothing was changed, rescan), `internal`; transport level: `unknown_method`, `bad_request` (malformed JSON or envelope), `unauthorized` (missing/wrong key), `too_large` (request over 1 MiB closes the connection; response over 8 MiB), `rate_limited` (200 requests/s per connection and 1000 requests/s over all connections). A connection that has not sent a request with the right key within 2 s is closed (idle and wrong-key peers free their slot). Unauthenticated connections have their own budget of 8 slots (the oldest is evicted when it is full) and 50 failed requests/s over all peers, a connection past that is closed; none of this touches the 16 authenticated connections or the 1000 requests/s authenticated budget. An authenticated connection may idle for 60 s.
 
 Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `ControlServer::start(port, key_dir, session, bridge)`, `UiBridge` for `ui.*`/`app.quit` (headless: `unsupported`). `session.state` accepts `path` as a JSON pointer (`/selection`). `session.tree` takes `node` (id), `depth` (max 8), `limit` (max 1000), `offset` (pages the children of `node`), `mode` (`allocated`|`logical`); children are sorted by size, largest first.
 
@@ -60,9 +60,17 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 
 ## Command conventions
 
-- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; planned, not implemented yet: `file.delete`, `export.csv`).
+- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; planned, not implemented yet: `export.csv`).
 - Groups: `scan`, `view`, `select`, `tree`, `treemap`, `ext`, `file`, `cleanup`, `search`, `filter`, `export`, `snapshot`, `settings`, `ui` (shell only).
 - Parameters are a JSON object; every field is documented in `params_doc`; unknown fields are an `invalid_params` error.
+
+## Destructive file commands (`docs/safety.md`)
+
+- `file.delete_preview {id|path, mode?: "recycle"|"permanent"}` (read-only, no confirm) and the dry run of the destructive commands return the report `{dry_run, mode, path, kind, count, files, dirs, links, size, size_logical, size_allocated, paths (<= 200, target first), truncated}`.
+- `file.delete {id|path, dry_run?, confirm: true}` sends to the recycle bin; `file.delete_permanent {id|path, dry_run?, i_understand_permanent: true, confirm: true}` deletes for good (a UI must show a warning first; links are removed themselves, never followed); `file.move {id|path, destination, dry_run?, confirm: true}` renames without overwriting. The registry demands `confirm: true` even for `dry_run`.
+- Pre-flight, in order: the target must resolve to a node of the current tree (`invalid_params` otherwise); protected paths are refused with `protected_path` (volume root, the scan root, `Windows` and everything below it, `Program Files`, `Program Files (x86)`, `ProgramData`, `Users`, an entire user profile, 8.3 spellings, env-configured roots, and the real location when a link or junction is on the way); the object on disk must still match the tree (kind, file size, modification time), otherwise `stale_tree` and nothing changes. Links are never recycled (`invalid_params`; use `file.delete_permanent`).
+- On success the result adds `{done: true, tree_updated, revision, ids_invalidated}`: the node's subtree is cut out of the session tree, the revision is bumped, arena ids change and the selection is cleared. `file.move` adds `{destination, rescan_recommended}` (the destination is not added to the tree).
+- `file.journal {limit?, offset?}` lists the session journal newest first: `{total, offset, entries: [{time, op, path, destination, size, mode, ok, error}]}`, at most 10000 entries. Hosts may mirror it to a JSONL file with `Session::set_journal_file`.
 
 ## Channel security
 
