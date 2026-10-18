@@ -4,6 +4,8 @@ A fast disk-space analyzer in pure Rust: "where did my space go?" in the style o
 
 > Status: **M0 (bootstrap)**: workspace skeleton, rules and documentation for agent-driven development. The app only prints a banner for now; the first window is milestone M1. See [ROADMAP.md](ROADMAP.md).
 
+![diRUSTat main window: directory tree, treemap and file-type list (synthetic demo data)](docs/img/main-dark.png)
+
 ## Goals
 
 - **Feature parity with WinDirStat:** directory tree, treemap with cushion shading, file-type list with colours, cleanups, search, filters.
@@ -16,7 +18,7 @@ A fast disk-space analyzer in pure Rust: "where did my space go?" in the style o
 ## Quick start
 
 ```sh
-cargo run -p dirustat                 # desktop app (banner only for now)
+cargo run --release -p dirustat -- --demo   # desktop app on synthetic demo data
 cargo run -p dirustat-cli             # headless CLI
 cargo xtask ci                        # full quality gate
 ```
