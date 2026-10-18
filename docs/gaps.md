@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-18 · revision 13 · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048); G-040, G-042, G-045 partial; G-052 (MFT outlier, renumbered) and G-053-G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-18 · revision 14 · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048); G-040, G-042, G-045 partial; G-052 (MFT outlier, renumbered) and G-053-G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -9,7 +9,6 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | ID | P | Milestone | Description | Done when |
 |---|---|---|---|---|
 | G-040 | P0 | QA | **QA-3 (S2).** Windows portable scan counts hardlinks N times (`link_id_of` returns `None` outside unix). Fixed by `dirustat_ntfs::file_identity`; remaining: cost, every non-empty file is opened once (100k fixture, release, warm: 0.04 s -> about 1.1 s), so a cheaper source is wanted (directory enumeration by handle with file ids, or an opt-out option) | fixture with 3 hardlinks counts the size once; parity with the MFT backend; works under `unsafe_code = forbid` (safe wrapper or `dirustat-ntfs`) |
-| G-042 | P1 | QA | **QA-102 (S3).** Treemap relayout runs on the UI thread on every resize step (about 2.4 s on 1M nodes) | layout off the UI thread or debounced, previous layout reused; resize on `1m-seed1` does not block frames. **Mitigated (2026-10-15):** `Session::map_layout` lays out for coarsely quantized bounds (6-12 % steps) and only rescales the cached tiles to the exact bounds, so a drag recomputes once per step, not per pixel. **Remaining:** a step crossing (and the first layout after a scan) still blocks the UI thread for the full layout time; compute on a background thread and keep painting the previous layout meanwhile |
 | G-045 | P1 | QA | **QA-5 (S3, static).** Portable and MFT backends disagree on allocated size (resident files 0 vs 4096, sparse, compressed). Policy now documented (scan crate docs, `docs/architecture.md`): MFT exact, portable an upper bound. Left: portable needs a per-file `GetCompressedFileSize` wrapper in `dirustat-ntfs` (verify what it returns for resident files; costs another file open, see G-040 timings), plus sparse files with `compression_unit == 0` (G-033) | same fixture gives the same allocated totals on both backends; elevated parity test on a VHDX with resident, sparse and compressed files |
 | G-049 | P2 | QA | **QA-110 (S4).** `ui.state` does not round-trip through `ui.set_state`; shell `ui.*` commands are not drivable over control | documented way to run every `UI_COMMANDS` entry or a list of read-only fields |
 | G-050 | P2 | QA | **QA-111 (S4).** UI layout differs from `docs/ui-design.md` (drive picker, search, folders/attrs columns, path and free space in the status bar, Largest files menu entry) | each item lands or is struck from the design doc |
@@ -51,6 +50,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | ID | Date | What |
 |---|---|---|
 | G-000 | 2026-10-13 | M0: workspace, lints, xtask layers/ci, documentation, CI |
+| G-042 | 2026-10-18 | QA-102: `Session::map_poll` / `map_ready_view` / `map_view_async` compute the hierarchical layout on one background thread (`Arc<Tree>` shared with it); a resize or a new size step keeps showing the previous layout rescaled to the new bounds with a "Laying out..." hint, a replaced tree drops the outstanding result. Not yet measured in the real window on `1m-seed1` |
 | G-001 | 2026-10-13 | M1.1: model with logical/allocated sizes (`SizeMode`), `NodeData`, file/dir/error counters, mtime, attributes |
 | G-004 | 2026-10-13 | M1.2: rayon, serde, serde_json, tracing, tempfile, proptest added; `cargo deny check` passes |
 | G-003 | 2026-10-13 | M1.3: `cargo xtask fixtures` (seeded splitmix64 plan, exact node count, hardlinks, symlink cycle, empty/unicode/long-path cases) |
@@ -85,4 +85,5 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-13 · r11: M3.2-M3.6 and review fixes landed; G-012/G-013 narrowed (both stay open); added G-031-G-037 (review deferrals).
 - 2026-10-15 · r12: QA pass (`docs/qa/reports/2026-10-15-summary.md`): added G-038-G-048 from confirmed S2/S3 bugs (S2 on top).
 - 2026-10-15 · r12: M3.5 measurement recorded; G-038 added.
+- 2026-10-18 · r14: G-042 closed (background layout).
 - 2026-10-18 · r13: 20 QA fix commits landed. Closed G-038 (QA-2), G-039 (QA-1), G-041 (QA-4), G-043 (QA-103), G-044 (QA-104), G-046 (QA-106), G-047 (QA-105), G-048 (QA-6). Kept open with notes: G-040, G-042, G-045. Duplicate id fixed: the M3.5 MFT outlier row is now G-052 (was a second G-038); references updated in `plan/STATUS.md`, `log/devlog.md`, `perf/budgets.toml`. Added G-053 (QA-112 tooltip), G-054 (QA-113b), G-055 (QA-115 skipped items). QA-7, QA-8, QA-9 were fixed in the same batch and had no gap rows; QA-107, QA-108, QA-109 are fixed too (no gap rows).

@@ -6,6 +6,7 @@ use crate::Session;
 use dirustat_model::{NodeId, SizeMode, Tree};
 use dirustat_treemap::{LayoutOptions, Rect, layout_tree};
 use serde::Serialize;
+use std::sync::{Arc, mpsc};
 
 /// One laid-out node.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -117,11 +118,39 @@ pub struct MapState {
     cache: Option<(CacheKey, MapLayout)>,
     /// `cache` rescaled to the exact bounds (key of the base layout, exact bounds bits).
     view: Option<(CacheKey, [u32; 4], MapLayout)>,
+    /// Layout being computed on a background thread (see [`Session::map_view_async`]).
+    inflight: Option<InFlight>,
+    /// Bumped whenever `cache` or `view` receives different tiles; lets the UI key its own caches.
+    generation: u64,
+}
+
+/// A background layout: the key it is computed for and the channel its result arrives on.
+#[derive(Debug)]
+struct InFlight {
+    key: CacheKey,
+    rx: mpsc::Receiver<MapLayout>,
 }
 
 impl MapState {
     pub(crate) fn new() -> Self {
-        Self { mode: SizeMode::default(), selected: None, options: LayoutOptions::default(), cache: None, view: None }
+        Self {
+            mode: SizeMode::default(),
+            selected: None,
+            options: LayoutOptions::default(),
+            cache: None,
+            view: None,
+            inflight: None,
+            generation: 0,
+        }
+    }
+}
+
+fn bounds_from_bits(bits: [u32; 4]) -> Rect {
+    Rect {
+        x: f32::from_bits(bits[0]),
+        y: f32::from_bits(bits[1]),
+        w: f32::from_bits(bits[2]),
+        h: f32::from_bits(bits[3]),
     }
 }
 
@@ -174,6 +203,121 @@ impl Session {
         self.map.selected = None;
         self.map.cache = None;
         self.map.view = None;
+        // A layout still being computed belongs to the old tree: its result is dropped.
+        self.map.inflight = None;
+        self.map.generation = self.map.generation.wrapping_add(1);
+    }
+
+    /// Generation of the tiles returned by [`Session::map_view_async`]; changes whenever they change.
+    pub fn map_generation(&self) -> u64 {
+        self.map.generation
+    }
+
+    /// Like [`Session::map_view`], but never computes the hierarchical layout on the calling thread.
+    ///
+    /// When the layout for `bounds` is missing it is computed on a background thread (one at a time)
+    /// and the call returns immediately: with the previous layout of the same tree and size mode
+    /// rescaled to `bounds` (so a resize keeps showing the old picture), or with an empty layout when
+    /// there is none. The third value is `true` while a layout is outstanding; call again later
+    /// (e.g. on the next frame) to pick up the result.
+    pub fn map_view_async(&mut self, bounds: Rect) -> (&Tree, &MapLayout, bool) {
+        let pending = self.map_poll(bounds);
+        let (tree, layout) = self.map_ready_view();
+        (tree, layout, pending)
+    }
+
+    /// The non-blocking half of [`Session::map_view_async`]: advances the background layout for
+    /// `bounds` and returns whether it is still outstanding. Read the tiles with
+    /// [`Session::map_ready_view`] (after reading [`Session::map_generation`] if you key caches on it).
+    pub fn map_poll(&mut self, bounds: Rect) -> bool {
+        let pending = self.poll_map_layout(bounds);
+        self.refresh_map_view(bounds);
+        pending
+    }
+
+    /// The tiles last prepared by [`Session::map_poll`] (empty when none), with their tree.
+    pub fn map_ready_view(&self) -> (&Tree, &MapLayout) {
+        static EMPTY: MapLayout = MapLayout { tiles: Vec::new() };
+        match &self.map.view {
+            Some((_, _, layout)) => (&self.tree, layout),
+            None => (&self.tree, &EMPTY),
+        }
+    }
+
+    /// Collects a finished background layout and starts one for `bounds` when it is missing.
+    /// Returns whether the layout for `bounds` is still outstanding.
+    fn poll_map_layout(&mut self, bounds: Rect) -> bool {
+        let finished = self.map.inflight.as_ref().map(|f| (f.key, f.rx.try_recv()));
+        match finished {
+            Some((key, Ok(layout))) => self.install_map_layout(key, layout),
+            Some((key, Err(mpsc::TryRecvError::Disconnected))) => {
+                // The layout thread died (a panic is contained there): cache an empty layout so the
+                // failing key is not retried every frame.
+                self.install_map_layout(key, MapLayout::default());
+            }
+            Some((_, Err(mpsc::TryRecvError::Empty))) | None => {}
+        }
+        let base_bounds = quantize_bounds(bounds);
+        if !is_valid(base_bounds) {
+            return false;
+        }
+        let key = CacheKey { revision: self.revision, bounds: bounds_bits(base_bounds), mode: self.map.mode };
+        if matches!(&self.map.cache, Some((k, _)) if *k == key) {
+            return false;
+        }
+        match &self.map.inflight {
+            Some(f) if f.key == key => {}
+            // Another size is still being computed: wait for it, then start this one.
+            Some(_) => {}
+            None => self.spawn_map_layout(key, base_bounds),
+        }
+        true
+    }
+
+    fn install_map_layout(&mut self, key: CacheKey, layout: MapLayout) {
+        self.map.inflight = None;
+        if key.revision == self.revision && key.mode == self.map.mode {
+            self.map.cache = Some((key, layout));
+            self.map.view = None;
+            self.map.generation = self.map.generation.wrapping_add(1);
+        }
+    }
+
+    fn spawn_map_layout(&mut self, key: CacheKey, base_bounds: Rect) {
+        let (tx, rx) = mpsc::channel();
+        let tree = Arc::clone(&self.tree);
+        let (mode, opts) = (self.map.mode, self.map.options);
+        let spawned = std::thread::Builder::new().name("dirustat-map-layout".to_owned()).spawn(move || {
+            // A closed receiver only means the result is no longer wanted.
+            let _ = tx.send(MapLayout::build(&tree, base_bounds, mode, opts));
+        });
+        match spawned {
+            Ok(_) => self.map.inflight = Some(InFlight { key, rx }),
+            // No thread available: compute here rather than leave the map empty.
+            Err(_) => {
+                let layout = MapLayout::build(&self.tree, base_bounds, mode, opts);
+                self.install_map_layout(key, layout);
+            }
+        }
+    }
+
+    /// Rebuilds `view` from the cached layout (when it belongs to the current tree and mode) for `bounds`.
+    fn refresh_map_view(&mut self, bounds: Rect) {
+        let Some((key, base)) = &self.map.cache else {
+            self.map.view = None;
+            return;
+        };
+        if key.revision != self.revision || key.mode != self.map.mode {
+            self.map.view = None;
+            return;
+        }
+        let exact = bounds_bits(bounds);
+        if matches!(&self.map.view, Some((k, b, _)) if k == key && *b == exact) {
+            return;
+        }
+        let scaled = base.scaled(bounds_from_bits(key.bounds), bounds);
+        self.map.view = Some((*key, exact, scaled));
+        self.map.generation = self.map.generation.wrapping_add(1);
     }
 
     /// Cached layout for `bounds` and the current size mode.
@@ -280,7 +424,7 @@ mod tests {
         tree.add_child(root, "other", NodeKind::File, 300).unwrap();
         tree.aggregate();
         let mut s = Session::new();
-        s.tree = tree;
+        s.tree = std::sync::Arc::new(tree);
         s.tree_replaced();
         s
     }
@@ -375,6 +519,72 @@ mod tests {
         assert_eq!(s.select_at(f32::NAN, 0.0), None);
     }
 
+    /// Calls `map_view_async` until the outstanding layout arrives (at most 10 s).
+    fn settle(s: &mut Session, b: Rect) -> usize {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (_, layout, pending) = s.map_view_async(b);
+            if !pending {
+                return layout.tiles().len();
+            }
+            assert!(std::time::Instant::now() < deadline, "background layout never finished");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn async_layout_arrives_from_the_background_and_matches_the_sync_one() {
+        let mut s = sample_session();
+        let sync_tiles = s.map_layout(bounds()).tiles().to_vec();
+        s.tree_replaced();
+        s.set_map_size_mode(SizeMode::Allocated);
+        let (_, first, pending) = s.map_view_async(bounds());
+        assert!(pending && first.tiles().is_empty(), "no layout yet: empty and pending");
+        let n = settle(&mut s, bounds());
+        assert_eq!(n, sync_tiles.len());
+        let (_, layout, pending) = s.map_view_async(bounds());
+        assert!(!pending);
+        assert_eq!(layout.tiles(), sync_tiles.as_slice());
+    }
+
+    #[test]
+    fn resize_keeps_the_previous_picture_while_the_new_layout_is_computed() {
+        let mut s = sample_session();
+        let small = Rect { x: 0.0, y: 0.0, w: 300.0, h: 200.0 };
+        let n_small = settle(&mut s, small);
+        assert!(n_small > 1);
+        let gen_before = s.map_generation();
+        // A much bigger window needs a new base layout.
+        let big = Rect { x: 0.0, y: 0.0, w: 1900.0, h: 1000.0 };
+        let (_, stale, pending) = s.map_view_async(big);
+        assert!(pending, "the new size is being computed");
+        assert_eq!(stale.tiles().len(), n_small, "the old tiles are shown, rescaled");
+        for t in stale.tiles() {
+            assert!(t.rect.x >= 0.0 && t.rect.x + t.rect.w <= big.w + 1e-3);
+            assert!(t.rect.y >= 0.0 && t.rect.y + t.rect.h <= big.h + 1e-3);
+        }
+        assert_ne!(s.map_generation(), gen_before, "rescaled tiles are a new generation");
+        settle(&mut s, big);
+    }
+
+    #[test]
+    fn a_background_layout_of_a_replaced_tree_is_dropped() {
+        let mut s = sample_session();
+        let (_, _, pending) = s.map_view_async(bounds());
+        assert!(pending);
+        s.replace_tree(Tree::new("other"));
+        let n = settle(&mut s, bounds());
+        assert_eq!(n, 1, "only the root of the new tree");
+        assert_eq!(s.map.cache.as_ref().map(|(k, _)| k.revision), Some(s.revision()));
+    }
+
+    #[test]
+    fn async_layout_with_invalid_bounds_is_empty_and_not_pending() {
+        let mut s = sample_session();
+        let (_, layout, pending) = s.map_view_async(Rect::default());
+        assert!(layout.tiles().is_empty() && !pending);
+    }
+
     #[test]
     fn large_tree_tile_count_is_bounded() {
         let mut tree = Tree::new("root");
@@ -388,7 +598,7 @@ mod tests {
         tree.aggregate();
         assert!(tree.len() > 200_000);
         let mut s = Session::new();
-        s.tree = tree;
+        s.tree = std::sync::Arc::new(tree);
         s.tree_replaced();
         let n = s.map_layout(bounds()).tiles().len();
         assert!(n > 200 && n <= LayoutOptions::default().max_tiles, "tile count {n}");

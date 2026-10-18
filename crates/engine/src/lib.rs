@@ -31,6 +31,7 @@ use dirustat_model::{SizeMode, Tree};
 use dirustat_scan::{ScanBackend, ScanHandle, empty_tree};
 use dirustat_treemap::{Rect, squarify};
 use std::fmt;
+use std::sync::Arc;
 
 /// Command execution error. `run` must return it instead of panicking, for any params.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -84,7 +85,7 @@ impl std::error::Error for CommandError {}
 /// Session state: the current tree and derived data.
 #[derive(Debug)]
 pub struct Session {
-    tree: Tree,
+    tree: Arc<Tree>,
     /// Bumped whenever the tree is replaced (cache key for derived data).
     revision: u64,
     map: MapState,
@@ -114,7 +115,7 @@ struct PendingScan {
 impl Session {
     pub fn new() -> Self {
         Self {
-            tree: empty_tree(""),
+            tree: Arc::new(empty_tree("")),
             revision: 0,
             map: MapState::new(),
             scan: None,
@@ -158,7 +159,7 @@ impl Session {
 
     /// Installs a prebuilt tree as the current one (demo data, tests); bumps the revision.
     pub fn replace_tree(&mut self, tree: Tree) {
-        self.tree = tree;
+        self.tree = Arc::new(tree);
         self.tree_replaced();
     }
 
@@ -178,7 +179,7 @@ impl Session {
             return Ok(false);
         }
         self.last_scan = Some(LastScan { backend: outcome.backend, fallback_reason: outcome.fallback_reason });
-        self.tree = outcome.tree;
+        self.tree = Arc::new(outcome.tree);
         self.tree_replaced();
         Ok(true)
     }

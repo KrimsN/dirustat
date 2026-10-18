@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-18 · G-042 background treemap layout · Claude
+- Landed: `Session.tree` is an `Arc<Tree>`; `map_poll` / `map_ready_view` / `map_view_async` run the hierarchical layout on a background thread (one at a time). While it runs the map keeps the previous layout of the same tree and size mode, rescaled to the new bounds; the panel shows "Laying out..." and repaints every 30 ms. A layout of a replaced tree is dropped, a dead layout thread caches an empty layout (no retry loop), a failed thread spawn falls back to computing inline. The UI colour caches are keyed by a layout generation.
+- Numbers: engine tests 85 -> 89 (async arrival equals sync result, resize keeps the old picture inside the bounds, replaced tree drops the result, invalid bounds).
+- Not verified: resize on `1m-seed1` in the real window (frame times), screenshot right after a scan can still show the "Laying out..." state for a few frames.
+- Still open: G-040, G-045, G-053-G-055.
+
 ## 2026-10-18 · QA fixes · Claude
 - Landed (20 commits, grouped by crate): treemap QA-2 (tiles expanded largest-first, cap cuts the smallest), QA-1 (undrawable children merged into a remainder tile), QA-102 (layout bounds quantized, cached tiles rescaled on resize). scan QA-3 (Windows hardlinks deduplicated via the safe `dirustat_ntfs::file_identity` wrapper), QA-5 (allocated-size policy documented and pinned). control QA-4 (UNC guard for every spelling and every path-taking command), QA-6 (pre-auth slots and rate budget separate), QA-7 (`ui.screenshot` targets restricted for remote callers), QA-8 (`session.tree` rejects limit 0), QA-9 (protocol docs fixed, float request ids rejected), QA-112 (scan root normalized, `tree.path` joined with one separator). ui QA-103, QA-104, QA-105, QA-106, QA-107, QA-108, QA-109, QA-113 (too-small hint), QA-115 (partial).
 - Numbers: portable scan of the 100k fixture 0.04 s -> about 1.1 s because every non-empty file is now opened for its hardlink identity (G-040). `cargo xtask ci` green.

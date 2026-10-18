@@ -74,12 +74,17 @@ pub fn node_path(tree: &Tree, node: NodeId) -> String {
 /// Per-tile colours, cached across frames in egui's temp memory.
 #[derive(Clone)]
 struct ColorCache {
-    key: (u64, [u32; 2], bool),
+    key: (u64, u64, [u32; 2], bool),
     colors: Arc<Vec<Rgba>>,
 }
 
-fn cache_key(session: &Session, bounds: Rect) -> (u64, [u32; 2], bool) {
-    (session.revision(), [bounds.w.to_bits(), bounds.h.to_bits()], session.map_size_mode() == SizeMode::Allocated)
+fn cache_key(session: &Session, bounds: Rect) -> (u64, u64, [u32; 2], bool) {
+    (
+        session.revision(),
+        session.map_generation(),
+        [bounds.w.to_bits(), bounds.h.to_bits()],
+        session.map_size_mode() == SizeMode::Allocated,
+    )
 }
 
 /// Draws the panel. Clicking selects the tile under the pointer through the `select.node` command.
@@ -92,6 +97,8 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     }
     let (response, painter) = ui.allocate_painter(egui::vec2(bounds.w, bounds.h), Sense::click());
     let origin = response.rect.min;
+    // The layout is computed on a background thread; until it arrives the previous one is shown.
+    let layout_pending = session.map_poll(bounds);
     let key = cache_key(session, bounds);
     let cache_id = ui.id().with("map_colors");
     let cached: Option<ColorCache> = ui.data(|d| d.get_temp::<ColorCache>(cache_id));
@@ -108,7 +115,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
         None
     };
 
-    let (tree, layout) = session.map_view(bounds);
+    let (tree, layout) = session.map_ready_view();
     let tiles = layout.tiles();
     let hovered_tile: Option<MapTile> = pointer.and_then(|(x, y)| layout.tile_at(x, y)).copied();
     let hovered_node = hovered_tile.map(|t| t.node);
@@ -134,7 +141,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     let ext_hits: Option<Arc<Vec<bool>>> = state.selected_ext.as_deref().map(|want| {
         let id = ui.id().with("map_ext_hits");
         let hit_key = (key, want.to_owned());
-        if let Some((k, v)) = ui.data(|d| d.get_temp::<(((u64, [u32; 2], bool), String), Arc<Vec<bool>>)>(id))
+        if let Some((k, v)) = ui.data(|d| d.get_temp::<(((u64, u64, [u32; 2], bool), String), Arc<Vec<bool>>)>(id))
             && k == hit_key
         {
             return v;
@@ -192,6 +199,17 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     }
     if let Some(screen) = selected_rect {
         painter.rect_stroke(screen, 0.0, Stroke::new(2.0, Tokens::color(tokens.accent)), StrokeKind::Inside);
+    }
+    if layout_pending {
+        painter.text(
+            response.rect.left_top() + egui::vec2(8.0, 6.0),
+            egui::Align2::LEFT_TOP,
+            "Laying out...",
+            egui::FontId::proportional(12.0),
+            Tokens::color(tokens.text_muted),
+        );
+        // Poll again soon; the layout thread does not wake the UI by itself.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
     }
 
     let tooltip = hovered_tile.and_then(|t| {
@@ -292,6 +310,13 @@ mod tests {
         let (mut s, _dir) = scanned_session();
         let mut st = UiState::default();
         let ctx = egui::Context::default();
+        // The first frame only starts the background layout; frames follow until it has arrived.
+        run_frame(&ctx, &mut s, &mut st, vec![]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while s.map_poll(bounds_for_size(400.0, 300.0)) {
+            assert!(std::time::Instant::now() < deadline, "background layout never finished");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
         let painted = run_frame(&ctx, &mut s, &mut st, vec![]);
         assert!(painted >= 4, "painted {painted} shapes");
         assert!(s.map_state_view().tile_count >= 4);
