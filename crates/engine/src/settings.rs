@@ -131,9 +131,14 @@ impl Default for Settings {
 /// Keeps the valid, distinct exclusion patterns, at most `MAX_EXCLUDES` of them.
 fn sanitized_excludes(list: Vec<String>) -> Vec<String> {
     let mut kept: Vec<String> = Vec::new();
+    let mut total = 0usize;
     for p in list {
         let valid = !p.is_empty() && !p.contains('\0') && p.chars().count() <= dirustat_scan::MAX_PATTERN_CHARS;
         if valid && !kept.contains(&p) {
+            total = total.saturating_add(p.chars().count());
+            if total > dirustat_scan::MAX_EXCLUDES_TOTAL_CHARS {
+                break;
+            }
             kept.push(p);
         }
         if kept.len() >= dirustat_scan::MAX_EXCLUDES {

@@ -4,6 +4,10 @@ use crate::error::{PlatformError, Result};
 use crate::{DriveInfo, PlatformServices, SpaceInfo};
 use std::path::Path;
 
+/// Why a path cannot be recycled safely (the engine appends the `file.delete_permanent` hint).
+#[cfg(windows)]
+const NO_BIN: &str = "no recycle bin for this volume (network, removable or unknown drive type)";
+
 /// Real services: full on Windows, `Unsupported` elsewhere (after validating the input, so a
 /// hostile path is reported the same way on every OS).
 #[derive(Clone, Copy, Debug, Default)]
@@ -25,7 +29,35 @@ impl PlatformServices for SystemPlatform {
     fn move_to_recycle_bin(&self, path: &Path) -> Result<()> {
         let text = crate::path::validate_absolute(path)?;
         crate::path::require_exists(path, text)?;
-        trash::delete(path).map_err(|err| PlatformError::Failed { op: "recycle", message: err.to_string() })
+        // `trash::delete` falls back to permanent deletion where there is no bin (network and
+        // removable volumes) or the item is larger than the bin allows. Only fixed local disks are
+        // trusted, so the engine can report an error and suggest `file.delete_permanent` instead.
+        let root = crate::path::drive_root(text).ok_or(PlatformError::Unsupported(NO_BIN))?;
+        let kind = crate::win32::drive_type(&root).ok_or(PlatformError::Unsupported(NO_BIN))?;
+        if !crate::path::drive_type_has_recycle_bin(kind) {
+            return Err(PlatformError::Unsupported(NO_BIN));
+        }
+        trash::delete(path).map_err(|err| PlatformError::Failed { op: "recycle", message: err.to_string() })?;
+        if path.symlink_metadata().is_ok() {
+            return Err(PlatformError::Failed {
+                op: "recycle",
+                message: "the item is still there after recycling".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()> {
+        let from_text = crate::path::validate_absolute(from)?;
+        let to_text = crate::path::validate_absolute(to)?;
+        crate::path::require_exists(from, from_text)?;
+        crate::win32::move_no_replace(from_text, to_text).map_err(|err| match err.kind() {
+            std::io::ErrorKind::AlreadyExists => PlatformError::Failed {
+                op: "move",
+                message: "the destination already exists; nothing was overwritten".to_owned(),
+            },
+            _ => PlatformError::from_io("move", from_text, &err),
+        })
     }
 
     fn reveal_in_file_manager(&self, path: &Path) -> Result<()> {

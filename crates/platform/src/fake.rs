@@ -19,6 +19,7 @@ pub enum PlatformCall {
     Reveal(PathBuf),
     Properties(PathBuf),
     OpenDefault(PathBuf),
+    Rename(PathBuf, PathBuf),
 }
 
 static NEXT_BIN: AtomicU64 = AtomicU64::new(0);
@@ -31,6 +32,10 @@ struct State {
     fail_with: Option<PlatformError>,
     binned: Vec<PathBuf>,
     next_item: u64,
+    /// Behave like a volume without a recycle bin (network, removable).
+    no_bin: bool,
+    /// Report a successful recycle without moving anything (a misbehaving shell).
+    leave_in_place: bool,
 }
 
 /// Fake services. Input is validated like the real implementation, then the call is recorded.
@@ -88,6 +93,16 @@ impl FakePlatform {
         self.lock().fail_with = err;
     }
 
+    /// Makes `move_to_recycle_bin` fail with `Unsupported` like a volume that has no recycle bin.
+    pub fn set_no_recycle_bin(&self, no_bin: bool) {
+        self.lock().no_bin = no_bin;
+    }
+
+    /// Makes `move_to_recycle_bin` report success without moving the item (a shell that lied).
+    pub fn set_leave_in_place(&self, leave: bool) {
+        self.lock().leave_in_place = leave;
+    }
+
     /// All calls so far, oldest first.
     pub fn calls(&self) -> Vec<PlatformCall> {
         self.lock().calls.clone()
@@ -138,6 +153,12 @@ impl PlatformServices for FakePlatform {
         require_exists(path, text)?;
         let item = {
             let mut st = self.lock();
+            if st.no_bin {
+                return Err(PlatformError::Unsupported("no recycle bin for this volume"));
+            }
+            if st.leave_in_place {
+                return Ok(());
+            }
             st.next_item = st.next_item.saturating_add(1);
             st.next_item
         };
@@ -147,6 +168,20 @@ impl PlatformServices for FakePlatform {
         std::fs::rename(path, &target).map_err(|e| PlatformError::from_io("recycle", text, &e))?;
         self.lock().binned.push(target);
         Ok(())
+    }
+
+    fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()> {
+        let from_text = validate_absolute(from)?;
+        validate_absolute(to)?;
+        self.begin(PlatformCall::Rename(from.to_path_buf(), to.to_path_buf()))?;
+        require_exists(from, from_text)?;
+        if to.symlink_metadata().is_ok() {
+            return Err(PlatformError::Failed {
+                op: "move",
+                message: "the destination already exists; nothing was overwritten".to_owned(),
+            });
+        }
+        std::fs::rename(from, to).map_err(|e| PlatformError::from_io("move", from_text, &e))
     }
 
     fn reveal_in_file_manager(&self, path: &Path) -> Result<()> {
@@ -219,6 +254,35 @@ mod tests {
         assert_eq!(fake.drives(), Err(PlatformError::Unsupported("test")));
         fake.set_failure(None);
         assert!(fake.drives().is_ok());
+    }
+
+    #[test]
+    fn no_bin_and_lying_shell_behaviours() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let fake = FakePlatform::new();
+        fake.set_no_recycle_bin(true);
+        assert!(matches!(fake.move_to_recycle_bin(&file), Err(PlatformError::Unsupported(_))));
+        assert!(file.exists());
+        fake.set_no_recycle_bin(false);
+        fake.set_leave_in_place(true);
+        assert_eq!(fake.move_to_recycle_bin(&file), Ok(()));
+        assert!(file.exists() && fake.binned().is_empty());
+    }
+
+    #[test]
+    fn rename_never_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, c) = (dir.path().join("a"), dir.path().join("b"), dir.path().join("c"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let fake = FakePlatform::new();
+        assert!(matches!(fake.rename_no_replace(&a, &b), Err(PlatformError::Failed { .. })));
+        assert_eq!(std::fs::read(&b).unwrap(), b"b");
+        assert_eq!(fake.rename_no_replace(&a, &c), Ok(()));
+        assert!(!a.exists() && c.exists());
+        assert!(matches!(fake.rename_no_replace(&a, &c), Err(PlatformError::NotFound(_))));
     }
 
     #[test]

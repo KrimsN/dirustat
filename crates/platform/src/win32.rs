@@ -1,12 +1,12 @@
-//! The only `unsafe` in this crate (ADR 0009): thin Win32 calls for drive enumeration, free space
-//! and the shell properties window. Every function takes and returns safe values.
+//! The only `unsafe` in this crate (ADR 0009): thin Win32 calls for drive enumeration, drive type,
+//! free space, a no-replace rename and the shell properties window. Every function takes and returns safe values.
 #![allow(unsafe_code)]
 
 use crate::{DriveInfo, MAX_DRIVES, SpaceInfo};
 use core::ptr::{null, null_mut};
 
 use windows_sys::Win32::Storage::FileSystem::{
-    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW,
+    GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, MoveFileExW,
 };
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
 use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
@@ -75,6 +75,24 @@ pub(crate) fn drives() -> Vec<DriveInfo> {
         unsafe { SetThreadErrorMode(old_mode, null_mut()) };
     }
     out
+}
+
+/// `GetDriveTypeW` code of the volume root `root` (`X:\`); `None` when `root` holds a NUL.
+pub(crate) fn drive_type(root: &str) -> Option<u32> {
+    let wide_root = wide(root)?;
+    // SAFETY: `wide_root` is a NUL-terminated UTF-16 string that outlives the call.
+    Some(unsafe { GetDriveTypeW(wide_root.as_ptr()) })
+}
+
+/// Renames `from` to `to` without replacing an existing destination and without a copy
+/// fallback (`MoveFileExW` with no flags fails when `to` exists or the volumes differ).
+pub(crate) fn move_no_replace(from: &str, to: &str) -> std::io::Result<()> {
+    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL");
+    let (src, dst) = (wide(from).ok_or_else(invalid)?, wide(to).ok_or_else(invalid)?);
+    // SAFETY: both arguments are NUL-terminated UTF-16 strings that outlive the call; flags 0 means
+    // "rename on one volume, never replace".
+    let ok = unsafe { MoveFileExW(src.as_ptr(), dst.as_ptr(), 0) };
+    if ok == 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }
 }
 
 /// Capacity of the volume containing `path`; `None` on any failure.

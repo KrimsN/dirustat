@@ -33,6 +33,29 @@ pub fn require_exists(path: &Path, text: &str) -> Result<()> {
     }
 }
 
+/// Win32 `GetDriveTypeW` code of a fixed (internal) disk, the only kind with a recycle bin that
+/// this layer trusts.
+pub const DRIVE_TYPE_FIXED: u32 = 3;
+
+/// The volume root `X:\` of a path on a lettered volume (`C:\x`, `c:/x`, `\\?\C:\x`); `None` for
+/// network (`\\server\share`), device, relative or otherwise unrecognized paths.
+pub fn drive_root(text: &str) -> Option<String> {
+    let unified = text.replace('/', "\\");
+    let local = unified.strip_prefix(r"\\?\").unwrap_or(&unified);
+    let mut chars = local.chars();
+    let letter = chars.next().filter(char::is_ascii_alphabetic)?;
+    if chars.next() != Some(':') || chars.next() != Some('\\') {
+        return None;
+    }
+    Some(format!("{}:\\", letter.to_ascii_uppercase()))
+}
+
+/// Whether a drive of type `kind` (`GetDriveTypeW`) has a recycle bin we can rely on: fixed disks
+/// only. Network, removable, optical, RAM and unknown drives delete permanently (or fail) instead.
+pub fn drive_type_has_recycle_bin(kind: u32) -> bool {
+    kind == DRIVE_TYPE_FIXED
+}
+
 /// Builds the single raw argument `/select,"<path>"` for `explorer.exe`. Explorer parses its own
 /// command line and needs backslashes and the quotes around the path, so the argument is passed
 /// without the usual argv quoting (and without any shell). A `"` can never occur in a Windows path,
@@ -75,6 +98,28 @@ mod tests {
     fn explorer_arg_is_quoted_and_rejects_quotes() {
         assert_eq!(explorer_select_arg("C:/a b/c.txt").as_deref(), Ok(r#"/select,"C:\a b\c.txt""#));
         assert!(explorer_select_arg(r#"C:\a" /root,"D:\"#).is_err());
+    }
+
+    #[test]
+    fn drive_roots_and_recycle_bin_support() {
+        for (input, want) in [
+            (r"C:\x\y", Some(r"C:\")),
+            ("d:/x", Some(r"D:\")),
+            (r"\\?\E:\x", Some(r"E:\")),
+            (r"\\server\share\x", None),
+            (r"\\?\UNC\server\share", None),
+            (r"\\.\C:", None),
+            ("C:rel", None),
+            ("rel", None),
+            ("", None),
+        ] {
+            assert_eq!(drive_root(input).as_deref(), want, "{input}");
+        }
+        assert!(drive_type_has_recycle_bin(DRIVE_TYPE_FIXED));
+        // Unknown(0), no root(1), removable(2), remote(4), cdrom(5), ramdisk(6).
+        for kind in [0, 1, 2, 4, 5, 6, u32::MAX] {
+            assert!(!drive_type_has_recycle_bin(kind), "{kind}");
+        }
     }
 
     #[test]

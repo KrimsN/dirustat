@@ -17,7 +17,9 @@ mod win32;
 
 pub use error::{PlatformError, Result};
 pub use fake::{FakePlatform, PlatformCall};
-pub use path::{MAX_PATH_UNITS, explorer_select_arg, validate_absolute};
+pub use path::{
+    DRIVE_TYPE_FIXED, MAX_PATH_UNITS, drive_root, drive_type_has_recycle_bin, explorer_select_arg, validate_absolute,
+};
 pub use system::SystemPlatform;
 
 use serde::{Deserialize, Serialize};
@@ -59,6 +61,13 @@ pub trait PlatformServices: Send + Sync + Debug {
     /// Moves a file or folder to the recycle bin (reversible). The only deletion primitive of the
     /// platform layer; callers own confirmation, dry-run and logging (`docs/safety.md`).
     fn move_to_recycle_bin(&self, path: &Path) -> Result<()>;
+
+    /// Renames `from` to `to` on one volume and fails (without changing anything) when `to`
+    /// already exists, with no copy fallback. Optional: defaults to `Unsupported`, so a move is
+    /// refused rather than risking an overwrite where no atomic primitive exists.
+    fn rename_no_replace(&self, _from: &Path, _to: &Path) -> Result<()> {
+        Err(PlatformError::Unsupported("rename_no_replace"))
+    }
 
     /// Opens the file manager with `path` selected. Launches an external window.
     fn reveal_in_file_manager(&self, path: &Path) -> Result<()>;

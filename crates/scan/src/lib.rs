@@ -49,7 +49,9 @@ use dirustat_model::{NodeData, NodeId, NodeKind, Tree};
 mod glob;
 mod mft;
 
-pub use glob::{Excludes, Glob, GlobError, MAX_EXCLUDES, MAX_PATTERN_CHARS};
+pub use glob::{
+    Excludes, Glob, GlobError, MAX_EXCLUDES, MAX_EXCLUDES_TOTAL_CHARS, MAX_PATTERN_CHARS, excludes_total_len_ok,
+};
 #[doc(hidden)]
 pub use mft::bench_scan_mft_mem;
 pub use mft::{MftError, MftLimits, MftScan, MftStats, MftTimings};
@@ -234,9 +236,17 @@ pub struct ScanHandle {
     cancel: Arc<AtomicBool>,
     counters: Arc<Counters>,
     thread: JoinHandle<Result<ScanOutcome, ScanError>>,
+    /// The scan was configured with a non-empty exclusion list, so its tree omits entries that exist.
+    used_exclusions: bool,
 }
 
 impl ScanHandle {
+    /// Whether this scan skips entries on purpose (a non-empty exclusion list), which makes its
+    /// tree incomplete compared with the disk.
+    pub fn used_exclusions(&self) -> bool {
+        self.used_exclusions
+    }
+
     /// Asks the scan to stop; `join` then returns the partial tree.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
@@ -329,6 +339,7 @@ fn spawn_scan(root: &Path, opts: ScanOptions, check_in_thread: bool) -> Result<S
     let cancel = Arc::new(AtomicBool::new(false));
     let counters = Arc::new(Counters::default());
     let root = root.to_path_buf();
+    let used_exclusions = !opts.exclude.is_empty();
     let thread = {
         let (cancel, counters) = (Arc::clone(&cancel), Arc::clone(&counters));
         std::thread::spawn(move || {
@@ -350,7 +361,7 @@ fn spawn_scan(root: &Path, opts: ScanOptions, check_in_thread: bool) -> Result<S
             })
         })
     };
-    Ok(ScanHandle { cancel, counters, thread })
+    Ok(ScanHandle { cancel, counters, thread, used_exclusions })
 }
 
 /// The MFT attempt of [`run_auto`]; injectable so fallbacks are testable without a real volume.

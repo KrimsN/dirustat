@@ -121,13 +121,33 @@ pub struct Excludes {
 /// Most exclusion patterns a set holds.
 pub const MAX_EXCLUDES: usize = 256;
 
+/// Most characters all patterns of one set may hold together (every entry of a scan is matched
+/// against every pattern, so the total length bounds the per-entry cost).
+pub const MAX_EXCLUDES_TOTAL_CHARS: usize = 16 * 1024;
+
+/// Whether the combined length of `patterns` stays within [`MAX_EXCLUDES_TOTAL_CHARS`].
+pub fn excludes_total_len_ok(patterns: &[String]) -> bool {
+    let mut total = 0usize;
+    for p in patterns {
+        total = total.saturating_add(p.chars().take(MAX_PATTERN_CHARS.saturating_add(1)).count());
+        if total > MAX_EXCLUDES_TOTAL_CHARS {
+            return false;
+        }
+    }
+    true
+}
+
 impl Excludes {
     /// Compiles `patterns`; invalid ones (empty, too long, NUL) and those past
-    /// [`MAX_EXCLUDES`] are dropped.
+    /// [`MAX_EXCLUDES`] or past [`MAX_EXCLUDES_TOTAL_CHARS`] in total are dropped.
     pub fn new(patterns: &[String]) -> Self {
         let ci = cfg!(windows);
         let mut set = Self::default();
+        let mut budget = MAX_EXCLUDES_TOTAL_CHARS;
         for raw in patterns.iter().take(MAX_EXCLUDES) {
+            let len = raw.chars().take(MAX_PATTERN_CHARS.saturating_add(1)).count();
+            let Some(left) = budget.checked_sub(len) else { break };
+            budget = left;
             let has_sep = raw.contains(['/', '\\']);
             let normalized = raw.replace('\\', "/");
             let Ok(glob) = Glob::new(if has_sep { &normalized } else { raw }, ci) else { continue };
@@ -226,5 +246,16 @@ mod tests {
         assert!(Excludes::new(&["a\0".into()]).is_empty());
         let many: Vec<String> = (0..MAX_EXCLUDES + 50).map(|i| format!("n{i}")).collect();
         assert_eq!(Excludes::new(&many).names.len(), MAX_EXCLUDES);
+    }
+
+    #[test]
+    fn total_pattern_length_is_capped() {
+        let long = "a".repeat(MAX_PATTERN_CHARS - 4);
+        let many: Vec<String> = (0..MAX_EXCLUDES).map(|i| format!("{long}{i:04}")).collect();
+        assert!(!excludes_total_len_ok(&many));
+        let set = Excludes::new(&many);
+        assert!(set.names.len() <= MAX_EXCLUDES_TOTAL_CHARS / MAX_PATTERN_CHARS);
+        assert!(!set.is_empty());
+        assert!(excludes_total_len_ok(&["*.tmp".to_owned(), "node_modules".to_owned()]));
     }
 }

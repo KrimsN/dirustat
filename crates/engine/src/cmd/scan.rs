@@ -2,7 +2,7 @@
 
 use super::{CommandSpec, no_params, parse_params};
 use crate::{CommandError, PendingScan, Session};
-use dirustat_scan::{Glob, MAX_EXCLUDES, ScanOptions, start_deferred};
+use dirustat_scan::{Glob, MAX_EXCLUDES, MAX_EXCLUDES_TOTAL_CHARS, ScanOptions, excludes_total_len_ok, start_deferred};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -56,6 +56,11 @@ pub(super) fn checked_excludes(list: Vec<String>) -> Result<Vec<String>, Command
         if let Err(e) = Glob::new(pattern, false) {
             return Err(CommandError::InvalidParams(format!("bad exclude pattern: {e}")));
         }
+    }
+    if !excludes_total_len_ok(&list) {
+        return Err(CommandError::InvalidParams(format!(
+            "exclude patterns hold more than {MAX_EXCLUDES_TOTAL_CHARS} characters in total"
+        )));
     }
     Ok(list)
 }
