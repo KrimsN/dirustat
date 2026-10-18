@@ -18,6 +18,7 @@ use super::platform::platform_error;
 use super::select::node_by_index;
 use super::tree::{kind_name, page_limit};
 use super::{CommandSpec, always, parse_params};
+use crate::is_unc_path;
 use crate::journal::{JournalEntry, now_secs};
 use crate::protected::{ProtectedPaths, key_of};
 use crate::{CommandError, Session, fsops, prune};
@@ -37,11 +38,12 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Preview deletion",
             menu: "",
             shortcut: None,
-            params_doc: "{\"id\"|\"path\": see file.delete, \"mode\"?: \"recycle\" (default) | \"permanent\"}. Read-only: \
-                runs every check of the real command (protected path, stale tree, link rules) and returns the report \
-                of what would be affected: {dry_run: true, mode, path, kind, count, files, dirs, links, size, \
-                size_logical, size_allocated, paths: [string] (at most 200, the target first), truncated}. Needs no \
-                confirm.",
+            params_doc: "{\"id\"+\"revision\"|\"path\": see file.delete, \"mode\"?: \"recycle\" (default) | \"permanent\"}. \
+                Read-only: runs every check of the real command (protected path, stale tree, link rules) and returns \
+                the report of what would be affected: {dry_run: true, mode, path, kind, count, files, dirs, links, \
+                size, size_logical, size_allocated, paths: [string] (at most 200, the target first), truncated, \
+                partial_tree}. partial_tree: the scan used exclusions or the subtree had read errors, so the tree may \
+                omit entries that exist on disk. Needs no confirm.",
             destructive: false,
             enabled: has_tree,
             run: run_preview,
@@ -51,13 +53,15 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Delete (recycle bin)",
             menu: "File/Delete",
             shortcut: Some("Delete"),
-            params_doc: "{\"id\": u64} arena index of a node, or {\"path\": string} an absolute path that resolves to a \
-                node of the current tree (exactly one), \"dry_run\"?: bool (default false; changes nothing and \
+            params_doc: "{\"id\": u64, \"revision\": u64} arena index of a node with the Session revision at which it \
+                was read (revision is required with id; any other current revision is stale_tree and nothing \
+                happens), or {\"path\": string} an absolute path that resolves to a node of the current tree \
+                (exactly one of id/path), \"dry_run\"?: bool (default false; changes nothing and \
                 returns the report). Moves the item to the recycle bin. Needs confirm: true even for dry_run (use \
                 file.delete_preview to look first). Refuses protected paths (protected_path), a tree that no longer \
                 matches the disk (stale_tree) and links/junctions (use file.delete_permanent, which removes the link \
                 itself). Returns {dry_run, mode, path, kind, count, files, dirs, links, size, size_logical, \
-                size_allocated, paths, truncated} plus, when done: {done, tree_updated, revision, ids_invalidated}; \
+                size_allocated, paths, truncated, partial_tree} plus, when done: {done, tree_updated, revision, ids_invalidated}; \
                 node ids are invalid after a successful deletion.",
             destructive: true,
             enabled: has_tree,
@@ -68,8 +72,10 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Delete permanently",
             menu: "File/Delete permanently",
             shortcut: Some("Shift+Delete"),
-            params_doc: "{\"id\": u64} or {\"path\": string} (exactly one, as file.delete), \"dry_run\"?: bool, \
-                \"i_understand_permanent\": bool must be true unless dry_run (otherwise confirmation_required). \
+            params_doc: "{\"id\": u64, \"revision\": u64} or {\"path\": string} (exactly one, as file.delete), \
+                \"dry_run\"?: bool, \"i_understand_permanent\": bool must be true unless dry_run (otherwise \
+                confirmation_required), \"i_understand_partial\"?: bool, required to delete a folder whose report \
+                says partial_tree: true (entries missing from the tree would be deleted too). \
                 Deletes WITHOUT the recycle bin; cannot be undone. UIs must show an explicit warning first. Links are \
                 removed themselves, never followed. Same refusals and result as file.delete with mode \"permanent\".",
             destructive: true,
@@ -81,10 +87,12 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Move",
             menu: "",
             shortcut: None,
-            params_doc: "{\"id\": u64} or {\"path\": string} (exactly one, as file.delete), \"destination\": string \
-                absolute path the item gets (must not exist, its parent must be an existing directory, neither \
-                may be protected, not inside the item itself), \"dry_run\"?: bool. Plain rename on one volume \
-                (no overwrite, no copy fallback). Returns the delete report with mode \"move\" plus {destination, \
+            params_doc: "{\"id\": u64, \"revision\": u64} or {\"path\": string} (exactly one, as file.delete), \
+                \"destination\": string absolute local path the item gets (must not exist, its parent must be an \
+                existing directory, neither may be protected, not inside the item itself, no `:` and no trailing \
+                dot or space in any name, no network path), \"dry_run\"?: bool. No-replace rename on one volume \
+                (MoveFileExW without REPLACE_EXISTING; no overwrite, no copy fallback; unsupported where the \
+                platform has no such primitive). Returns the delete report with mode \"move\" plus {destination, \
                 rescan_recommended} (true when the destination is inside the scan root). Same refusals as file.delete.",
             destructive: true,
             enabled: has_tree,
@@ -130,6 +138,7 @@ impl Mode {
 #[serde(deny_unknown_fields)]
 struct DeleteParams {
     id: Option<u64>,
+    revision: Option<u64>,
     path: Option<String>,
     dry_run: Option<bool>,
 }
@@ -138,15 +147,18 @@ struct DeleteParams {
 #[serde(deny_unknown_fields)]
 struct PermanentParams {
     id: Option<u64>,
+    revision: Option<u64>,
     path: Option<String>,
     dry_run: Option<bool>,
     i_understand_permanent: Option<bool>,
+    i_understand_partial: Option<bool>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PreviewParams {
     id: Option<u64>,
+    revision: Option<u64>,
     path: Option<String>,
     mode: Option<PreviewMode>,
 }
@@ -162,6 +174,7 @@ enum PreviewMode {
 #[serde(deny_unknown_fields)]
 struct MoveParams {
     id: Option<u64>,
+    revision: Option<u64>,
     path: Option<String>,
     destination: String,
     dry_run: Option<bool>,
@@ -180,6 +193,8 @@ struct Plan {
     path: String,
     scan_root: String,
     kind: NodeKind,
+    /// The tree may omit entries of this subtree that exist on disk (exclusions, read errors).
+    partial: bool,
     report: Report,
 }
 
@@ -192,6 +207,8 @@ struct Report {
     allocated: u64,
     paths: Vec<String>,
     truncated: bool,
+    /// How many path strings were built (never more than `MAX_LISTED`).
+    built_paths: usize,
 }
 
 impl Report {
@@ -207,14 +224,42 @@ impl Report {
     }
 }
 
-/// Resolves `{id | path}` to a node of the current tree.
-fn resolve_node(session: &Session, id: Option<u64>, path: Option<&str>) -> Result<NodeId, CommandError> {
-    match (id, path) {
+/// How a destructive command names its target: `path`, or `id` together with the `revision` at
+/// which the id was read (arena ids change with every prune).
+#[derive(Clone, Copy)]
+struct Addr<'a> {
+    id: Option<u64>,
+    revision: Option<u64>,
+    path: Option<&'a str>,
+}
+
+/// Resolves `{id + revision | path}` to a node of the current tree. A `revision` that is not the
+/// session's current one is `stale_tree` whatever the addressing; an `id` without `revision` is
+/// `invalid_params`. Nothing is touched.
+fn resolve_node(session: &Session, addr: Addr<'_>) -> Result<NodeId, CommandError> {
+    if let Some(rev) = addr.revision
+        && rev != session.revision()
+    {
+        return Err(CommandError::StaleTree(format!(
+            "node ids were read at revision {rev} but the tree is at revision {}; re-read the ids",
+            session.revision()
+        )));
+    }
+    match (addr.id, addr.path) {
+        (Some(_), None) if addr.revision.is_none() => Err(CommandError::InvalidParams(
+            "`id` needs `revision` (the revision at which the id was obtained); or address by `path`".to_owned(),
+        )),
         (Some(index), None) => node_by_index(session.tree(), index)
             .ok_or_else(|| CommandError::InvalidParams(format!("no node with id {index}"))),
         (None, Some(path)) => node_for_path(session, path),
         _ => Err(CommandError::InvalidParams("give exactly one of `id` or `path`".to_owned())),
     }
+}
+
+/// Whether the tree may omit entries of `node`'s subtree that exist on disk: the scan used
+/// exclusions, or some entry below could not be read.
+pub(super) fn subtree_partial(session: &Session, node: NodeId) -> bool {
+    session.partial_scan || session.tree().get(node).is_some_and(|n| n.error_count() > 0 || n.data().error)
 }
 
 /// Walks the tree from the root along the normalized `path`; case-insensitive on Windows.
@@ -236,13 +281,14 @@ pub(super) fn node_for_path(session: &Session, path: &str) -> Result<NodeId, Com
     Ok(cur)
 }
 
-/// Iterative walk of the subtree: counts, saturating sums and a capped path listing.
-fn build_report(session: &Session, node: NodeId, path: &str) -> Report {
+/// Iterative walk of the subtree: counts, saturating sums and a capped path listing. Path strings
+/// are built lazily, only for the first `MAX_LISTED` nodes in walk order, so a huge directory
+/// costs counters and a stack of ids, not a string per child.
+fn build_report(session: &Session, node: NodeId) -> Report {
     let tree = session.tree();
-    let sep = if cfg!(windows) { '\\' } else { '/' };
     let mut report = Report::default();
-    let mut stack: Vec<(NodeId, Option<String>)> = vec![(node, Some(path.to_owned()))];
-    while let Some((id, node_path)) = stack.pop() {
+    let mut stack: Vec<NodeId> = vec![node];
+    while let Some(id) = stack.pop() {
         let Some(n) = tree.get(id) else { continue };
         match n.kind() {
             NodeKind::Dir => report.dirs = report.dirs.saturating_add(1),
@@ -251,33 +297,16 @@ fn build_report(session: &Session, node: NodeId, path: &str) -> Report {
         }
         report.logical = report.logical.saturating_add(n.own_size(SizeMode::Logical));
         report.allocated = report.allocated.saturating_add(n.own_size(SizeMode::Allocated));
-        let listed = match node_path {
-            Some(p) if report.paths.len() < MAX_LISTED => {
-                report.paths.push(p.clone());
-                Some(p)
+        if report.paths.len() < MAX_LISTED {
+            if let Some(p) = session.node_path(id) {
+                report.paths.push(p);
+                report.built_paths = report.built_paths.saturating_add(1);
             }
-            Some(_) => {
-                report.truncated = true;
-                None
-            }
-            None => {
-                report.truncated = true;
-                None
-            }
-        };
+        } else {
+            report.truncated = true;
+        }
         if n.kind() == NodeKind::Dir {
-            for child in tree.children(id) {
-                let child_path = listed.as_ref().and_then(|p| {
-                    let name = tree.get(child)?.name();
-                    let mut s = p.clone();
-                    if !s.ends_with(['/', '\\']) {
-                        s.push(sep);
-                    }
-                    s.push_str(name);
-                    Some(s)
-                });
-                stack.push((child, child_path));
-            }
+            stack.extend(tree.children(id));
         }
     }
     report
@@ -299,6 +328,12 @@ pub(super) fn preflight(
     let scan_root = session
         .node_path(tree.root())
         .ok_or_else(|| CommandError::InvalidParams("the tree has no root path".to_owned()))?;
+    if is_unc_path(&scan_root) {
+        return Err(CommandError::ProtectedPath(
+            "destructive commands are disabled when the scan root is a network (UNC) path; scan a local drive path"
+                .to_owned(),
+        ));
+    }
     protected.check(&node_path, &scan_root).map_err(CommandError::ProtectedPath)?;
     fsops::verify_location(&node_path, &scan_root, protected, cfg!(windows))?;
     fsops::verify_matches(Path::new(&node_path), target.kind(), target.data())?;
@@ -313,16 +348,17 @@ pub(super) fn preflight(
 }
 
 /// The shared pre-flight of every destructive command; touches nothing.
-fn plan(session: &Session, id: Option<u64>, path: Option<&str>, mode: Mode) -> Result<Plan, CommandError> {
-    let node = resolve_node(session, id, path)?;
+fn plan(session: &Session, addr: Addr<'_>, mode: Mode) -> Result<Plan, CommandError> {
+    let node = resolve_node(session, addr)?;
     let tree = session.tree();
     let kind = tree.get(node).ok_or_else(|| CommandError::InvalidParams("unknown node".to_owned()))?.kind();
     let scan_root = session
         .node_path(tree.root())
         .ok_or_else(|| CommandError::InvalidParams("the tree has no root path".to_owned()))?;
     let node_path = preflight(session, node, &ProtectedPaths::from_env(), mode)?;
-    let report = build_report(session, node, &node_path);
-    Ok(Plan { node, path: node_path, scan_root, kind, report })
+    let report = build_report(session, node);
+    let partial = subtree_partial(session, node);
+    Ok(Plan { node, path: node_path, scan_root, kind, partial, report })
 }
 
 fn report_json(session: &Session, plan: &Plan, mode: Mode, dry_run: bool) -> Value {
@@ -341,6 +377,7 @@ fn report_json(session: &Session, plan: &Plan, mode: Mode, dry_run: bool) -> Val
         "size_allocated": plan.report.allocated,
         "paths": plan.report.paths,
         "truncated": plan.report.truncated,
+        "partial_tree": plan.partial,
     })
 }
 
@@ -361,13 +398,14 @@ fn run_preview(session: &mut Session, params: &Value) -> Result<Value, CommandEr
         None | Some(PreviewMode::Recycle) => Mode::Recycle,
         Some(PreviewMode::Permanent) => Mode::Permanent,
     };
-    let plan = plan(session, p.id, p.path.as_deref(), mode)?;
+    let plan = plan(session, Addr { id: p.id, revision: p.revision, path: p.path.as_deref() }, mode)?;
     Ok(report_json(session, &plan, mode, true))
 }
 
 fn run_delete(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
     let p: DeleteParams = parse_params(params)?;
-    execute(session, "file.delete", Mode::Recycle, p.id, p.path.as_deref(), p.dry_run.unwrap_or(false), None)
+    let addr = Addr { id: p.id, revision: p.revision, path: p.path.as_deref() };
+    execute(session, "file.delete", Mode::Recycle, addr, p.dry_run.unwrap_or(false), None, false)
 }
 
 fn run_delete_permanent(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
@@ -376,22 +414,62 @@ fn run_delete_permanent(session: &mut Session, params: &Value) -> Result<Value, 
     if !dry_run && p.i_understand_permanent != Some(true) {
         return Err(CommandError::ConfirmationRequired("file.delete_permanent: i_understand_permanent".to_owned()));
     }
-    execute(session, "file.delete_permanent", Mode::Permanent, p.id, p.path.as_deref(), dry_run, None)
+    let addr = Addr { id: p.id, revision: p.revision, path: p.path.as_deref() };
+    execute(
+        session,
+        "file.delete_permanent",
+        Mode::Permanent,
+        addr,
+        dry_run,
+        None,
+        p.i_understand_partial == Some(true),
+    )
 }
 
 fn run_move(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
     let p: MoveParams = parse_params(params)?;
-    execute(session, "file.move", Mode::Move, p.id, p.path.as_deref(), p.dry_run.unwrap_or(false), Some(&p.destination))
+    let addr = Addr { id: p.id, revision: p.revision, path: p.path.as_deref() };
+    execute(session, "file.move", Mode::Move, addr, p.dry_run.unwrap_or(false), Some(&p.destination), false)
+}
+
+/// The first problem with the components of a move destination, for Windows names: `:` would
+/// address an alternate data stream, trailing dots and spaces are silently dropped by Win32, and
+/// the reserved characters cannot occur in a name at all.
+pub(super) fn destination_component_problem(comps: &[String], windows: bool) -> Option<&'static str> {
+    if !windows {
+        return None;
+    }
+    for c in comps {
+        if c.contains(':') {
+            return Some("a name contains `:` (alternate data stream)");
+        }
+        if c.contains(['*', '?', '"', '<', '>', '|']) {
+            return Some("a name contains a reserved character");
+        }
+        if c.ends_with(['.', ' ']) {
+            return Some("a name ends with a dot or a space");
+        }
+    }
+    None
 }
 
 /// Validates the destination of a move; returns it as given. Nothing is touched.
 fn check_destination(plan: &Plan, destination: &str) -> Result<(), CommandError> {
     let windows = cfg!(windows);
     let bad = |why: &str| CommandError::InvalidParams(format!("destination: {why}"));
+    if is_unc_path(destination) {
+        return Err(CommandError::ProtectedPath("destination is a network (UNC) path".to_owned()));
+    }
+    if windows && destination.ends_with(['.', ' ']) {
+        return Err(bad("a name ends with a dot or a space"));
+    }
     let dest_key = key_of(destination, windows).ok_or_else(|| bad("must be an absolute path"))?;
     let src_key = key_of(&plan.path, windows).ok_or_else(|| bad("the source has no absolute path"))?;
     if dest_key.starts_with(&src_key) {
         return Err(bad("cannot move an item into itself"));
+    }
+    if let Some(why) = destination_component_problem(&dest_key.comps, windows) {
+        return Err(bad(why));
     }
     let protected = ProtectedPaths::from_env();
     protected.check(destination, "").map_err(|why| CommandError::ProtectedPath(format!("destination is {why}")))?;
@@ -421,12 +499,12 @@ fn execute(
     session: &mut Session,
     op: &str,
     mode: Mode,
-    id: Option<u64>,
-    path: Option<&str>,
+    addr: Addr<'_>,
     dry_run: bool,
     destination: Option<&str>,
+    allow_partial: bool,
 ) -> Result<Value, CommandError> {
-    let plan = plan(session, id, path, mode)?;
+    let plan = plan(session, addr, mode)?;
     if let Some(dest) = destination {
         check_destination(&plan, dest)?;
     }
@@ -441,8 +519,25 @@ fn execute(
     if dry_run {
         return Ok(out);
     }
+    if mode == Mode::Permanent && plan.kind == NodeKind::Dir && plan.partial && !allow_partial {
+        return Err(CommandError::ConfirmationRequired(
+            "file.delete_permanent: i_understand_partial (the tree may omit entries of this folder that exist on \
+             disk, they would be deleted too)"
+                .to_owned(),
+        ));
+    }
+    // Last look immediately before acting: the same checks again, so the window between the plan
+    // and the action is as small as it can be (the residual race is documented in docs/safety.md).
+    let path = preflight(session, plan.node, &ProtectedPaths::from_env(), mode)?;
     let size = plan.report.size(session.map_size_mode());
-    perform(session, op, mode, &plan.path, destination, size)?;
+    if let Err(err) = perform(session, op, mode, &path, destination, size) {
+        let gone = std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
+        if mode == Mode::Permanent && gone {
+            // It is gone after all (removed half-way or by someone else): keep the tree honest.
+            session.forget_node(plan.node);
+        }
+        return Err(err);
+    }
     let updated = session.forget_node(plan.node);
     if let Some(map) = out.as_object_mut() {
         map.insert("done".to_owned(), json!(true));
@@ -455,6 +550,8 @@ fn execute(
 
 /// Performs one already-checked operation on `path` (recycle, permanent removal or move) and
 /// journals the outcome, success or failure. The tree is not touched; callers prune afterwards.
+/// A failed permanent removal may have deleted part of a folder: the session is then flagged
+/// `rescan_recommended`.
 pub(super) fn perform(
     session: &mut Session,
     op: &str,
@@ -465,13 +562,17 @@ pub(super) fn perform(
 ) -> Result<(), CommandError> {
     let target = Path::new(path);
     let result = match mode {
-        Mode::Recycle => session.platform().move_to_recycle_bin(target).map_err(platform_error),
+        Mode::Recycle => recycle(session, target),
         Mode::Permanent => fsops::remove_permanently(target)
             .map_err(|e| CommandError::Platform(format!("permanent deletion failed: {e}"))),
-        Mode::Move => destination.map_or(Ok(()), |dest| {
-            std::fs::rename(target, dest).map_err(|e| CommandError::Platform(format!("move failed: {e}")))
-        }),
+        Mode::Move => match destination {
+            Some(dest) => session.platform().rename_no_replace(target, Path::new(dest)).map_err(platform_error),
+            None => Ok(()),
+        },
     };
+    if result.is_err() && mode == Mode::Permanent {
+        session.rescan_recommended = true;
+    }
     session.journal.record(JournalEntry {
         time: now_secs(),
         op: op.to_owned(),
@@ -483,6 +584,21 @@ pub(super) fn perform(
         error: result.as_ref().err().map(ToString::to_string),
     });
     result
+}
+
+/// Sends `target` to the recycle bin. A platform without a bin for the volume is `unsupported`
+/// with a pointer to `file.delete_permanent`; a "success" that leaves the item in place is an error.
+fn recycle(session: &Session, target: &Path) -> Result<(), CommandError> {
+    session.platform().move_to_recycle_bin(target).map_err(|e| match platform_error(e) {
+        CommandError::Unsupported(what) => CommandError::Unsupported(format!(
+            "{what}; the item was not touched (use file.delete_permanent to delete it for good)"
+        )),
+        other => other,
+    })?;
+    if std::fs::symlink_metadata(target).is_ok() {
+        return Err(CommandError::Platform("the recycle bin reported success but the item is still there".to_owned()));
+    }
+    Ok(())
 }
 
 fn run_journal(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
@@ -577,7 +693,8 @@ mod tests {
         assert_eq!(dry["paths"][0], sub.as_str());
         assert_eq!(dry["paths"].as_array().unwrap().len(), 4);
         assert_eq!(dry["truncated"], false);
-        let preview = f.s.execute("file.delete_preview", &json!({"id": f.id_of("sub")})).unwrap();
+        let preview =
+            f.s.execute("file.delete_preview", &json!({"id": f.id_of("sub"), "revision": f.s.revision()})).unwrap();
         assert_eq!(preview, dry);
         let perm = f.s.execute("file.delete_preview", &json!({"path": sub, "mode": "permanent"})).unwrap();
         assert_eq!(perm["mode"], "permanent");
@@ -668,7 +785,7 @@ mod tests {
         // The scan root itself, by id and by path with decorations.
         let root = f.root().to_string_lossy().into_owned();
         for p in [
-            json!({"id": 0}),
+            json!({"id": 0, "revision": f.s.revision()}),
             json!({"path": root}),
             json!({"path": format!("{root}{}", std::path::MAIN_SEPARATOR)}),
             json!({"path": format!("{root}/sub/..")}),
@@ -680,7 +797,10 @@ mod tests {
             assert_eq!(f.code("file.delete_permanent", p), "protected_path");
         }
         let dest = f.path_of("elsewhere");
-        assert_eq!(f.code("file.move", json!({"id": 0, "destination": dest, "confirm": true})), "protected_path");
+        assert_eq!(
+            f.code("file.move", json!({"id": 0, "revision": f.s.revision(), "destination": dest, "confirm": true})),
+            "protected_path"
+        );
         assert!(f.root().join("keep.txt").exists());
         assert!(f.fake.calls().is_empty());
     }
@@ -794,7 +914,7 @@ mod tests {
             json!({}),
             json!({"id": u64::MAX}),
             json!({"id": -1}),
-            json!({"id": 0}),
+            json!({"id": 0, "revision": 0}),
             json!({"id": 1, "path": "x"}),
             json!({"path": ""}),
             json!({"path": long}),
@@ -855,6 +975,224 @@ mod tests {
         assert_eq!(out["files"], MAX_LISTED + 25);
         assert_eq!(out["paths"].as_array().unwrap().len(), MAX_LISTED);
         assert_eq!(out["truncated"], true);
+    }
+
+    #[test]
+    fn ids_need_the_revision_they_were_read_at() {
+        let mut f = fixture();
+        let rev = f.s.revision();
+        let (keep, big) = (f.id_of("keep.txt"), f.id_of("big.bin"));
+        // No revision, or a wrong one: refused without side effects, for every command.
+        for id in ["file.delete", "file.delete_permanent", "file.move", "file.delete_preview"] {
+            let mut p = json!({"id": keep, "confirm": true, "i_understand_permanent": true});
+            if id == "file.delete_preview" {
+                p = json!({"id": keep});
+            }
+            if id == "file.move" {
+                p["destination"] = json!(f.path_of("moved.txt"));
+            }
+            if id != "file.delete_permanent" {
+                p.as_object_mut().unwrap().remove("i_understand_permanent");
+            }
+            assert_eq!(f.code(id, p.clone()), "invalid_params", "{id} without revision");
+            p["revision"] = json!(rev + 1);
+            assert_eq!(f.code(id, p), "stale_tree", "{id} with a wrong revision");
+        }
+        // A wrong revision is stale for path addressing too.
+        let path = f.path_of("keep.txt");
+        assert_eq!(f.code("file.delete", json!({"path": path, "revision": rev + 7, "confirm": true})), "stale_tree");
+        assert!(f.fake.calls().is_empty() && Path::new(&path).exists());
+        // Delete id A at the current revision; the old revision is then refused for id B.
+        let out = f.s.execute("file.delete", &json!({"id": keep, "revision": rev, "confirm": true})).unwrap();
+        assert_eq!(out["done"], true);
+        assert!(f.s.revision() > rev);
+        let big_path = f.path_of("big.bin");
+        assert_eq!(f.code("file.delete", json!({"id": big, "revision": rev, "confirm": true})), "stale_tree");
+        assert!(Path::new(&big_path).exists());
+        assert_eq!(f.fake.calls().len(), 1);
+        // The fresh revision works again.
+        let id = f.id_of("big.bin");
+        let now = f.s.revision();
+        f.s.execute("file.delete", &json!({"id": id, "revision": now, "confirm": true})).unwrap();
+        assert!(!Path::new(&big_path).exists());
+    }
+
+    #[test]
+    fn listings_expose_the_revision() {
+        let mut f = fixture();
+        let rev = f.s.revision();
+        assert_eq!(f.s.execute("tree.children", &json!({})).unwrap()["revision"], rev);
+        assert_eq!(f.s.execute("list.largest_files", &json!({})).unwrap()["revision"], rev);
+        assert_eq!(f.s.execute("search.find", &json!({"query": "a"})).unwrap()["revision"], rev);
+        assert_eq!(f.s.execute("session.state", &json!({})).unwrap()["revision"], rev);
+    }
+
+    #[test]
+    fn report_work_is_bounded_for_huge_folders() {
+        let mut tree = dirustat_model::Tree::new("root");
+        let many = tree.add_child(tree.root(), "many", NodeKind::Dir, 0).unwrap();
+        let n = 200_000usize;
+        for i in 0..n {
+            tree.add_child(many, &format!("f{i}"), NodeKind::File, 1).unwrap();
+        }
+        tree.aggregate();
+        let mut s = Session::new();
+        s.replace_tree(tree);
+        let node = s.tree().children(s.tree().root()).next().unwrap();
+        let report = build_report(&s, node);
+        assert_eq!(report.files, u64::try_from(n).unwrap());
+        assert_eq!(report.paths.len(), MAX_LISTED);
+        assert!(report.truncated);
+        assert_eq!(report.built_paths, MAX_LISTED, "path strings are built only for the listed nodes");
+    }
+
+    #[test]
+    fn partial_scans_need_an_extra_flag_for_permanent_folder_deletion() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("a.txt"), b"aaaa").unwrap();
+        std::fs::write(sub.join("skip.log"), b"unseen").unwrap();
+        let mut s = Session::new();
+        let opts = dirustat_scan::ScanOptions { exclude: vec!["*.log".to_owned()], ..Default::default() };
+        let handle = dirustat_scan::start(&root, opts).unwrap();
+        assert_eq!(s.finish_scan(handle), Ok(true));
+        s.set_platform(Arc::new(FakePlatform::new()));
+        let sub_s = sub.to_string_lossy().into_owned();
+        let preview = s.execute("file.delete_preview", &json!({"path": sub_s, "mode": "permanent"})).unwrap();
+        assert_eq!(preview["partial_tree"], true);
+        assert_eq!(s.execute("session.state", &json!({})).unwrap()["partial_scan"], true);
+        let p = json!({"path": sub_s, "confirm": true, "i_understand_permanent": true});
+        assert_eq!(s.execute("file.delete_permanent", &p).unwrap_err().code(), "confirmation_required");
+        assert!(sub.join("skip.log").exists());
+        // Dry run needs no extra flag; recycling is reversible and needs none either.
+        let dry = json!({"path": sub_s, "confirm": true, "i_understand_permanent": true, "dry_run": true});
+        assert_eq!(s.execute("file.delete_permanent", &dry).unwrap()["partial_tree"], true);
+        let with =
+            json!({"path": sub_s, "confirm": true, "i_understand_permanent": true, "i_understand_partial": true});
+        assert_eq!(s.execute("file.delete_permanent", &with).unwrap()["done"], true);
+        assert!(!sub.exists());
+        // A complete scan reports no partial tree.
+        let mut full = fixture();
+        let out = full.s.execute("file.delete_preview", &json!({"path": full.path_of("sub")})).unwrap();
+        assert_eq!(out["partial_tree"], false);
+    }
+
+    #[test]
+    fn subtrees_with_read_errors_are_partial() {
+        let mut t = dirustat_model::Tree::new("root");
+        let bad = t.add_child(t.root(), "bad", NodeKind::Dir, 0).unwrap();
+        let good = t.add_child(t.root(), "good", NodeKind::Dir, 0).unwrap();
+        t.add_child(good, "f", NodeKind::File, 1).unwrap();
+        t.mark_error(bad).unwrap();
+        t.aggregate();
+        let mut s = Session::new();
+        s.replace_tree(t);
+        let ids: Vec<_> = s.tree().children(s.tree().root()).collect();
+        let flags: Vec<bool> = ids.iter().map(|&id| subtree_partial(&s, id)).collect();
+        let names: Vec<_> = ids.iter().filter_map(|&id| s.tree().get(id)).map(|n| n.name().to_owned()).collect();
+        assert_eq!(names.iter().zip(&flags).find(|(n, _)| *n == "bad").map(|(_, f)| *f), Some(true));
+        assert_eq!(names.iter().zip(&flags).find(|(n, _)| *n == "good").map(|(_, f)| *f), Some(false));
+    }
+
+    #[test]
+    fn recycle_without_a_bin_or_with_a_lying_shell_is_an_error() {
+        let mut f = fixture();
+        let keep = f.path_of("keep.txt");
+        f.fake.set_no_recycle_bin(true);
+        let err = f.s.execute("file.delete", &json!({"path": keep, "confirm": true})).unwrap_err();
+        assert_eq!(err.code(), "unsupported");
+        assert!(err.to_string().contains("file.delete_permanent"), "{err}");
+        assert!(Path::new(&keep).exists());
+        assert_eq!(f.s.tree().len(), 7);
+        f.fake.set_no_recycle_bin(false);
+        f.fake.set_leave_in_place(true);
+        assert_eq!(f.code("file.delete", json!({"path": keep, "confirm": true})), "internal");
+        assert!(Path::new(&keep).exists());
+        assert_eq!(f.s.tree().len(), 7, "a recycle that left the item must not prune the tree");
+        let journal = f.s.execute("file.journal", &json!({})).unwrap();
+        assert_eq!(journal["entries"][0]["ok"], false);
+    }
+
+    #[test]
+    fn move_uses_the_no_replace_primitive_and_checks_names() {
+        let mut f = fixture();
+        let src = f.path_of("keep.txt");
+        let dest = f.dir.path().join("moved.txt").to_string_lossy().into_owned();
+        f.s.execute("file.move", &json!({"path": src, "destination": dest, "confirm": true})).unwrap();
+        assert_eq!(f.fake.calls(), vec![PlatformCall::Rename(PathBuf::from(&src), PathBuf::from(&dest))]);
+        // The platform refuses an existing destination even if it appeared after our own check.
+        let big = f.path_of("big.bin");
+        f.fake.set_failure(Some(dirustat_platform::PlatformError::Unsupported("rename_no_replace")));
+        assert_eq!(
+            f.code("file.move", json!({"path": big, "destination": f.path_of("x.bin"), "confirm": true})),
+            "unsupported"
+        );
+        assert!(Path::new(&big).exists());
+        let names =
+            |c: &[&str]| destination_component_problem(&c.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>(), true);
+        assert!(names(&["a", "b:stream"]).is_some());
+        assert!(names(&["a", "b."]).is_some());
+        assert!(names(&["a ", "b"]).is_some());
+        assert!(names(&["a", "b?"]).is_some());
+        assert!(names(&["a", "b.txt"]).is_none());
+        assert!(destination_component_problem(&["a:b".to_owned()], false).is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn move_rejects_stream_and_trailing_dot_destinations() {
+        let mut f = fixture();
+        let src = f.path_of("keep.txt");
+        for name in ["moved.txt:evil", "moved.", "moved "] {
+            let dest = format!("{}\\{name}", f.dir.path().display());
+            assert_eq!(
+                f.code("file.move", json!({"path": src, "destination": dest, "confirm": true})),
+                "invalid_params"
+            );
+        }
+        assert!(Path::new(&src).exists() && f.fake.calls().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn network_scan_roots_refuse_every_destructive_command() {
+        let mut tree = dirustat_model::Tree::new(r"\\localhost\share\data");
+        tree.add_child(tree.root(), "f.txt", NodeKind::File, 5).unwrap();
+        tree.aggregate();
+        let mut s = Session::new();
+        s.replace_tree(tree);
+        let fake = Arc::new(FakePlatform::new());
+        s.set_platform(fake.clone());
+        let path = r"\\localhost\share\data\f.txt";
+        for (id, p) in [
+            ("file.delete", json!({"path": path, "confirm": true})),
+            ("file.delete_permanent", json!({"path": path, "confirm": true, "i_understand_permanent": true})),
+            ("file.move", json!({"path": path, "destination": r"C:\x\y.txt", "confirm": true})),
+            ("file.delete_preview", json!({"path": path})),
+        ] {
+            let err = s.execute(id, &p).unwrap_err();
+            assert_eq!(err.code(), "protected_path", "{id}: {err}");
+            assert!(err.to_string().contains("UNC"), "{err}");
+        }
+        assert!(fake.calls().is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_permanent_removal_flags_a_rescan() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut f = fixture();
+        let locked = f.root().join("sub").join("deep").join("b.txt");
+        // An exclusive handle (no FILE_SHARE_DELETE) makes the removal fail half-way.
+        let _hold = std::fs::OpenOptions::new().read(true).share_mode(0).open(&locked).unwrap();
+        let sub = f.path_of("sub");
+        let p = json!({"path": sub, "confirm": true, "i_understand_permanent": true});
+        assert_eq!(f.s.execute("file.delete_permanent", &p).unwrap_err().code(), "internal");
+        assert_eq!(f.s.execute("session.state", &json!({})).unwrap()["rescan_recommended"], true);
+        let journal = f.s.execute("file.journal", &json!({})).unwrap();
+        assert_eq!(journal["entries"][0]["ok"], false);
     }
 
     #[cfg(windows)]

@@ -4,6 +4,7 @@
 use super::search::listing_filter;
 use super::select::node_by_index;
 use super::{CommandSpec, always, parse_params};
+use crate::search::Budget;
 use crate::{CommandError, Session};
 use dirustat_model::{NodeId, NodeKind};
 use serde::Deserialize;
@@ -22,7 +23,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params_doc: "{\"node\"?: u64 (default: root), \"limit\"?: 1..=10000 (default 100), \"offset\"?: u64 \
                 (default 0), \"sort\"?: \"size\" (default, descending) | \"name\"} children of a node by the \
-                session size mode. Optional filters: \"extensions\"?: [string] (directories then never match), \"min_size\"?: u64, \"max_size\"?: u64, \"name\"?: wildcard pattern (case-insensitive); total counts the filtered children. Returns {node, total, offset, items: [{id, name, kind, size, files, error}]}.",
+                session size mode. Optional filters: \"extensions\"?: [string] (directories then never match), \"min_size\"?: u64, \"max_size\"?: u64, \"name\"?: wildcard pattern (case-insensitive); total counts the filtered children. Returns {node, total, offset, revision, budget_exhausted, items: [{id, name, kind, size, files, error}]}; ids are valid only for the returned revision (file.* commands need it with id); budget_exhausted: the 10 s filter budget ran out and the list is partial.",
             destructive: false,
             enabled: always,
             run: run_children,
@@ -98,12 +99,18 @@ fn run_children(session: &mut Session, params: &Value) -> Result<Value, CommandE
     let mode = session.map_size_mode();
     let tree = session.tree();
     let filter = listing_filter(p.extensions.as_deref(), p.min_size, p.max_size, p.name.as_deref())?;
-    let mut rows: Vec<(NodeId, u64, &str)> = tree
-        .children(parent)
-        .filter_map(|id| tree.get(id).map(|n| (id, n.total_size(mode), n.name(), n.kind())))
-        .filter(|&(_, size, name, kind)| filter.matches(name, kind, size, &mut || None))
-        .map(|(id, size, name, _)| (id, size, name))
-        .collect();
+    let mut budget = Budget::new();
+    let mut rows: Vec<(NodeId, u64, &str)> = Vec::new();
+    for id in tree.children(parent) {
+        if budget.tick() {
+            break;
+        }
+        let Some(n) = tree.get(id) else { continue };
+        let size = n.total_size(mode);
+        if filter.matches(n.name(), n.kind(), size, &mut || None) {
+            rows.push((id, size, n.name()));
+        }
+    }
     match p.sort.unwrap_or(SortName::Size) {
         SortName::Size => rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(b.2)).then_with(|| a.0.cmp(&b.0))),
         SortName::Name => rows.sort_by(|a, b| a.2.cmp(b.2).then_with(|| a.0.cmp(&b.0))),
@@ -125,7 +132,14 @@ fn run_children(session: &mut Session, params: &Value) -> Result<Value, CommandE
             }))
         })
         .collect();
-    Ok(json!({ "node": parent.index(), "total": total, "offset": offset, "items": items }))
+    Ok(json!({
+        "node": parent.index(),
+        "total": total,
+        "offset": offset,
+        "revision": session.revision(),
+        "budget_exhausted": budget.exhausted(),
+        "items": items,
+    }))
 }
 
 fn run_path(session: &mut Session, params: &Value) -> Result<Value, CommandError> {

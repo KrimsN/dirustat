@@ -26,6 +26,45 @@ const REGEX_SIZE_LIMIT: usize = 1 << 20;
 const TIME_BUDGET: Duration = Duration::from_secs(10);
 /// The clock is read once per this many visited nodes.
 const CLOCK_STRIDE: usize = 4096;
+/// Stride when every node builds a path string (`match_path`): far more expensive per node.
+const PATH_CLOCK_STRIDE: usize = 64;
+/// Stride of [`Budget`], used by the listing commands that run name filters.
+const BUDGET_STRIDE: usize = 64;
+
+/// A wall-clock budget for loops that test every node against a user-supplied name pattern.
+#[derive(Debug)]
+pub(crate) struct Budget {
+    deadline: Option<Instant>,
+    ticks: usize,
+    exhausted: bool,
+}
+
+impl Budget {
+    /// The standard 10 s budget starting now.
+    pub(crate) fn new() -> Self {
+        Self::with_deadline(Instant::now().checked_add(TIME_BUDGET))
+    }
+
+    pub(crate) fn with_deadline(deadline: Option<Instant>) -> Self {
+        Self { deadline, ticks: 0, exhausted: false }
+    }
+
+    /// Call once per node; `true` once the budget ran out (the clock is read every few nodes).
+    pub(crate) fn tick(&mut self) -> bool {
+        self.ticks = self.ticks.saturating_add(1);
+        if !self.exhausted
+            && self.ticks.is_multiple_of(BUDGET_STRIDE)
+            && self.deadline.is_some_and(|d| Instant::now() >= d)
+        {
+            self.exhausted = true;
+        }
+        self.exhausted
+    }
+
+    pub(crate) fn exhausted(&self) -> bool {
+        self.exhausted
+    }
+}
 
 /// How the query text is interpreted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,10 +269,11 @@ fn search_with_deadline(
     let limit = limit.clamp(1, MAX_RESULTS);
     let mut heap: BinaryHeap<Reverse<Key>> = BinaryHeap::new();
     let (mut total, mut visited, mut exhausted) = (0usize, 0usize, false);
+    let stride = if filter.needs_path() { PATH_CLOCK_STRIDE } else { CLOCK_STRIDE };
     let mut stack: Vec<NodeId> = tree.children(tree.root()).collect();
     while let Some(id) = stack.pop() {
         visited = visited.saturating_add(1);
-        if visited % CLOCK_STRIDE == 0 && deadline.is_some_and(|d| Instant::now() >= d) {
+        if visited.is_multiple_of(stride) && deadline.is_some_and(|d| Instant::now() >= d) {
             exhausted = true;
             break;
         }
@@ -434,6 +474,32 @@ mod tests {
         let out = search_with_deadline(&t, &Filter::default(), SizeMode::Logical, 10, &|_| None, past);
         assert!(out.budget_exhausted);
         assert!(out.total_matched < CLOCK_STRIDE * 2);
+    }
+
+    #[test]
+    fn path_matching_checks_the_clock_far_more_often() {
+        let mut t = Tree::new("r");
+        for i in 0..(PATH_CLOCK_STRIDE * 3) {
+            t.add_child(t.root(), &format!("f{i}"), NodeKind::File, 1).unwrap();
+        }
+        t.aggregate();
+        let mut f = Filter::default().with_name("zzz", MatchMode::Substring, true).unwrap();
+        f.match_path = true;
+        let past = Instant::now().checked_sub(Duration::from_secs(1));
+        let out = search_with_deadline(&t, &f, SizeMode::Logical, 10, &|id| Some(format!("p{}", id.index())), past);
+        assert!(out.budget_exhausted, "a path search must notice an expired budget within a few dozen nodes");
+        let plain = Filter::default().with_name("zzz", MatchMode::Substring, true).unwrap();
+        assert!(!search_with_deadline(&t, &plain, SizeMode::Logical, 10, &|_| None, past).budget_exhausted);
+    }
+
+    #[test]
+    fn budget_reports_exhaustion_after_the_deadline() {
+        let mut fresh = Budget::new();
+        assert!((0..1000).all(|_| !fresh.tick()));
+        let mut expired = Budget::with_deadline(Instant::now().checked_sub(Duration::from_secs(1)));
+        let stopped_at = (1..=BUDGET_STRIDE).find(|_| expired.tick());
+        assert_eq!(stopped_at, Some(BUDGET_STRIDE));
+        assert!(expired.exhausted() && expired.tick());
     }
 
     #[test]

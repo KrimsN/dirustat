@@ -168,6 +168,16 @@ mod tests {
     }
 
     #[test]
+    fn exclude_total_length_is_capped() {
+        let long = "a".repeat(dirustat_scan::MAX_PATTERN_CHARS - 4);
+        let many: Vec<String> = (0..64).map(|i| format!("{long}{i:04}")).collect();
+        let mut s = Session::new();
+        let err = s.execute("scan.start", &json!({"path": ".", "exclude": many})).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        assert!(!s.is_scanning());
+    }
+
+    #[test]
     fn start_poll_replaces_tree() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();

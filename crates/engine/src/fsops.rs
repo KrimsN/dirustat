@@ -9,7 +9,7 @@ use crate::protected::{Key, ProtectedPaths, key_of};
 use dirustat_model::{NodeData, NodeKind};
 use std::fs::{self, Metadata};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -150,6 +150,11 @@ fn remove_link(path: &Path) -> io::Result<()> {
 }
 
 /// Permanently deletes `path` and everything below it without following any link.
+///
+/// A link is removed itself. A directory goes through `std::fs::remove_dir_all`, which does not
+/// follow symlinks or junctions inside the tree. Residual race (documented in `docs/safety.md`):
+/// between the `symlink_metadata` here and the removal the entry can still be swapped for a link
+/// by another process; the callers re-run the location check immediately before calling.
 pub(crate) fn remove_permanently(path: &Path) -> io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if is_link(&meta) {
@@ -158,27 +163,7 @@ pub(crate) fn remove_permanently(path: &Path) -> io::Result<()> {
     if !meta.is_dir() {
         return remove_file_any(path);
     }
-    // Discovery order puts every directory after its parent, so removing in reverse is bottom-up.
-    let mut dirs: Vec<PathBuf> = vec![path.to_path_buf()];
-    let mut next = 0;
-    while let Some(dir) = dirs.get(next).cloned() {
-        next += 1;
-        for entry in fs::read_dir(&dir)? {
-            let child = entry?.path();
-            let child_meta = fs::symlink_metadata(&child)?;
-            if is_link(&child_meta) {
-                remove_link(&child)?;
-            } else if child_meta.is_dir() {
-                dirs.push(child);
-            } else {
-                remove_file_any(&child)?;
-            }
-        }
-    }
-    for dir in dirs.iter().rev() {
-        remove_dir_any(dir)?;
-    }
-    Ok(())
+    fs::remove_dir_all(path)
 }
 
 #[cfg(test)]
@@ -200,6 +185,41 @@ mod tests {
         remove_permanently(&top).unwrap();
         assert!(!top.exists());
         assert!(dir.path().exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn nested_junction_is_removed_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (top, target) = (dir.path().join("top"), dir.path().join("target"));
+        fs::create_dir_all(&top).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("precious.txt"), b"keep").unwrap();
+        let made = std::process::Command::new("cmd")
+            .args(["/c", "mklink", "/J"])
+            .arg(top.join("junc"))
+            .arg(&target)
+            .output()
+            .is_ok_and(|o| o.status.success());
+        if !made {
+            return;
+        }
+        remove_permanently(&top).unwrap();
+        assert!(!top.exists());
+        assert!(target.join("precious.txt").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nested_symlink_is_removed_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let (top, target) = (dir.path().join("top"), dir.path().join("target"));
+        fs::create_dir_all(&top).unwrap();
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("precious.txt"), b"keep").unwrap();
+        std::os::unix::fs::symlink(&target, top.join("link")).unwrap();
+        remove_permanently(&top).unwrap();
+        assert!(!top.exists() && target.join("precious.txt").exists());
     }
 
     #[test]

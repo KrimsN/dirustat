@@ -3,7 +3,7 @@
 use super::search::listing_filter;
 use super::tree::{MAX_PAGE, page_limit};
 use super::{CommandSpec, always, no_params, parse_params};
-use crate::search::{Filter, KindFilter};
+use crate::search::{Budget, Filter, KindFilter};
 use crate::{CommandError, DriveInfo, MAX_DRIVES, Session, extension_of};
 use dirustat_model::{NodeId, NodeKind};
 use serde::Deserialize;
@@ -20,7 +20,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params_doc: "{\"limit\"?: 1..=10000 (default 100), \"offset\"?: 0..=10000 (default 0), \"min_size\"?: \
                 u64 (default 0), \"max_size\"?: u64, \"extensions\"?: [string], \"name\"?: wildcard pattern (case-insensitive)} the largest files by the session size mode, descending. Returns {total_returned, \
-                offset, items: [{id, path, size, ext}]}.",
+                offset, revision, budget_exhausted, items: [{id, path, size, ext}]}; ids are valid only for the returned revision.",
             destructive: false,
             enabled: always,
             run: run_largest,
@@ -64,7 +64,7 @@ fn run_largest(session: &mut Session, params: &Value) -> Result<Value, CommandEr
             .ok_or_else(|| CommandError::InvalidParams(format!("offset must be 0..={MAX_PAGE}")))?,
     };
     let filter = listing_filter(p.extensions.as_deref(), Some(p.min_size.unwrap_or(0)), p.max_size, p.name.as_deref())?;
-    let found = session.largest_files_filtered(limit.saturating_add(offset), &filter);
+    let (found, budget_exhausted) = session.largest_files_budgeted(limit.saturating_add(offset), &filter);
     let mode = session.map_size_mode();
     let items: Vec<Value> = found
         .into_iter()
@@ -79,7 +79,13 @@ fn run_largest(session: &mut Session, params: &Value) -> Result<Value, CommandEr
             }))
         })
         .collect();
-    Ok(json!({ "total_returned": items.len(), "offset": offset, "items": items }))
+    Ok(json!({
+        "total_returned": items.len(),
+        "offset": offset,
+        "revision": session.revision(),
+        "budget_exhausted": budget_exhausted,
+        "items": items,
+    }))
 }
 
 fn run_drives(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
@@ -102,15 +108,25 @@ impl Session {
     /// Like [`Session::largest_files`] but only files passing `filter` (its name matcher is applied to
     /// names, never paths).
     pub fn largest_files_filtered(&self, count: usize, filter: &Filter) -> Vec<NodeId> {
+        self.largest_files_budgeted(count, filter).0
+    }
+
+    /// [`Session::largest_files_filtered`] under the 10 s filter budget; the flag is `true` when the
+    /// budget ran out and the list is partial.
+    pub fn largest_files_budgeted(&self, count: usize, filter: &Filter) -> (Vec<NodeId>, bool) {
         let count = count.min(MAX_PAGE.saturating_mul(2));
         if count == 0 {
-            return Vec::new();
+            return (Vec::new(), false);
         }
+        let mut budget = Budget::new();
         let tree = self.tree();
         let mode = self.map_size_mode();
         let mut heap: BinaryHeap<Reverse<Entry>> = BinaryHeap::new();
         let mut stack = vec![tree.root()];
         while let Some(id) = stack.pop() {
+            if budget.tick() {
+                break;
+            }
             let Some(node) = tree.get(id) else { continue };
             if node.kind() == NodeKind::Dir {
                 stack.extend(tree.children(id));
@@ -130,7 +146,7 @@ impl Session {
         }
         let mut best: Vec<Entry> = heap.into_iter().map(|Reverse(e)| e).collect();
         best.sort_by(|a, b| b.cmp(a));
-        best.into_iter().map(|(_, Reverse(id))| id).collect()
+        (best.into_iter().map(|(_, Reverse(id))| id).collect(), budget.exhausted())
     }
 
     /// Overrides the source of `list.drives` with a custom function. Without one the session's

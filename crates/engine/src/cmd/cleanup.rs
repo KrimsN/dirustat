@@ -11,7 +11,7 @@
 //! before the first action; the tree is pruned once at the end (one revision bump), so arena ids
 //! stay valid while the run is in progress.
 
-use super::file::{Mode, node_for_path, perform, preflight};
+use super::file::{Mode, node_for_path, perform, preflight, subtree_partial};
 use super::tree::kind_name;
 use super::{CommandSpec, always, no_params, parse_params};
 use crate::cleanup::{
@@ -80,8 +80,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params_doc: "{\"id\": string}. Read-only, never touches the disk beyond stat calls. Resolves the selector \
                 against the current tree (never the scan root, no node inside another selected node) and returns \
-                {id, name, action, revision, count, size, truncated, items: [{id, name, kind, path, size, status, \
-                error?}]} largest first, at most 10000 items. status: ok | protected | stale | invalid. For \
+                {id, name, action, revision, count, size, truncated, items: [{id, name, kind, path, size, partial_tree, \
+                status, error?}]}; ids are valid only for the returned revision largest first, at most 10000 items. status: ok | protected | stale | invalid. For \
                 empty_dir_contents the items are the entries inside each selected folder.",
             destructive: false,
             enabled: has_tree,
@@ -93,7 +93,10 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             menu: "",
             shortcut: None,
             params_doc: "{\"id\": string, \"dry_run\"?: bool (default false; changes nothing, same report), \
-                \"i_understand_permanent\"?: bool (must be true for a permanent action unless dry_run)}. Needs \
+                \"i_understand_permanent\"?: bool (must be true for a permanent action unless dry_run), \
+                \"i_understand_partial\"?: bool (needed to permanently delete a folder whose subtree is partial: \
+                the scan used exclusions or had read errors; such nodes otherwise get status needs_confirmation). \
+                Refused with protected_path when the scan root is a network (UNC) path. Needs \
                 confirm: true. Re-resolves the selector and applies the action node by node with the same checks \
                 and journal as file.delete / file.delete_permanent (recycle bin by default, protected paths and \
                 stale nodes are reported, not touched). At most 10000 nodes per run (truncated). Best effort: \
@@ -134,6 +137,7 @@ struct RunParams {
     id: String,
     dry_run: Option<bool>,
     i_understand_permanent: Option<bool>,
+    i_understand_partial: Option<bool>,
 }
 
 fn cleanups_json(session: &Session) -> Vec<Value> {
@@ -292,6 +296,7 @@ fn status_of(err: &CommandError) -> (&'static str, String) {
     let word = match err {
         CommandError::ProtectedPath(_) => "protected",
         CommandError::StaleTree(_) => "stale",
+        CommandError::ConfirmationRequired(_) => "needs_confirmation",
         _ => "invalid",
     };
     (word, err.to_string())
@@ -299,12 +304,23 @@ fn status_of(err: &CommandError) -> (&'static str, String) {
 
 /// The checks of `file.delete` for one target (plus the emptiness guard for `empty` selectors).
 /// Returns the path to act on. Reads the disk, changes nothing.
-fn check(session: &Session, protected: &ProtectedPaths, def: &CleanupDef, t: &Target) -> Result<String, CommandError> {
+fn check(
+    session: &Session,
+    protected: &ProtectedPaths,
+    def: &CleanupDef,
+    t: &Target,
+    allow_partial: bool,
+) -> Result<String, CommandError> {
     if let Some(e) = &t.container_error {
         return Err(e.clone());
     }
     let Some(mode) = mode_of(def.action) else { return Ok(t.path.clone()) };
     let path = preflight(session, t.id, protected, mode)?;
+    if mode == Mode::Permanent && t.kind == NodeKind::Dir && !allow_partial && subtree_partial(session, t.id) {
+        return Err(CommandError::ConfirmationRequired(
+            "i_understand_partial: the tree may omit entries of this folder that exist on disk".to_owned(),
+        ));
+    }
     if def.selector.empty && !dir_is_empty_on_disk(Path::new(&path)) {
         return Err(CommandError::StaleTree("the folder is no longer empty".to_owned()));
     }
@@ -326,8 +342,9 @@ fn run_preview(session: &mut Session, params: &Value) -> Result<Value, CommandEr
         .map(|t| {
             let mut item = json!({
                 "id": t.id.index(), "name": t.name, "kind": kind_name(t.kind), "path": t.path, "size": t.size,
+                "partial_tree": subtree_partial(session, t.id),
             });
-            let (status, error) = match check(session, &protected, &def, t) {
+            let (status, error) = match check(session, &protected, &def, t, false) {
                 Ok(_) => ("ok", None),
                 Err(e) => {
                     let (word, msg) = status_of(&e);
@@ -370,6 +387,11 @@ fn run_run(session: &mut Session, params: &Value) -> Result<Value, CommandError>
     if def.action == CleanupAction::Permanent && !dry_run && p.i_understand_permanent != Some(true) {
         return Err(CommandError::ConfirmationRequired("cleanup.run: i_understand_permanent".to_owned()));
     }
+    if !dry_run && session.node_path(session.tree().root()).is_some_and(|r| crate::is_unc_path(&r)) {
+        return Err(CommandError::ProtectedPath(
+            "destructive commands are disabled when the scan root is a network (UNC) path".to_owned(),
+        ));
+    }
     let protected = ProtectedPaths::from_env();
     let mut resolved = resolve(session, &def, &protected)?;
     if def.action == CleanupAction::Reveal {
@@ -385,7 +407,7 @@ fn run_run(session: &mut Session, params: &Value) -> Result<Value, CommandError>
         if stopped.is_some() {
             break;
         }
-        let path = match check(session, &protected, &def, t) {
+        let path = match check(session, &protected, &def, t, p.i_understand_partial == Some(true)) {
             Ok(path) => path,
             Err(e) => {
                 let (word, msg) = status_of(&e);
@@ -706,7 +728,7 @@ mod tests {
             size: 0,
             container_error: None,
         };
-        assert_eq!(check(&f.s, &protected, &def, &root_target).unwrap_err().code(), "protected_path");
+        assert_eq!(check(&f.s, &protected, &def, &root_target, false).unwrap_err().code(), "protected_path");
         assert!(resolved.targets.iter().all(|t| t.id != f.s.tree().root()));
         // A selector matching everything never selects the scan root.
         f.save(json!({"id": "all", "name": "All", "action": "permanent", "selector": {"names": ["*"], "kind": "dir"}}))
@@ -740,7 +762,7 @@ mod tests {
             size: 0,
             container_error: Some(CommandError::ProtectedPath("x".into())),
         };
-        assert_eq!(check(&f.s, &protected, &def, &t).unwrap_err().code(), "protected_path");
+        assert_eq!(check(&f.s, &protected, &def, &t, false).unwrap_err().code(), "protected_path");
     }
 
     #[test]
@@ -759,6 +781,51 @@ mod tests {
         assert!(!f.exists("a.tmp") && !f.exists("sub/deep/c.tmp"));
         assert!(f.fake.calls().is_empty(), "permanent deletion bypasses the recycle bin");
         assert_eq!(f.s.execute("file.journal", &json!({})).unwrap()["entries"][0]["mode"], "permanent");
+    }
+
+    #[test]
+    fn partial_scans_hold_back_permanent_folder_cleanups() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        std::fs::write(root.join("build").join("a.o"), b"a").unwrap();
+        std::fs::write(root.join("build").join("hidden.log"), b"unseen").unwrap();
+        let mut s = Session::new();
+        let opts = dirustat_scan::ScanOptions { exclude: vec!["*.log".to_owned()], ..Default::default() };
+        let handle = dirustat_scan::start(&root, opts).unwrap();
+        assert_eq!(s.finish_scan(handle), Ok(true));
+        s.set_platform(Arc::new(FakePlatform::new()));
+        let def = json!({"id": "dirs", "name": "Dirs", "action": "permanent", "selector": {"names": ["build"], "kind": "dir"}});
+        s.execute("cleanup.save", &json!({"definition": def})).unwrap();
+        let preview = s.execute("cleanup.preview", &json!({"id": "dirs"})).unwrap();
+        assert_eq!(preview["items"][0]["partial_tree"], true);
+        let held =
+            s.execute("cleanup.run", &json!({"id": "dirs", "confirm": true, "i_understand_permanent": true})).unwrap();
+        assert_eq!(held["results"][0]["status"], "needs_confirmation");
+        assert!(root.join("build").join("hidden.log").exists());
+        let all = json!({"id": "dirs", "confirm": true, "i_understand_permanent": true, "i_understand_partial": true});
+        assert_eq!(s.execute("cleanup.run", &all).unwrap()["deleted"], 1);
+        assert!(!root.join("build").exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn network_scan_roots_refuse_cleanup_runs() {
+        let mut tree = dirustat_model::Tree::new(r"\\localhost\share\data");
+        tree.add_child(tree.root(), "a.tmp", NodeKind::File, 5).unwrap();
+        tree.aggregate();
+        let mut s = Session::new();
+        s.replace_tree(tree);
+        let fake = Arc::new(FakePlatform::new());
+        s.set_platform(fake.clone());
+        let def = json!({"id": "t", "name": "T", "action": "recycle", "selector": {"names": ["*.tmp"]}});
+        s.execute("cleanup.save", &json!({"definition": def})).unwrap();
+        let err = s.execute("cleanup.run", &json!({"id": "t", "confirm": true})).unwrap_err();
+        assert_eq!(err.code(), "protected_path");
+        assert!(fake.calls().is_empty());
+        // A dry run only reports; every item is refused as protected.
+        let dry = s.execute("cleanup.run", &json!({"id": "t", "confirm": true, "dry_run": true})).unwrap();
+        assert_eq!(dry["results"][0]["status"], "protected");
     }
 
     #[test]

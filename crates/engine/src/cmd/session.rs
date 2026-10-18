@@ -67,6 +67,8 @@ impl Session {
             "selection": view.selected,
             "selection_name": view.selected_name,
             "size_mode": view.size_mode,
+            "partial_scan": self.partial_scan,
+            "rescan_recommended": self.rescan_recommended,
         })
     }
 }
@@ -85,6 +87,7 @@ mod tests {
         assert!(v["progress"].is_null());
         assert!(v["last_scan"].is_null());
         assert_eq!(v["size_mode"], "allocated");
+        assert_eq!((v["partial_scan"].as_bool(), v["rescan_recommended"].as_bool()), (Some(false), Some(false)));
     }
 
     #[test]

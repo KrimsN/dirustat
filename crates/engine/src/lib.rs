@@ -121,6 +121,10 @@ pub struct Session {
     platform: Arc<dyn PlatformServices>,
     /// Journal of destructive actions (`file.journal`).
     journal: journal::Journal,
+    /// The current tree came from a scan with exclusions: it omits entries that exist on disk.
+    partial_scan: bool,
+    /// A destructive action failed half-way; the tree may no longer match the disk.
+    rescan_recommended: bool,
 }
 
 /// Which backend produced the current tree and why the MFT fast path was abandoned, if it was.
@@ -150,6 +154,8 @@ impl Session {
             search: search::SearchState::default(),
             platform: dirustat_platform::default_platform(),
             journal: journal::Journal::new(),
+            partial_scan: false,
+            rescan_recommended: false,
         }
     }
 
@@ -203,6 +209,8 @@ impl Session {
 
     /// Installs a prebuilt tree as the current one (demo data, tests); bumps the revision.
     pub fn replace_tree(&mut self, tree: Tree) {
+        self.partial_scan = false;
+        self.rescan_recommended = false;
         self.tree = Arc::new(tree);
         self.tree_replaced();
     }
@@ -210,6 +218,7 @@ impl Session {
     /// Waits for a scan and, unless it was cancelled, makes its tree current. A panic in the scan
     /// thread is reported as an error and the previous tree is kept.
     pub fn finish_scan(&mut self, handle: ScanHandle) -> Result<bool, CommandError> {
+        let used_exclusions = handle.used_exclusions();
         let outcome = guard::guarded("scan", || {
             handle.join().map_err(|err| match err {
                 // A bad root is the caller's mistake, found on the scan thread (see `start_scan`).
@@ -223,6 +232,8 @@ impl Session {
             return Ok(false);
         }
         self.last_scan = Some(LastScan { backend: outcome.backend, fallback_reason: outcome.fallback_reason });
+        self.partial_scan = used_exclusions;
+        self.rescan_recommended = false;
         self.tree = Arc::new(outcome.tree);
         self.tree_replaced();
         Ok(true)

@@ -2,7 +2,11 @@
 //!
 //! A pure, lexical check (no I/O): the volume root, the scan root, the system directories
 //! (`Windows`, `Program Files`, `Program Files (x86)`, `ProgramData`, `Users`), an entire user
-//! profile (`C:\Users\<name>`) and everything below `Windows`. Paths are normalized first, so
+//! profile (`C:\Users\<name>`), `AppData` and `NTUSER.DAT*` inside it, the subtrees of `Windows`,
+//! `Recovery`, `Boot`, `EFI`, `$Recycle.Bin` and `System Volume Information`, and the direct
+//! children of `Program Files*` and `ProgramData`. Administrative UNC shares (`\\host\C$\...`,
+//! `\\host\ADMIN$`) are volumes: the same rules apply to the remainder. Trailing dots and spaces
+//! of components are ignored like Windows does. Paths are normalized first, so
 //! case, trailing separators, `\\?\` prefixes, forward slashes, `.`/`..` components and 8.3 short
 //! names of the top-level directories cannot be used to slip past the list. The check runs on
 //! the lexical path and again on the canonical path resolved from disk (see `cmd::file`), which
@@ -61,7 +65,17 @@ pub(crate) fn key_of(path: &str, windows: bool) -> Option<Key> {
             if rest.starts_with(['?', '.']) {
                 return None;
             }
-            let comps = rest.split(sep).filter(|c| !c.is_empty()).map(fold).collect();
+            // `.` and `..` are resolved here: `normalize_root_for` leaves network paths alone.
+            let mut comps: Vec<String> = Vec::new();
+            for c in rest.split(sep).filter(|c| !c.is_empty()) {
+                match c {
+                    "." => {}
+                    ".." => {
+                        comps.pop();
+                    }
+                    other => comps.push(fold(other)),
+                }
+            }
             return Some(Key { root: r"\\".to_owned(), comps });
         }
         None
@@ -86,7 +100,9 @@ const WIN_TOP_EXACT: &[&str] = &[
     "system volume information",
 ];
 /// Top-level names whose whole subtree is protected.
-const WIN_TOP_SUBTREE: &[&str] = &["windows", "system volume information"];
+const WIN_TOP_SUBTREE: &[&str] = &["windows", "system volume information", "recovery", "boot", "efi", "$recycle.bin"];
+/// Top-level names whose direct children are protected too (installed programs, shared app data).
+const WIN_TOP_FIRST_LEVEL: &[&str] = &["program files", "program files (x86)", "programdata"];
 /// Names used to recognize 8.3 short forms (`PROGRA~1`), spaces and parentheses removed.
 const WIN_SHORT_BASES: &[&str] =
     &["programfiles", "programfiles(x86)", "programdata", "windows", "users", "documentsandsettings"];
@@ -119,6 +135,8 @@ pub(crate) struct ProtectedPaths {
     windows: bool,
     exact: Vec<Key>,
     subtree: Vec<Key>,
+    /// The user profile from the environment (its `AppData` and `NTUSER.DAT*` are protected).
+    homes: Vec<Key>,
 }
 
 impl ProtectedPaths {
@@ -145,42 +163,87 @@ impl ProtectedPaths {
                 add(&mut exact, env(name));
             }
         }
+        let mut homes = Vec::new();
         let home = env(if windows { "USERPROFILE" } else { "HOME" });
         if let Some(k) = home.as_deref().and_then(|v| key_of(v, windows)) {
             // The profile itself and the directory that holds all profiles.
             let mut parent = k.clone();
             parent.comps.pop();
-            exact.push(k);
+            exact.push(k.clone());
             exact.push(parent);
+            if windows {
+                homes.push(k);
+            }
         }
-        Self { windows, exact, subtree }
+        Self { windows, exact, subtree, homes }
     }
 
     /// `Err(reason)` when `path` must never be deleted or moved by a command.
     pub fn check(&self, path: &str, scan_root: &str) -> Result<(), String> {
         let key = key_of(path, self.windows).ok_or_else(|| "path is not an absolute local path".to_owned())?;
-        if let Some(root) = key_of(scan_root, self.windows)
+        let key = self.trimmed(key);
+        if let Some(root) = key_of(scan_root, self.windows).map(|r| self.trimmed(r))
             && root == key
         {
             return Err("the scan root itself".to_owned());
         }
-        if Self::is_volume_root(&key) {
+        if self.windows
+            && key.root == r"\\"
+            && let Some(local) = admin_share_as_local(&key)
+        {
+            // `\\host\C$\Windows` is `C:\Windows` reached over the network.
+            return self.check_key(&local).map_err(|why| format!("{why} (via an administrative share)"));
+        }
+        if self.windows && key.root == r"\\" && key.comps.get(1).is_some_and(|s| s.ends_with('$')) {
+            return Err("an administrative share".to_owned());
+        }
+        self.check_key(&key)
+    }
+
+    /// Windows ignores trailing dots and spaces of a path component (`C:\Windows.` is
+    /// `C:\Windows`); components are trimmed the same way so the table cannot be dodged.
+    fn trimmed(&self, mut key: Key) -> Key {
+        if self.windows {
+            key.comps = key
+                .comps
+                .into_iter()
+                .map(|c| c.trim_end_matches(['.', ' ']).to_owned())
+                .filter(|c| !c.is_empty())
+                .collect();
+        }
+        key
+    }
+
+    fn check_key(&self, key: &Key) -> Result<(), String> {
+        if Self::is_volume_root(key) {
             return Err("a volume root".to_owned());
         }
-        if self.exact.contains(&key) {
+        if self.exact.contains(key) {
             return Err("a system or user-profile directory".to_owned());
         }
         if self.subtree.iter().any(|s| key.starts_with(s)) {
             return Err("inside the system directory".to_owned());
         }
-        if self.windows { self.check_windows(&key) } else { Self::check_unix(&key) }
+        if self.homes.iter().any(|h| Self::in_profile_internals(key, h)) {
+            return Err("profile data (AppData, NTUSER.DAT)".to_owned());
+        }
+        if self.windows { Self::check_windows(key) } else { Self::check_unix(key) }
     }
 
     fn is_volume_root(key: &Key) -> bool {
         if key.root == r"\\" { key.comps.len() <= 2 } else { key.comps.is_empty() }
     }
 
-    fn check_windows(&self, key: &Key) -> Result<(), String> {
+    /// `<home>\AppData` (and its first level) and `<home>\NTUSER.DAT*`, for the profile named by the environment.
+    fn in_profile_internals(key: &Key, home: &Key) -> bool {
+        if key.root != home.root || !key.comps.starts_with(&home.comps) {
+            return false;
+        }
+        let rel = key.comps.get(home.comps.len()..).unwrap_or_default();
+        profile_internals(rel)
+    }
+
+    fn check_windows(key: &Key) -> Result<(), String> {
         if key.root == r"\\" {
             return Ok(());
         }
@@ -191,10 +254,18 @@ impl ProtectedPaths {
         if key.comps.len() == 1 && (WIN_TOP_EXACT.contains(&top.as_str()) || is_short_form_of_system(top)) {
             return Err("a system directory".to_owned());
         }
+        let short = is_short_form_of_system(top);
+        // Direct children of `Program Files*` and `ProgramData` (installed products, shared data).
+        if key.comps.len() == 2 && (WIN_TOP_FIRST_LEVEL.contains(&top.as_str()) || short) {
+            return Err("an installed program or shared data directory".to_owned());
+        }
         // `C:\Users\<name>` and `C:\Documents and Settings\<name>`: an entire user profile.
-        let profile_holder = matches!(top.as_str(), "users" | "documents and settings") || is_short_form_of_system(top);
+        let profile_holder = matches!(top.as_str(), "users" | "documents and settings") || short;
         if key.comps.len() == 2 && profile_holder {
             return Err("an entire user profile".to_owned());
+        }
+        if profile_holder && key.comps.get(2..).is_some_and(profile_internals) {
+            return Err("profile data (AppData, NTUSER.DAT)".to_owned());
         }
         Ok(())
     }
@@ -211,13 +282,42 @@ impl ProtectedPaths {
     }
 }
 
+/// Components below a profile root that are never deleted by a command: `AppData` and its first
+/// level (`Local`, `Roaming`, `LocalLow`), the 8.3 form of `AppData`, and `NTUSER.DAT*`.
+fn profile_internals(rel: &[String]) -> bool {
+    let Some(first) = rel.first() else { return false };
+    let appdata = first == "appdata" || is_short_form_of(first, "appdata");
+    (appdata && rel.len() <= 2) || (rel.len() == 1 && first.starts_with("ntuser.dat"))
+}
+
+/// The local-drive equivalent of an administrative share: `\\host\C$\x` -> `c:` + `x`.
+/// `ADMIN$` is the Windows directory itself.
+fn admin_share_as_local(key: &Key) -> Option<Key> {
+    let share = key.comps.get(1)?;
+    let rest = key.comps.get(2..).unwrap_or_default().to_vec();
+    if share == "admin$" {
+        let mut comps = vec!["windows".to_owned()];
+        comps.extend(rest);
+        return Some(Key { root: "c:".to_owned(), comps });
+    }
+    let letter = share.strip_suffix('$')?;
+    let mut chars = letter.chars();
+    let c = chars.next().filter(char::is_ascii_alphabetic)?;
+    if chars.next().is_some() {
+        return None;
+    }
+    Some(Key { root: format!("{c}:"), comps: rest })
+}
+
+/// `name~N` where the stem is a prefix of `base`.
+fn is_short_form_of(name: &str, base: &str) -> bool {
+    let Some((stem, digits)) = name.rsplit_once('~') else { return false };
+    !stem.is_empty() && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) && base.starts_with(stem)
+}
+
 /// `PROGRA~1`-style 8.3 name whose stem is a prefix of a protected top-level name.
 fn is_short_form_of_system(name: &str) -> bool {
-    let Some((stem, digits)) = name.rsplit_once('~') else { return false };
-    !stem.is_empty()
-        && !digits.is_empty()
-        && digits.bytes().all(|b| b.is_ascii_digit())
-        && WIN_SHORT_BASES.iter().any(|base| base.starts_with(stem))
+    WIN_SHORT_BASES.iter().any(|base| is_short_form_of(name, base))
 }
 
 #[cfg(test)]
@@ -292,8 +392,8 @@ mod tests {
             r"C:\Users\alice\Downloads\big.iso",
             r"D:\scan\sub",
             r"d:/scan/sub/file.txt",
-            r"C:\Program Files\OldApp",
-            r"C:\ProgramData\Cache",
+            r"C:\Program Files\OldApp\cache",
+            r"C:\ProgramData\Vendor\Cache",
             r"\\?\D:\scan\sub\x",
             r"D:\data",
             r"C:\Temp",
@@ -304,6 +404,84 @@ mod tests {
         for path in allowed {
             assert!(p.check(path, root).is_ok(), "{path:?} must be allowed");
         }
+    }
+
+    #[test]
+    fn unc_forms_of_system_locations_are_refused() {
+        let p = win();
+        let root = r"D:\scan";
+        for path in [
+            r"\\localhost\c$\Windows",
+            r"\\localhost\C$\Windows\System32\x",
+            r"\\127.0.0.1\C$",
+            r"\\127.0.0.1\C$\",
+            r"\\host\ADMIN$",
+            r"\\host\admin$\system32",
+            r"\\host\IPC$",
+            r"\\host\d$\Windows\x",
+            r"\\host\c$\Program Files",
+            r"\\host\c$\Program Files\App",
+            r"\\host\c$\ProgramData\Vendor",
+            r"\\host\c$\Users\bob",
+            r"\\host\c$\Users\bob\AppData",
+            r"\\host\c$\Users\bob\NTUSER.DAT",
+            r"\\?\UNC\localhost\c$\Windows\x",
+            r"//localhost/c$/Windows/x",
+            r"\\localhost\c$\Temp\..\Windows",
+            r"\\host\share\..\c$\Windows",
+            r"\\localhost\c$\Windows.\x",
+            r"\\host\share",
+        ] {
+            assert!(p.check(path, root).is_err(), "{path:?} must be refused");
+        }
+        for path in [r"\\host\share\dir", r"\\localhost\c$\Temp\x", r"\\?\UNC\host\share\a\b"] {
+            assert!(p.check(path, root).is_ok(), "{path:?} must be allowed by the lexical table");
+        }
+    }
+
+    #[test]
+    fn subtrees_first_levels_and_profile_internals() {
+        let p = win();
+        let root = r"D:\scan";
+        for path in [
+            r"C:\Recovery\x",
+            r"C:\Boot\BCD",
+            r"C:\EFI\Microsoft",
+            r"C:\$Recycle.Bin\S-1-5\x",
+            r"C:\System Volume Information\x\y",
+            r"C:\Windows\x\y\z",
+            r"C:\Windows.\x",
+            r"C:\Windows \System32",
+            r"C:\Program Files\App",
+            r"C:\Program Files (x86)\App",
+            r"C:\ProgramData\Vendor",
+            r"C:\PROGRA~1\App",
+            r"C:\Users\alice\AppData",
+            r"C:\Users\alice\AppData\Local",
+            r"C:\Users\alice\AppData\Roaming",
+            r"C:\Users\bob\AppData\LocalLow",
+            r"C:\Users\bob\APPDAT~1",
+            r"C:\Users\bob\NTUSER.DAT",
+            r"C:\Users\bob\ntuser.dat.LOG1",
+            r"C:\Documents and Settings\bob\AppData",
+        ] {
+            assert!(p.check(path, root).is_err(), "{path:?} must be refused");
+        }
+        for path in [
+            r"C:\Program Files\App\sub",
+            r"C:\Users\alice\AppData\Local\Temp",
+            r"C:\Users\alice\AppData\Local\Temp\x.tmp",
+            r"C:\Users\alice\Downloads\ntuser.dat",
+        ] {
+            assert!(p.check(path, root).is_ok(), "{path:?} must be allowed");
+        }
+        let env = |name: &str| (name == "USERPROFILE").then(|| r"F:\Profiles\carol".to_owned());
+        let custom = ProtectedPaths::build(true, &env);
+        for path in [r"F:\Profiles\carol\AppData", r"F:\Profiles\carol\AppData\Local", r"F:\Profiles\carol\NTUSER.DAT1"]
+        {
+            assert!(custom.check(path, r"G:\x").is_err(), "{path}");
+        }
+        assert!(custom.check(r"F:\Profiles\carol\AppData\Local\Temp", r"G:\x").is_ok());
     }
 
     #[test]
