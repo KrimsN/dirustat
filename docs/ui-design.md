@@ -53,6 +53,22 @@ UI strings live in a catalog `crates/ui/locales/`; the source language is Englis
 - Tools > Cleanups (list, preview, dry run, confirmed run, editor for user cleanups, per-node results) and Tools > Journal (paged `file.journal`) are windows driven by `ui.set_state` fields `cleanups_open`, `cleanups_preview`, `journal_open`.
 - Evidence: `docs/qa/evidence/ui-m47-{delete-recycle,delete-permanent,cleanups,journal}-{dark,light}.png`.
 
+## M4.9 UI rules (QA-125..QA-138)
+
+- **Paths are elided in the middle** (`ui::text_fit`): head, "...", tail, and the last path component (the file name) always stays visible; the full path is the hover text. Used by the delete dialog list, the journal and the cleanup preview. Long single-line texts never push buttons out of a window: put the button first in a `right_to_left` layout and truncate the label (exclusion list in Preferences).
+- **System font fallback** (`ui::fonts`): at startup the app looks for a CJK-capable font in the OS font folders (Windows: `msyh.ttc`, `YuGothR.ttc`, `malgun.ttf`, `msjh.ttc`, `meiryo.ttc`, `simsun.ttc`; macOS and Linux names too) and registers it as the last fallback of both families. No font file is committed or bundled; a missing or unreadable file leaves the built-in fonts (boxes for CJK). Font files over 64 MiB are ignored.
+- **Notices expire**: a status-bar notice disappears after 8 s or when the scan phase changes (`UiState::tick_notice`).
+- **Search**: an invalid criterion (regex, size) clears the highlight set, so nothing stale stays on the map. Hits get a two-ring outline (dark and light, chosen by contrast against the tile colour; one ring on tiles below 10 px). A collapsed folder that contains hits shows a count badge ("99+" cap) with a tooltip.
+- **Text on bars** (percent in the tree and the file-type list) takes the better of the text and the on-accent colour against the bar fill and the track (`ui::contrast`, WCAG contrast ratio).
+- **Extension colours** (`ui::ext_colors`): 60 common extensions get hand-ordered slots on the hue wheel with five lightness/saturation variants (pairwise distance at least 20 in RGB, tested); every other extension is hashed to a continuous hue.
+- **Start screen and drive picker** scroll vertically when the window is small or the zoom is high; rows are 220..320 px wide.
+- **Command palette** rows clip the label before the right-aligned shortcut (never drawn over it).
+- **Cleanups window** reloads when the engine's cleanup definitions change (for example `cleanup.save` over control). A preview or run whose `only_under` folder is outside the scan reads "limited to ..., which is outside the scanned folder" inline, without a toast.
+- **Engine refusals** (`delete_dialog::friendly`): `unsupported` for an unaddressable name (lossy, trailing dot or space, reserved character, device name) names the reason and offers nothing; `stale_tree` shows the first difference the engine found (new, removed or changed file) and offers a rescan; `subtree_changed` of a recycle preview is a warning in the dialog; a cleanup preview shows `unchecked` items and a time-budget warning when `budget_exhausted` is set. Explicit path parameters over control must be local drive paths; the UI itself is not restricted.
+- **Demo mode**: the default `--demo` tree has no files on disk, so delete is refused up front with an honest reason. `DIRUSTAT_DEMO_DELETABLE=1` scans a disposable fixture folder in the temp directory with the fake platform (private "recycle bin"), removed when the app exits; engine protections are unchanged.
+- **Not implemented**: a high-contrast theme (earlier text promised it; G-059).
+- Evidence: `docs/qa/evidence/ui-m49-*.png` (dark and light).
+
 ## Verification
 
 After UI changes: `ui.screenshot` (or the offscreen example) → PNG → inspect it in both themes at 100 % / 150 % scale. Demo data is synthetic.
