@@ -13,13 +13,15 @@ use crate::theme::Tokens;
 use dirustat_engine::Session;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 /// Pause after the last edit before a search starts.
 pub const DEBOUNCE: Duration = Duration::from_millis(300);
 /// Hits requested from the engine (largest first); the engine cap is 10 000.
 pub const RESULT_LIMIT: u64 = 500;
+/// Parent hops walked per hit when marking the folders above it.
+const MAX_MARK_DEPTH: usize = 512;
 /// Rows of the result list that are kept in the serialized state.
 pub const MAX_STATE_HITS: usize = 500;
 
@@ -78,6 +80,8 @@ pub struct SearchRuntime {
     pub focus: bool,
     /// Arena indices highlighted in the tree and the treemap, cached per held result.
     hit_set: HashSet<usize>,
+    /// Folders that contain hits, with the number of hits below each (for the tree's markers).
+    hit_ancestors: HashMap<usize, u32>,
     hit_key: Option<(u64, usize, Option<usize>)>,
 }
 
@@ -256,12 +260,27 @@ impl SearchState {
         &self.runtime.hit_set
     }
 
+    /// Folders that hold hits below them, with the hit count (QA-131): the tree marks such a
+    /// folder while it is collapsed. Valid for the current tree revision.
+    pub fn hit_ancestors(&self) -> &HashMap<usize, u32> {
+        &self.runtime.hit_ancestors
+    }
+
     /// Keeps the highlight set in step with the session's held hits.
     fn sync_hit_set(&mut self, session: &Session) {
         let hits = session.search_hits();
         let key = (session.revision(), hits.len(), hits.first().map(|n| n.index()));
         if self.runtime.hit_key != Some(key) {
             self.runtime.hit_set = hits.iter().map(|n| n.index()).collect();
+            let tree = session.tree();
+            let mut ancestors: HashMap<usize, u32> = HashMap::new();
+            for hit in hits {
+                for a in crate::tree_panel::ancestors(tree, *hit, MAX_MARK_DEPTH) {
+                    let count = ancestors.entry(a.index()).or_insert(0);
+                    *count = count.saturating_add(1);
+                }
+            }
+            self.runtime.hit_ancestors = ancestors;
             self.runtime.hit_key = Some(key);
         }
     }
@@ -290,6 +309,10 @@ impl SearchState {
                 self.clear_result();
                 self.runtime.last_key = None;
                 self.runtime.pending = None;
+                // Invalid criteria must not leave the previous hits highlighted (QA-128).
+                if !session.search_hits().is_empty() {
+                    let _ = session.execute("search.clear", &json!({}));
+                }
                 return None;
             }
         };
@@ -624,6 +647,32 @@ mod tests {
         settle(&mut state, &mut session);
         assert_eq!(state.error, None);
         assert_eq!(state.total_matched, 1);
+    }
+
+    /// QA-128: an invalid size filter must not leave the previous highlight behind.
+    #[test]
+    fn an_invalid_size_filter_clears_the_highlight() {
+        let mut session = session_with_tree();
+        let mut state = open_with("bin");
+        settle(&mut state, &mut session);
+        assert_eq!(session.search_hits().len(), 2);
+        state.min_size = "abc".into();
+        settle(&mut state, &mut session);
+        assert!(state.error.is_some());
+        assert!(session.search_hits().is_empty(), "no stale highlight");
+        assert!(state.hit_ancestors().is_empty());
+    }
+
+    /// QA-131: folders that contain hits are counted so a collapsed row can show a marker.
+    #[test]
+    fn hit_ancestors_count_the_hits_below_each_folder() {
+        let mut session = session_with_tree();
+        let mut state = open_with("Report");
+        settle(&mut state, &mut session);
+        let counts = state.hit_ancestors();
+        let root = session.tree().root().index();
+        assert_eq!(counts.get(&root).copied(), Some(1));
+        assert!(!counts.is_empty());
     }
 
     #[test]

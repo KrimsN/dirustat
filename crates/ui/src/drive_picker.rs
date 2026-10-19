@@ -13,6 +13,8 @@ const WARN_TENTHS: u32 = 850;
 /// Used share above which the bar turns to the error colour, in tenths of a percent.
 const FULL_TENTHS: u32 = 950;
 const ROW_W: f32 = 320.0;
+/// Narrowest drive row; below this the list scrolls sideways instead of overprinting.
+const ROW_MIN_W: f32 = 220.0;
 const ROW_H: f32 = 44.0;
 
 /// One volume as shown by the picker.
@@ -46,9 +48,15 @@ pub fn load(session: &mut Session) -> Vec<DriveEntry> {
         .unwrap_or_default()
 }
 
+/// Width of a drive row for `available` points: [`ROW_W`] when there is room, narrower otherwise
+/// (small windows, high zoom), never below [`ROW_MIN_W`].
+pub fn row_width(available: f32) -> f32 {
+    if available.is_finite() { available.clamp(ROW_MIN_W, ROW_W) } else { ROW_W }
+}
+
 /// Draws one drive row with its fill bar; returns true when it was clicked.
 fn drive_row(ui: &mut egui::Ui, drive: &DriveEntry, tokens: &Tokens) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ROW_W, ROW_H), egui::Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(row_width(ui.available_width()), ROW_H), egui::Sense::click());
     let painter = ui.painter_at(rect);
     if resp.hovered() {
         painter.rect_filled(rect, f32::from(tokens.radius_small), Tokens::color(tokens.surface));
@@ -104,15 +112,33 @@ pub fn show_list(ui: &mut egui::Ui, drives: &[DriveEntry], tokens: &Tokens) -> O
     picked
 }
 
+/// What the user chose on the start screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartAction {
+    /// Scan the root of this drive.
+    Drive(String),
+    /// Open the native folder dialog.
+    Browse,
+}
+
 /// The start screen shown while there is nothing to display.
-pub fn show_start_screen(ui: &mut egui::Ui, drives: &[DriveEntry], tokens: &Tokens) -> Option<String> {
+pub fn show_start_screen(ui: &mut egui::Ui, drives: &[DriveEntry], tokens: &Tokens) -> Option<StartAction> {
     let mut picked = None;
-    ui.vertical_centered(|ui| {
-        ui.add_space(ui.available_height() * 0.12);
-        ui.heading("Choose a drive to scan");
-        ui.colored_label(Tokens::color(tokens.text_muted), "or type a folder path above and press Scan");
-        ui.add_space(tokens.spacing * 2.0);
-        picked = show_list(ui, drives, tokens);
+    // Scrolls when the window is small, the search bar is open or the zoom is high (QA-134).
+    egui::ScrollArea::vertical().id_salt("start_screen").auto_shrink([false, false]).show(ui, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() * 0.12);
+            ui.heading("Choose a drive to scan");
+            ui.colored_label(Tokens::color(tokens.text_muted), "or pick any folder");
+            ui.add_space(tokens.spacing);
+            if ui.button("Browse for a folder…").on_hover_text("Choose the folder to scan in a dialog").clicked() {
+                picked = Some(StartAction::Browse);
+            }
+            ui.add_space(tokens.spacing * 2.0);
+            if let Some(root) = show_list(ui, drives, tokens) {
+                picked = Some(StartAction::Drive(root));
+            }
+        });
     });
     picked
 }
@@ -120,6 +146,32 @@ pub fn show_start_screen(ui: &mut egui::Ui, drives: &[DriveEntry], tokens: &Toke
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rows_shrink_with_the_window_but_not_below_the_minimum() {
+        assert_eq!(row_width(1000.0), ROW_W);
+        assert_eq!(row_width(250.0), 250.0);
+        assert_eq!(row_width(10.0), ROW_MIN_W);
+        assert_eq!(row_width(f32::NAN), ROW_W);
+    }
+
+    #[test]
+    fn many_drives_in_a_tiny_panel_build_inside_a_scroll_area() {
+        let drives: Vec<DriveEntry> = (0..12)
+            .map(|i| DriveEntry { path: format!("{i}:\\"), label: "Data".into(), total: 1000, free: 400 })
+            .collect();
+        let ctx = egui::Context::default();
+        for tokens in [Tokens::dark(), Tokens::light()] {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(320.0, 210.0))),
+                ..egui::RawInput::default()
+            };
+            let out = ctx.run_ui(raw, |ui| {
+                assert!(show_start_screen(ui, &drives, &tokens).is_none());
+            });
+            out.drop_without_applying_deltas();
+        }
+    }
 
     #[test]
     fn used_share_and_title() {

@@ -3,6 +3,8 @@
 use crate::error::{PlatformError, Result};
 use crate::{DriveInfo, PlatformServices, SpaceInfo};
 use std::path::Path;
+#[cfg(windows)]
+use std::path::PathBuf;
 
 /// Why a path cannot be recycled safely (the engine appends the `file.delete_permanent` hint).
 #[cfg(windows)]
@@ -73,6 +75,12 @@ impl PlatformServices for SystemPlatform {
             .spawn()
             .map(drop)
             .map_err(|err| PlatformError::from_io("explorer", text, &err))
+    }
+
+    fn pick_folder(&self) -> Result<Option<PathBuf>> {
+        crate::win32::pick_folder("Choose a folder to scan")
+            .map(|chosen| chosen.map(PathBuf::from))
+            .map_err(|message| PlatformError::Failed { op: "pick_folder", message: message.to_owned() })
     }
 
     fn show_properties(&self, path: &Path) -> Result<()> {

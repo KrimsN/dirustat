@@ -8,10 +8,13 @@ use core::ptr::{null, null_mut};
 use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDrives, GetVolumeInformationW, MoveFileExW,
 };
-use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
+use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
 use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
-use windows_sys::Win32::UI::Shell::{SEE_MASK_INVOKEIDLIST, SHELLEXECUTEINFOW, ShellExecuteExW};
+use windows_sys::Win32::UI::Shell::{
+    BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SEE_MASK_INVOKEIDLIST, SHBrowseForFolderW,
+    SHELLEXECUTEINFOW, SHGetPathFromIDListW, ShellExecuteExW,
+};
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOW;
 
 /// NUL-terminated UTF-16 copy of `s`; `None` when `s` contains NUL.
@@ -98,6 +101,37 @@ pub(crate) fn move_no_replace(from: &str, to: &str) -> std::io::Result<()> {
 /// Capacity of the volume containing `path`; `None` on any failure.
 pub(crate) fn free_space(path: &str) -> Option<SpaceInfo> {
     disk_free_ex(&wide(path)?)
+}
+
+/// Result of the folder dialog: the chosen path, `None` for Cancel, `Err` when it could not be shown.
+pub(crate) fn pick_folder(title: &str) -> Result<Option<String>, &'static str> {
+    let title = wide(title).ok_or("title contains NUL")?;
+    // SAFETY: initialises COM for this thread (the new-style dialog needs it); the reserved pointer
+    // must be null. A negative result (a different apartment model already set) is tolerated and
+    // not paired below.
+    let com = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) } >= 0;
+    // SAFETY: `BROWSEINFOW` is a plain C struct of integers and pointers; all-zero is valid.
+    let mut info: BROWSEINFOW = unsafe { core::mem::zeroed() };
+    info.lpszTitle = title.as_ptr();
+    info.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+    // SAFETY: `info` is initialised, `title` outlives the call; the dialog runs its own message loop
+    // on this thread and returns an owned item id list, or null on Cancel.
+    let pidl = unsafe { SHBrowseForFolderW(&info) };
+    let result = if pidl.is_null() {
+        Ok(None)
+    } else {
+        let mut buf = [0u16; 261];
+        // SAFETY: `pidl` is the live list returned above; `buf` holds the `MAX_PATH` u16s the API writes.
+        let ok = unsafe { SHGetPathFromIDListW(pidl, buf.as_mut_ptr()) } != 0;
+        // SAFETY: `pidl` was allocated by the shell for the caller to free, and is not used afterwards.
+        unsafe { CoTaskMemFree(pidl.cast_const().cast()) };
+        if ok { Ok(Some(from_wide(&buf))) } else { Err("the chosen item is not a file system folder") }
+    };
+    if com {
+        // SAFETY: balances the successful `CoInitializeEx` above on the same thread.
+        unsafe { CoUninitialize() };
+    }
+    result
 }
 
 /// Shows the shell properties window of `path`; `true` when the shell accepted the request.

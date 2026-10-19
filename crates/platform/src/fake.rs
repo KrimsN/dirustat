@@ -20,6 +20,7 @@ pub enum PlatformCall {
     Properties(PathBuf),
     OpenDefault(PathBuf),
     Rename(PathBuf, PathBuf),
+    PickFolder,
 }
 
 static NEXT_BIN: AtomicU64 = AtomicU64::new(0);
@@ -36,6 +37,8 @@ struct State {
     no_bin: bool,
     /// Report a successful recycle without moving anything (a misbehaving shell).
     leave_in_place: bool,
+    /// Answer of `pick_folder` (`None` = the dialog was cancelled).
+    picked: Option<PathBuf>,
 }
 
 /// Fake services. Input is validated like the real implementation, then the call is recorded.
@@ -91,6 +94,11 @@ impl FakePlatform {
     /// Makes every following service call fail with `err` (after recording it); `None` clears it.
     pub fn set_failure(&self, err: Option<PlatformError>) {
         self.lock().fail_with = err;
+    }
+
+    /// Fixes the answer of `pick_folder`: the "chosen" folder, or `None` for a cancelled dialog.
+    pub fn set_picked_folder(&self, folder: Option<PathBuf>) {
+        self.lock().picked = folder;
     }
 
     /// Makes `move_to_recycle_bin` fail with `Unsupported` like a volume that has no recycle bin.
@@ -198,11 +206,27 @@ impl PlatformServices for FakePlatform {
         validate_absolute(path)?;
         self.begin(PlatformCall::OpenDefault(path.to_path_buf()))
     }
+
+    fn pick_folder(&self) -> Result<Option<PathBuf>> {
+        self.begin(PlatformCall::PickFolder)?;
+        Ok(self.lock().picked.clone())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pick_folder_serves_the_configured_answer() {
+        let fake = FakePlatform::new();
+        assert_eq!(fake.pick_folder().unwrap(), None, "a cancelled dialog by default");
+        fake.set_picked_folder(Some(PathBuf::from("C:\\data")));
+        assert_eq!(fake.pick_folder().unwrap(), Some(PathBuf::from("C:\\data")));
+        assert_eq!(fake.calls(), vec![PlatformCall::PickFolder, PlatformCall::PickFolder]);
+        fake.set_failure(Some(PlatformError::Unsupported("pick_folder")));
+        assert!(fake.pick_folder().is_err());
+    }
 
     #[test]
     fn records_calls_and_serves_drives() {

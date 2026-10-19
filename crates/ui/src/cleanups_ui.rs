@@ -9,7 +9,7 @@ use crate::search_panel::{parse_extensions, parse_size};
 use crate::state::UiState;
 use crate::theme::Tokens;
 use crate::toast::{self, ToastKind};
-use dirustat_engine::Session;
+use dirustat_engine::{CommandError, Session};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -196,6 +196,10 @@ pub struct CleanupsState {
     /// The list was read from the session (cleared to reload).
     #[serde(skip)]
     pub loaded: bool,
+    /// Fingerprint of the saved cleanups `entries` were read at; a different one (saved through
+    /// the engine, for example by a control client) makes the list stale.
+    #[serde(skip)]
+    pub settings_key: Option<u64>,
 }
 
 /// What the user did in the window this frame.
@@ -243,8 +247,22 @@ fn entries_of(list: &Value) -> Vec<CleanupEntry> {
         .unwrap_or_default()
 }
 
+/// Fingerprint of the user cleanups saved in the session settings (cheap: a handful of entries).
+pub fn settings_key(session: &Session) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    serde_json::to_string(&session.settings().cleanups).unwrap_or_default().hash(&mut hasher);
+    hasher.finish()
+}
+
+/// True when the list has to be read again: never read, or the saved cleanups changed since.
+pub fn needs_reload(session: &Session, state: &CleanupsState) -> bool {
+    !state.loaded || state.settings_key != Some(settings_key(session))
+}
+
 /// Reads `cleanup.list` into the state.
 pub fn load(session: &mut Session, state: &mut UiState) {
+    state.cleanups.settings_key = Some(settings_key(session));
     match session.execute("cleanup.list", &json!({})) {
         Ok(v) => {
             state.cleanups.entries = entries_of(v.get("cleanups").unwrap_or(&Value::Null));
@@ -295,13 +313,43 @@ fn parse_preview(v: &Value) -> PreviewView {
 }
 
 /// Runs `cleanup.preview` (read-only) and keeps the result.
+///
+/// A failure is also shown inline in the window (the previous preview is dropped, it no longer
+/// belongs to the selection) and returned as text.
 pub fn preview(session: &mut Session, state: &mut UiState, id: &str) -> Result<(), String> {
-    let v = session
-        .execute("cleanup.preview", &json!({ "id": id }))
-        .map_err(|e| delete_dialog::friendly(&e, DeleteMode::Recycle).message)?;
-    state.cleanups.preview = Some(parse_preview(&v));
-    state.cleanups.error = None;
-    Ok(())
+    match session.execute("cleanup.preview", &json!({ "id": id })) {
+        Ok(v) => {
+            state.cleanups.preview = Some(parse_preview(&v));
+            state.cleanups.error = None;
+            Ok(())
+        }
+        Err(e) => {
+            let message = cleanup_error(&e, &state.cleanups.entries, id);
+            state.cleanups.preview = None;
+            state.cleanups.error = Some(message.clone());
+            Err(message)
+        }
+    }
+}
+
+/// Text for a refused cleanup preview or run. Worded for cleanups (not "cannot delete this item")
+/// and names the folder a cleanup is limited to when that folder is not in the scanned tree.
+pub fn cleanup_error(err: &CommandError, entries: &[CleanupEntry], id: &str) -> String {
+    let CommandError::InvalidParams(message) = err else {
+        return delete_dialog::friendly(err, DeleteMode::Recycle).message;
+    };
+    if message.contains("does not resolve to a node") {
+        let entry = entries.iter().find(|e| e.id == id);
+        let name = entry.map_or(id, |e| e.name.as_str());
+        let under = entry.and_then(|e| e.selector.get("only_under")).and_then(Value::as_str);
+        return match under {
+            Some(path) => format!(
+                "Cleanup \"{name}\" is limited to \"{path}\", which is outside the scanned folder. Scan a folder that contains it, or edit the cleanup."
+            ),
+            None => format!("Cleanup \"{name}\" refers to a folder that is not in the scanned tree."),
+        };
+    }
+    strip(message)
 }
 
 /// Opens the confirmation dialog for a cleanup, from a fresh preview. The `reveal` action changes
@@ -318,7 +366,7 @@ pub fn open_run_dialog(session: &mut Session, state: &mut UiState, id: &str) -> 
     if view.action == "reveal" {
         let result = session
             .execute("cleanup.run", &json!({ "id": id, "confirm": true }))
-            .map_err(|e| delete_dialog::friendly(&e, DeleteMode::Recycle).message)?;
+            .map_err(|e| cleanup_error(&e, &state.cleanups.entries, id))?;
         state.cleanups.last_run = Some(parse_run(&result, &view.name));
         toast::push(state, ToastKind::Info, "Showing the largest match in the file manager.");
         return Ok(());
@@ -388,7 +436,7 @@ pub fn dry_run(session: &mut Session, state: &mut UiState, id: &str) -> Result<(
     let name = state.cleanups.entries.iter().find(|e| e.id == id).map(|e| e.name.clone()).unwrap_or_default();
     let v = session
         .execute("cleanup.run", &json!({ "id": id, "dry_run": true, "confirm": true }))
-        .map_err(|e| delete_dialog::friendly(&e, DeleteMode::Recycle).message)?;
+        .map_err(|e| cleanup_error(&e, &state.cleanups.entries, id))?;
     state.cleanups.last_run = Some(parse_run(&v, &name));
     Ok(())
 }
@@ -768,10 +816,7 @@ fn preview_ui(ui: &mut egui::Ui, view: &PreviewView, tokens: &Tokens, revision: 
                         status.on_hover_text(error);
                     }
                     ui.label(egui::RichText::new(human_size(item.size)).color(muted));
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&item.path).monospace().size(tokens.font_small))
-                            .truncate(),
-                    );
+                    crate::text_fit::path_label(ui, &item.path, tokens.font_small, None);
                     ui.end_row();
                 }
             });
@@ -808,9 +853,7 @@ fn run_ui(ui: &mut egui::Ui, run: &RunSummary, tokens: &Tokens) {
             for r in problems {
                 ui.horizontal(|ui| {
                     ui.colored_label(status_color(&r.status, tokens), &r.status);
-                    ui.add(
-                        egui::Label::new(egui::RichText::new(&r.path).monospace().size(tokens.font_small)).truncate(),
-                    );
+                    crate::text_fit::path_label(ui, &r.path, tokens.font_small, None);
                 });
             }
         });

@@ -21,6 +21,8 @@ windows-sys = { workspace = true, features = [
     "Win32_System_Registry",
     "Win32_System_WindowsProgramming",
     "Win32_UI_Shell",
+    # `BROWSEINFOW` (the folder dialog) lives in the Common module.
+    "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
 ] }
 

@@ -6,10 +6,11 @@
 //! `UiState::selected_ext` (clicking it again clears it).
 
 use crate::app::human_size;
+use crate::ext_colors::ext_rgb;
 use crate::state::{ExtSort, ExtSortColumn, UiState};
 use crate::theme::Tokens;
 use crate::tree_panel::{Arrow, arrow};
-use dirustat_engine::{ExtStat, Session, ext_color};
+use dirustat_engine::{ExtStat, Session};
 use dirustat_model::SizeMode;
 use egui::{Align2, FontId, Id, Rect, Sense, Ui, pos2, vec2};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -224,7 +225,7 @@ fn draw_row(ui: &mut Ui, tokens: &Tokens, row: &ExtStat, selected: bool, row_h: 
     let mid_y = rect.center().y;
 
     let swatch = Rect::from_center_size(pos2(rect.left() + SWATCH, mid_y), vec2(SWATCH, SWATCH));
-    painter.rect_filled(swatch, egui::CornerRadius::same(2), rgba(ext_color(&row.ext)));
+    painter.rect_filled(swatch, egui::CornerRadius::same(2), rgba(ext_rgb(&row.ext)));
     let ext_painter = ui.painter_at(Rect::from_x_y_ranges(
         (swatch.right() + 4.0)..=ext_right.max(swatch.right() + 4.0),
         rect.y_range(),
@@ -237,8 +238,21 @@ fn draw_row(ui: &mut Ui, tokens: &Tokens, row: &ExtStat, selected: bool, row_h: 
         .shrink2(vec2(0.0, 3.0));
     painter.rect_filled(bar, radius, Tokens::color(tokens.border));
     let fill = Rect::from_min_size(bar.min, vec2(bar.width() * bar_fraction(row.percent), bar.height()));
-    painter.rect_filled(fill, radius, rgba(ext_color(&row.ext)));
-    painter.text(bar.right_center() - vec2(2.0, 0.0), Align2::RIGHT_CENTER, format_percent(row.percent), font, text);
+    painter.rect_filled(fill, radius, rgba(ext_rgb(&row.ext)));
+    // The label sits on the fill, the track or both: pick the colour that reads on each (QA-136).
+    let label = format_percent(row.percent);
+    let label_w = painter.layout_no_wrap(label.clone(), font.clone(), egui::Color32::PLACEHOLDER).size().x;
+    let label_right = bar.right() - 2.0;
+    let [fr, fg, fb] = ext_rgb(&row.ext);
+    let backgrounds = crate::contrast::bar_backgrounds(
+        label_right - label_w,
+        label_right,
+        fill.right(),
+        [fr, fg, fb, 255],
+        tokens.border,
+    );
+    let label_color = crate::contrast::text_on(tokens, &backgrounds);
+    painter.text(bar.right_center() - vec2(2.0, 0.0), Align2::RIGHT_CENTER, label, font, label_color);
     resp.clicked()
 }
 

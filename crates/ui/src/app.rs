@@ -13,9 +13,11 @@ use crate::{cleanups_ui, drive_picker, ext_panel, journal_ui, map_panel, prefs, 
 use dirustat_control::{SharedSession, lock_session, share};
 use dirustat_engine::{CommandInfo, FastPathStatus, Session};
 use dirustat_model::SizeMode;
+use dirustat_platform::{PlatformError, PlatformServices};
 use serde_json::{Value, json};
-use std::sync::MutexGuard;
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Arc, MutexGuard};
 use std::time::Duration;
 
 /// How often the UI repaints while a scan runs.
@@ -44,6 +46,12 @@ pub struct DirustatApp {
     map_area_px: f32,
     /// Text for the clipboard, handed to egui on the next frame (`ui.copy_path`).
     pending_copy: Option<String>,
+    /// Native services used for the folder dialog (replaced by a fake in tests).
+    picker: Arc<dyn PlatformServices>,
+    /// Answer of the folder dialog running on a helper thread (the dialog blocks its thread).
+    browse: Option<Receiver<Result<Option<PathBuf>, PlatformError>>>,
+    /// The start screen asked for the folder dialog; started once the session lock is released.
+    browse_requested: bool,
 }
 
 /// Share of the window width the treemap always keeps, and its absolute floor in points.
@@ -140,7 +148,15 @@ impl DirustatApp {
             focus_path: false,
             map_area_px: 0.0,
             pending_copy: None,
+            picker: dirustat_platform::default_platform(),
+            browse: None,
+            browse_requested: false,
         }
+    }
+
+    /// Replaces the services behind the folder dialog (tests use a fake that never opens a window).
+    pub fn set_folder_picker(&mut self, picker: Arc<dyn PlatformServices>) {
+        self.picker = picker;
     }
 
     pub fn state(&self) -> &UiState {
@@ -236,6 +252,7 @@ impl DirustatApp {
             match effect {
                 UiEffect::Quit => self.quit_requested = true,
                 UiEffect::CopyPath => self.copy_selected_path()?,
+                UiEffect::BrowseFolder => self.start_browse()?,
                 UiEffect::None => {}
             }
             return Ok(json!({ "ok": true }));
@@ -261,6 +278,62 @@ impl DirustatApp {
             self.state.search.reset();
         }
         Ok(value)
+    }
+
+    /// Opens the native folder dialog on a helper thread; [`Self::poll_browse`] picks up the answer.
+    /// Only the interactive entry points (menu, shortcut, button, palette) reach this; the control
+    /// channel has no such command, so a programmatic call never opens a dialog.
+    fn start_browse(&mut self) -> Result<(), String> {
+        if self.browse.is_some() {
+            return Ok(());
+        }
+        if lock_session(&self.session).is_scanning() {
+            return Err("Stop the running scan first".to_owned());
+        }
+        let (tx, rx) = mpsc::channel();
+        let picker = Arc::clone(&self.picker);
+        std::thread::Builder::new()
+            .name("folder-dialog".to_owned())
+            .spawn(move || {
+                // The receiver is gone when the window closed meanwhile; nothing to report then.
+                let _ = tx.send(picker.pick_folder());
+            })
+            .map_err(|_| "Cannot open the folder dialog".to_owned())?;
+        self.browse = Some(rx);
+        Ok(())
+    }
+
+    /// Applies a finished folder dialog, if any, without blocking: a chosen folder is scanned.
+    fn poll_browse(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.browse else { return };
+        let answer = match rx.try_recv() {
+            Ok(answer) => answer,
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(SCAN_REPAINT);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => Err(PlatformError::Failed {
+                op: "pick_folder",
+                message: "the dialog thread ended without an answer".to_owned(),
+            }),
+        };
+        self.browse = None;
+        ctx.request_repaint();
+        match answer {
+            Ok(Some(folder)) => {
+                self.state.path_text = folder.to_string_lossy().into_owned();
+                if lock_session(&self.session).is_scanning() {
+                    self.state.notice = Some("A scan is running; the folder is in the path field".to_owned());
+                } else {
+                    self.start_scan();
+                }
+            }
+            Ok(None) => {}
+            Err(PlatformError::Unsupported(_)) => {
+                self.state.notice = Some("The folder dialog is not available here; type the path".to_owned());
+            }
+            Err(err) => self.state.notice = Some(format!("Cannot open the folder dialog: {err}")),
+        }
     }
 
     /// Queues the path of the selected node for the clipboard.
@@ -462,6 +535,10 @@ impl DirustatApp {
             self.applied_zoom = Some(self.state.zoom_percent);
         }
         self.poll_scan(&ctx);
+        self.poll_browse(&ctx);
+        if let Some(wait) = self.state.tick_notice(std::time::Instant::now()) {
+            ctx.request_repaint_after(wait);
+        }
         self.shots.pump(&ctx);
         self.refresh_volumes();
         if let Some(text) = self.pending_copy.take() {
@@ -483,6 +560,9 @@ impl DirustatApp {
         if let Some(path) = self.central(ui) {
             self.state.path_text = path;
             self.start_scan();
+        }
+        if std::mem::take(&mut self.browse_requested) {
+            let _ = self.run_command("ui.browse_folder");
         }
         self.prefs_window(&ctx);
         self.elevation_help_window(&ctx);
@@ -583,13 +663,12 @@ impl DirustatApp {
         let Some(id) = self.state.cleanup_request.take() else { return };
         self.state.cleanups.open = true;
         let mut session = lock_session(&self.session);
-        if !self.state.cleanups.loaded {
+        if cleanups_ui::needs_reload(&session, &self.state.cleanups) {
             cleanups_ui::load(&mut session, &mut self.state);
         }
         self.state.cleanups.selected = Some(id.clone());
-        if let Err(message) = cleanups_ui::preview(&mut session, &mut self.state, &id) {
-            toast::push(&mut self.state, toast::ToastKind::Error, message);
-        }
+        // A refusal is shown inline in the window (QA-129), not as a toast.
+        let _ = cleanups_ui::preview(&mut session, &mut self.state, &id);
     }
 
     /// Restarts the scan of the current scan root (after a stale-tree refusal).
@@ -632,10 +711,12 @@ impl DirustatApp {
     /// Tools > Cleanups.
     fn cleanups_window(&mut self, ctx: &egui::Context) {
         if !self.state.cleanups.open {
+            // Reopening reads the saved cleanups again (QA-130).
+            self.state.cleanups.loaded = false;
             return;
         }
         let mut session = lock_session(&self.session);
-        if !self.state.cleanups.loaded {
+        if cleanups_ui::needs_reload(&session, &self.state.cleanups) {
             cleanups_ui::load(&mut session, &mut self.state);
         }
         let block = delete_dialog::block_reason(&session);
@@ -660,7 +741,11 @@ impl DirustatApp {
                 state.cleanups.confirm_remove = None;
                 Ok(())
             }
-            A::Preview(id) => cleanups_ui::preview(session, state, &id),
+            A::Preview(id) => {
+                // The refusal is shown inline in the window.
+                let _ = cleanups_ui::preview(session, state, &id);
+                Ok(())
+            }
             A::Run(id) => cleanups_ui::open_run_dialog(session, state, &id),
             A::DryRun(id) => cleanups_ui::dry_run(session, state, &id),
             A::New => {
@@ -893,7 +978,7 @@ impl DirustatApp {
         egui::Panel::top("top_bar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Path:");
-                let width = (ui.available_width() - 260.0).max(80.0);
+                let width = (ui.available_width() - 340.0).max(80.0);
                 let edit = ui.add_enabled(
                     !scanning,
                     egui::TextEdit::singleline(&mut self.state.path_text)
@@ -908,8 +993,13 @@ impl DirustatApp {
                     if ui.button("Stop").clicked() {
                         run = Some("scan.cancel");
                     }
-                } else if ui.button("Scan").clicked() || enter {
-                    run = Some("scan.start");
+                } else {
+                    if ui.button("Browse…").on_hover_text("Choose the folder to scan in a dialog").clicked() {
+                        run = Some("ui.browse_folder");
+                    }
+                    if ui.button("Scan").clicked() || enter {
+                        run = Some("scan.start");
+                    }
                 }
                 if ui.button(size_label).on_hover_text("Toggle logical / allocated sizes").clicked() {
                     run = Some("view.size_mode");
@@ -944,11 +1034,11 @@ impl DirustatApp {
                 let running = matches!(self.state.scan, ScanStatus::Running { .. });
                 if running && tree.len() > 1 {
                     let muted = Tokens::color(tokens.text_muted);
-                    ui.colored_label(muted, format!("previous scan: {} nodes", tree.len()));
+                    ui.colored_label(muted, format!("previous scan: {}", node_count_text(tree.len())));
                     ui.separator();
                     ui.colored_label(muted, human_size(total));
                 } else {
-                    ui.label(format!("{} nodes", tree.len()));
+                    ui.label(node_count_text(tree.len()));
                     ui.separator();
                     ui.label(human_size(total));
                 }
@@ -1029,11 +1119,16 @@ impl DirustatApp {
             });
         }
         let mut map_area = 0.0;
+        let mut browse = false;
         let nothing_to_show = session.tree().len() <= 1
             && matches!(self.state.scan, ScanStatus::Idle | ScanStatus::Cancelled | ScanStatus::Failed { .. });
         egui::CentralPanel::default().show(ui, |ui| {
             if nothing_to_show {
-                picked = drive_picker::show_start_screen(ui, &self.state.drives, &self.tokens);
+                match drive_picker::show_start_screen(ui, &self.state.drives, &self.tokens) {
+                    Some(drive_picker::StartAction::Drive(root)) => picked = Some(root),
+                    Some(drive_picker::StartAction::Browse) => browse = true,
+                    None => {}
+                }
             } else if panels.map {
                 let size = ui.available_size();
                 map_area = size.x.max(0.0) * size.y.max(0.0);
@@ -1041,6 +1136,7 @@ impl DirustatApp {
             }
         });
         self.map_area_px = map_area;
+        self.browse_requested |= browse;
         if matches!(self.state.scan, ScanStatus::Running { .. }) && session.tree().len() > 1 {
             stale_overlay(ui, area, &self.tokens);
         }
@@ -1118,13 +1214,26 @@ pub(crate) fn human_size(bytes: u64) -> String {
         whole /= 1024;
         unit = unit.saturating_add(1);
     }
-    let name = UNITS.get(unit).copied().unwrap_or("B");
     if unit == 0 {
-        format!("{whole} {name}")
-    } else {
-        let tenth = rem.saturating_mul(10) / 1024;
-        format!("{whole}.{tenth} {name}")
+        return format!("{whole} B");
     }
+    // Round to the nearest tenth (47_998_000 B is 45.8 MiB, not 45.7); a carry may reach the next unit.
+    let mut tenth = rem.saturating_mul(10).saturating_add(512) / 1024;
+    if tenth >= 10 {
+        whole = whole.saturating_add(1);
+        tenth = 0;
+        if whole >= 1024 && unit < UNITS.len().saturating_sub(1) {
+            whole = 1;
+            unit = unit.saturating_add(1);
+        }
+    }
+    let name = UNITS.get(unit).copied().unwrap_or("B");
+    format!("{whole}.{tenth} {name}")
+}
+
+/// "1 node" / "N nodes".
+fn node_count_text(n: usize) -> String {
+    if n == 1 { "1 node".to_owned() } else { format!("{n} nodes") }
 }
 
 #[cfg(test)]
@@ -1476,6 +1585,75 @@ mod tests {
         Some(dir)
     }
 
+    /// Runs frames until the folder dialog thread has answered.
+    fn wait_browse(app: &mut DirustatApp, ctx: &egui::Context) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.browse.is_some() && Instant::now() < deadline {
+            let _ = frame(app, ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn browse_command_scans_the_chosen_folder_without_typing_a_path() {
+        let Some(dir) = fixture_dir() else { return };
+        let (mut app, fake) = app_with_fake();
+        app.set_folder_picker(fake.clone());
+        fake.set_picked_folder(Some(dir.path().to_path_buf()));
+        let ctx = egui::Context::default();
+        assert!(app.state().path_text.is_empty());
+        assert!(app.run_command("ui.browse_folder").is_ok());
+        wait_browse(&mut app, &ctx);
+        assert_eq!(app.state().path_text, dir.path().to_string_lossy());
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while app.is_scanning() && Instant::now() < deadline {
+            let _ = frame(&mut app, &ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = frame(&mut app, &ctx);
+        assert!(matches!(app.state().scan, ScanStatus::Done { .. }), "{:?}", app.state().scan);
+        assert!(fake.calls().contains(&dirustat_platform::PlatformCall::PickFolder));
+    }
+
+    #[test]
+    fn cancelled_folder_dialog_changes_nothing() {
+        let (mut app, fake) = app_with_fake();
+        app.set_folder_picker(fake.clone());
+        let ctx = egui::Context::default();
+        app.state_mut().path_text = "keep-me".to_owned();
+        assert!(app.run_command("ui.browse_folder").is_ok());
+        wait_browse(&mut app, &ctx);
+        assert_eq!(app.state().path_text, "keep-me");
+        assert!(matches!(app.state().scan, ScanStatus::Idle));
+        assert!(app.state().notice.is_none());
+    }
+
+    #[test]
+    fn failing_folder_dialog_is_reported_not_fatal() {
+        let (mut app, fake) = app_with_fake();
+        app.set_folder_picker(fake.clone());
+        fake.set_failure(Some(dirustat_platform::PlatformError::Unsupported("pick_folder")));
+        let ctx = egui::Context::default();
+        assert!(app.run_command("ui.browse_folder").is_ok());
+        wait_browse(&mut app, &ctx);
+        assert!(app.state().notice.as_deref().is_some_and(|n| n.contains("type the path")));
+        assert!(app.browse.is_none(), "the dialog slot is free again");
+    }
+
+    #[test]
+    fn browse_is_refused_while_a_scan_runs() {
+        let Some(dir) = fixture_dir() else { return };
+        let (mut app, fake) = app_with_fake();
+        app.set_folder_picker(fake.clone());
+        let ctx = egui::Context::default();
+        scan_dir(&mut app, &ctx, dir.path());
+        app.session().execute("scan.start", &json!({ "path": dir.path().to_string_lossy() })).ok();
+        if app.is_scanning() {
+            assert!(app.run_command("ui.browse_folder").is_err());
+            assert!(app.browse.is_none());
+        }
+    }
+
     #[test]
     fn drive_picker_lists_fake_drives_and_refreshes() {
         use dirustat_platform::DriveInfo;
@@ -1627,9 +1805,23 @@ mod tests {
     }
 
     #[test]
+    fn node_counts_are_singular_for_one() {
+        assert_eq!(node_count_text(1), "1 node");
+        assert_eq!(node_count_text(0), "0 nodes");
+        assert_eq!(node_count_text(2), "2 nodes");
+    }
+
+    #[test]
     fn human_size_formats() {
         assert_eq!(human_size(0), "0 B");
         assert_eq!(human_size(1536), "1.5 KiB");
+        // Rounded to the nearest tenth, not floored (QA-138).
+        assert_eq!(human_size(47_998_000), "45.8 MiB");
+        assert_eq!(human_size(9000), "8.8 KiB");
+        assert_eq!(human_size(1023), "1023 B");
+        assert_eq!(human_size(1024 * 1024 - 1), "1.0 MiB", "a carry moves to the next unit");
+        assert_eq!(human_size(1024 * 1024 - 100), "1023.9 KiB");
+        assert_eq!(human_size(1024), "1.0 KiB");
         assert!(human_size(u64::MAX).ends_with("PiB"));
     }
 }

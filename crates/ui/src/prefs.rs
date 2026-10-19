@@ -59,11 +59,16 @@ pub fn show(
             ui.colored_label(Tokens::color(tokens.text_muted), "No exclusions");
         }
         for (i, pattern) in exclude.iter().enumerate() {
+            // Remove stays pinned at the right edge; a long pattern is cut at the end and
+            // shown in full by its tooltip (QA-133).
             ui.horizontal(|ui| {
-                ui.monospace(pattern);
-                if ui.small_button("Remove").clicked() {
-                    action = Some(PrefsAction::Remove(i));
-                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.small_button("Remove").clicked() {
+                        action = Some(PrefsAction::Remove(i));
+                    }
+                    ui.add(egui::Label::new(egui::RichText::new(pattern).monospace()).truncate())
+                        .on_hover_text(pattern);
+                });
             });
         }
         ui.add_space(tokens.spacing);
@@ -90,6 +95,30 @@ pub fn show(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_very_long_pattern_keeps_the_window_and_remove_in_view() {
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let long = format!("C:/very/long/{}", "p".repeat(1024));
+        let exclude = vec!["*.tmp".to_owned(), long];
+        for tokens in [Tokens::dark(), Tokens::light()] {
+            let mut open = true;
+            let mut input = String::new();
+            // The first frame sizes the window, the second shows its final layout.
+            for _ in 0..2 {
+                let raw = egui::RawInput { screen_rect: Some(screen), ..egui::RawInput::default() };
+                let out = ctx.run_ui(raw, |ui| {
+                    let _ = show(ui.ctx(), &mut open, &mut input, None, &exclude, &tokens);
+                });
+                out.drop_without_applying_deltas();
+            }
+            let rect = ctx.memory(|m| m.area_rect(egui::Id::new("Preferences")));
+            let rect = rect.unwrap_or(egui::Rect::NOTHING);
+            assert!(rect.width() < 700.0, "window width {} stays bounded", rect.width());
+            assert!(rect.right() <= screen.right(), "window {rect:?} stays on screen");
+        }
+    }
 
     #[test]
     fn patterns_are_added_trimmed_and_deduplicated() {

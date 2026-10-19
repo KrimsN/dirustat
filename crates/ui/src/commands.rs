@@ -13,6 +13,8 @@ pub enum UiEffect {
     Quit,
     /// Copy the path of the selected node to the clipboard (needs the session, done by the app).
     CopyPath,
+    /// Open the native folder dialog; the app scans the chosen folder (dialog runs on a helper thread).
+    BrowseFolder,
 }
 
 /// A shell-only command.
@@ -96,6 +98,9 @@ fn refresh_drives(s: &mut UiState) -> UiEffect {
 fn copy_path(_: &mut UiState) -> UiEffect {
     UiEffect::CopyPath
 }
+fn browse_folder(_: &mut UiState) -> UiEffect {
+    UiEffect::BrowseFolder
+}
 fn cleanups(s: &mut UiState) -> UiEffect {
     s.cleanups.open = !s.cleanups.open;
     UiEffect::None
@@ -110,6 +115,15 @@ const NONE: &str = "none";
 
 /// All shell-only commands.
 pub const UI_COMMANDS: &[UiCommand] = &[
+    UiCommand {
+        id: "ui.browse_folder",
+        label: "Open folder…",
+        menu: "File/Open folder…",
+        shortcut: Some("Ctrl+Shift+O"),
+        params_doc: NONE,
+        checked: None,
+        run: browse_folder,
+    },
     UiCommand {
         id: "ui.toggle_search",
         label: "Find",

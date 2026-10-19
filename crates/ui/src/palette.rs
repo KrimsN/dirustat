@@ -78,20 +78,7 @@ pub fn show(ctx: &egui::Context, state: &mut UiState, tokens: &Tokens, entries: 
                 let Some(e) = entries.get(*idx) else { continue };
                 let selected = row == state.palette_index;
                 let color = Tokens::color(if e.enabled { tokens.text } else { tokens.text_muted });
-                let resp = ui
-                    .horizontal(|ui| {
-                        ui.selectable_label(selected, egui::RichText::new(&e.label).color(color)).on_hover_text(&e.id)
-                    })
-                    .inner;
-                if let Some(sc) = &e.shortcut {
-                    ui.painter().text(
-                        resp.rect.right_center(),
-                        egui::Align2::RIGHT_CENTER,
-                        sc,
-                        egui::FontId::proportional(tokens.font_small),
-                        Tokens::color(tokens.text_muted),
-                    );
-                }
+                let resp = draw_row(ui, e, selected, color, tokens).on_hover_text(&e.id);
                 if resp.clicked() {
                     clicked = Some(*idx);
                 }
@@ -116,6 +103,57 @@ pub fn show(ctx: &egui::Context, state: &mut UiState, tokens: &Tokens, entries: 
     chosen
 }
 
+/// Horizontal room kept between a label and the shortcut text of its row.
+const SHORTCUT_GAP: f32 = 12.0;
+
+/// One row: the label at the left, the shortcut right-aligned in its own column. The label is
+/// clipped before the shortcut instead of being drawn under it (QA-132).
+fn draw_row(
+    ui: &mut egui::Ui,
+    e: &PaletteEntry,
+    selected: bool,
+    color: egui::Color32,
+    tokens: &Tokens,
+) -> egui::Response {
+    let row_h = tokens.font_body + tokens.spacing * 1.5;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), row_h), egui::Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return resp;
+    }
+    let painter = ui.painter_at(rect);
+    let radius = f32::from(tokens.radius_small);
+    if selected {
+        painter.rect_filled(rect, radius, Tokens::color(tokens.accent).gamma_multiply(0.35));
+    } else if resp.hovered() {
+        painter.rect_filled(rect, radius, Tokens::color(tokens.surface));
+    }
+    let pad = tokens.spacing;
+    let mut label_right = rect.right() - pad;
+    if let Some(shortcut) = &e.shortcut {
+        let galley = painter.layout_no_wrap(
+            shortcut.clone(),
+            egui::FontId::proportional(tokens.font_small),
+            Tokens::color(tokens.text_muted),
+        );
+        let x = rect.right() - pad - galley.size().x;
+        painter.galley(
+            egui::pos2(x, rect.center().y - galley.size().y / 2.0),
+            galley,
+            Tokens::color(tokens.text_muted),
+        );
+        label_right = x - SHORTCUT_GAP;
+    }
+    let clip = egui::Rect::from_min_max(rect.min, egui::pos2(label_right.max(rect.left()), rect.bottom()));
+    painter.with_clip_rect(clip).text(
+        egui::pos2(rect.left() + pad, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        &e.label,
+        egui::FontId::proportional(tokens.font_body),
+        color,
+    );
+    resp
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +171,60 @@ mod tests {
         assert_eq!(filter(&e, "scan.start"), vec![1]);
         assert!(filter(&e, "zzz").is_empty());
         assert!(filter(&[], "x").is_empty());
+    }
+
+    fn collect_text_rects(shape: &egui::epaint::Shape, out: &mut Vec<egui::Rect>) {
+        match shape {
+            egui::epaint::Shape::Text(t) => out.push(t.visual_bounding_rect()),
+            egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| collect_text_rects(s, out)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn rows_with_shortcuts_draw_in_both_themes() {
+        let ctx = egui::Context::default();
+        let entries = vec![
+            PaletteEntry {
+                id: "file.delete".into(),
+                label: "Delete (recycle bin)".into(),
+                menu: "Edit/Delete".into(),
+                shortcut: Some("Delete".into()),
+                enabled: true,
+            },
+            PaletteEntry {
+                id: "file.delete_permanent".into(),
+                label: "Delete permanently".into(),
+                menu: "Edit/Delete permanently".into(),
+                shortcut: Some("Shift+Delete".into()),
+                enabled: false,
+            },
+        ];
+        for tokens in [Tokens::dark(), Tokens::light()] {
+            let mut state = UiState { palette_open: true, palette_query: "del".into(), ..UiState::default() };
+            let mut rects = Vec::new();
+            // The first frames size the window and load the fonts; the last one has the final layout.
+            for _ in 0..4 {
+                rects.clear();
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                    ..egui::RawInput::default()
+                };
+                let out = ctx.run_ui(raw, |ui| {
+                    let _ = show(ui.ctx(), &mut state, &tokens, &entries);
+                });
+                for clipped in &out.shapes {
+                    collect_text_rects(&clipped.shape, &mut rects);
+                }
+                out.drop_without_applying_deltas();
+            }
+            assert!(rects.len() >= 4, "{} text shapes", rects.len());
+            for (i, a) in rects.iter().enumerate() {
+                for b in rects.iter().skip(i + 1) {
+                    assert!(!a.intersects(*b), "text {a:?} is drawn over text {b:?}");
+                }
+            }
+        }
     }
 
     #[test]

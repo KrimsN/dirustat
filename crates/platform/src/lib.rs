@@ -25,7 +25,7 @@ pub use system::SystemPlatform;
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Debug;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Upper bound on drives returned by [`PlatformServices::drives`].
@@ -75,6 +75,13 @@ pub trait PlatformServices: Send + Sync + Debug {
 
     /// Opens the shell properties window of `path`. Launches an external window.
     fn show_properties(&self, path: &Path) -> Result<()>;
+
+    /// Shows the native "choose a folder" dialog and blocks until it closes: `Ok(Some(path))` for
+    /// a chosen folder, `Ok(None)` for Cancel. Interactive only: call it from a helper thread, never
+    /// from a command. Optional: defaults to `Unsupported`.
+    fn pick_folder(&self) -> Result<Option<PathBuf>> {
+        Err(PlatformError::Unsupported("pick_folder"))
+    }
 
     /// Opens `path` with its default application. Optional: defaults to `Unsupported`.
     fn open_default(&self, _path: &Path) -> Result<()> {

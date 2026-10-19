@@ -144,7 +144,7 @@ pub fn show(ctx: &egui::Context, state: &mut JournalState, tokens: &Tokens) -> O
             ui.colored_label(muted, "No destructive actions yet");
             return;
         }
-        egui::ScrollArea::both().id_salt("journal_rows").auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("journal_rows").auto_shrink([false, false]).show(ui, |ui| {
             egui::Grid::new("journal_grid").striped(true).num_columns(6).spacing([12.0, 4.0]).show(ui, |ui| {
                 for h in ["Time (UTC)", "Operation", "Mode", "Result", "Size", "Path"] {
                     ui.label(egui::RichText::new(h).strong());
@@ -164,7 +164,7 @@ pub fn show(ctx: &egui::Context, state: &mut JournalState, tokens: &Tokens) -> O
                         Some(dest) => format!("{} -> {dest}", row.path),
                         None => row.path.clone(),
                     };
-                    ui.add(egui::Label::new(egui::RichText::new(path).monospace().size(tokens.font_small)).truncate());
+                    crate::text_fit::path_label(ui, &path, tokens.font_small, None);
                     ui.end_row();
                 }
             });

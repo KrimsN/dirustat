@@ -158,7 +158,34 @@ pub struct UiState {
     /// The Journal window (`ui.journal`).
     #[serde(default)]
     pub journal: crate::journal_ui::JournalState,
+    /// Lifetime bookkeeping of `notice`; not serialized and ignored by equality.
+    #[serde(skip)]
+    pub notice_clock: NoticeClock,
 }
+
+/// How long a status-bar notice stays when nothing else clears it.
+pub const NOTICE_SECONDS: u64 = 8;
+
+/// When the current notice appeared and which scan phase it belongs to.
+#[derive(Debug, Default)]
+pub struct NoticeClock {
+    seen: Option<(String, std::time::Instant)>,
+    phase: Option<u8>,
+}
+
+impl Clone for NoticeClock {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl PartialEq for NoticeClock {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for NoticeClock {}
 
 /// Total and free bytes of the scanned volume.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -220,6 +247,7 @@ impl Default for UiState {
             toast_since: None,
             cleanups: crate::cleanups_ui::CleanupsState::default(),
             journal: crate::journal_ui::JournalState::default(),
+            notice_clock: NoticeClock::default(),
         }
     }
 }
@@ -287,6 +315,43 @@ impl UiState {
             (Some(v), Some(s)) if s.needs_admin => Some(v.to_owned()),
             _ => None,
         };
+    }
+
+    /// Expires the status-bar notice (QA-127): a notice goes away after [`NOTICE_SECONDS`] and as
+    /// soon as the scan changes phase (started, finished, cancelled, failed), because the
+    /// condition it reported ("wait for the scan to finish") is over. Returns how long until the
+    /// shown notice expires, so the caller can schedule a repaint.
+    pub fn tick_notice(&mut self, now: std::time::Instant) -> Option<std::time::Duration> {
+        let phase = match self.scan {
+            ScanStatus::Idle => 0,
+            ScanStatus::Running { .. } => 1,
+            ScanStatus::Done { .. } => 2,
+            ScanStatus::Cancelled => 3,
+            ScanStatus::Failed { .. } => 4,
+        };
+        if self.notice_clock.phase.is_some_and(|p| p != phase) {
+            self.notice = None;
+        }
+        self.notice_clock.phase = Some(phase);
+        let Some(text) = &self.notice else {
+            self.notice_clock.seen = None;
+            return None;
+        };
+        let since = match &self.notice_clock.seen {
+            Some((seen, t)) if seen == text => *t,
+            _ => {
+                self.notice_clock.seen = Some((text.clone(), now));
+                now
+            }
+        };
+        let lifetime = std::time::Duration::from_secs(NOTICE_SECONDS);
+        let elapsed = now.saturating_duration_since(since);
+        if elapsed >= lifetime {
+            self.notice = None;
+            self.notice_clock.seen = None;
+            return None;
+        }
+        Some(lifetime.saturating_sub(elapsed))
     }
 
     /// Applies a `ui.set_state` patch atomically: on any error the state is left unchanged.
@@ -415,6 +480,53 @@ mod tests {
             assert!(state.apply_patch(&bad).is_err(), "{bad}");
             assert_eq!(state, before);
         }
+    }
+
+    #[test]
+    fn notice_expires_after_its_lifetime() {
+        let mut s = UiState::default();
+        let t0 = std::time::Instant::now();
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(s.tick_notice(t0), None);
+        s.notice = Some("Wait for the scan to finish".into());
+        assert_eq!(s.tick_notice(t0), Some(secs(NOTICE_SECONDS)));
+        assert!(s.notice.is_some());
+        assert_eq!(s.tick_notice(t0 + secs(NOTICE_SECONDS - 1)), Some(secs(1)));
+        assert!(s.notice.is_some());
+        assert_eq!(s.tick_notice(t0 + secs(NOTICE_SECONDS)), None);
+        assert!(s.notice.is_none());
+        // A different notice restarts the clock.
+        s.notice = Some("a".into());
+        let _ = s.tick_notice(t0 + secs(100));
+        s.notice = Some("b".into());
+        assert_eq!(s.tick_notice(t0 + secs(105)), Some(secs(NOTICE_SECONDS)));
+    }
+
+    #[test]
+    fn notice_clears_when_the_scan_phase_changes() {
+        let t = std::time::Instant::now();
+        let running = |n: u64| ScanStatus::Running { dirs: n, files: n, bytes: n, errors: 0 };
+        for (from, to) in [
+            (running(1), ScanStatus::Done { errors: 0 }),
+            (running(1), ScanStatus::Cancelled),
+            (ScanStatus::Done { errors: 0 }, running(0)),
+            (ScanStatus::Idle, ScanStatus::Failed { message: "x".into() }),
+        ] {
+            let mut s = UiState { scan: from, ..UiState::default() };
+            let _ = s.tick_notice(t);
+            s.notice = Some("The scan root cannot be deleted".into());
+            assert!(s.tick_notice(t).is_some());
+            assert!(s.notice.is_some(), "stays while nothing changed");
+            s.scan = to;
+            assert_eq!(s.tick_notice(t), None);
+            assert!(s.notice.is_none());
+        }
+        // Progress updates inside one phase do not clear it.
+        let mut s = UiState { scan: running(1), ..UiState::default() };
+        let _ = s.tick_notice(t);
+        s.notice = Some("n".into());
+        s.scan = running(9);
+        assert!(s.tick_notice(t).is_some());
     }
 
     #[test]

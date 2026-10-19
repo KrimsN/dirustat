@@ -385,7 +385,7 @@ fn draw_row(
     row_h: f32,
     mode: SizeMode,
     selected: Option<NodeId>,
-    hits: &std::collections::HashSet<usize>,
+    search: &crate::search_panel::SearchState,
     tokens: &Tokens,
     actions: &mut Actions,
 ) {
@@ -397,7 +397,7 @@ fn draw_row(
     let painter = ui.painter_at(rect);
     if selected == Some(row.node) {
         painter.rect_filled(rect, 0.0, Tokens::color(tokens.accent).gamma_multiply(0.35));
-    } else if hits.contains(&row.node.index()) {
+    } else if search.hit_set().contains(&row.node.index()) {
         painter.rect_filled(rect, 0.0, Tokens::color(tokens.warning).gamma_multiply(0.25));
     } else if resp.hovered() {
         painter.rect_filled(rect, 0.0, Tokens::color(tokens.surface));
@@ -450,6 +450,13 @@ fn draw_row(
         // The name does not fit the column: the tooltip shows it in full.
         resp.clone().on_hover_text(node.name());
     }
+    // A collapsed folder with search hits below it carries a count badge (QA-131).
+    if row.expandable
+        && !row.expanded
+        && let Some(count) = search.hit_ancestors().get(&row.node.index())
+    {
+        hit_badge(ui, &painter, name_cell, *count, resp.id, tokens);
+    }
 
     // Size.
     let total = node.total_size(mode);
@@ -472,12 +479,24 @@ fn draw_row(
             let fill = egui::Rect::from_min_size(track.min, egui::vec2(fill_w, track.height()));
             painter.rect_filled(fill, f32::from(tokens.radius_small), Tokens::color(tokens.accent));
         }
+        let label = percent_text(tenths);
+        let label_font = egui::FontId::proportional(tokens.font_small);
+        let label_w = painter.layout_no_wrap(label.clone(), label_font.clone(), egui::Color32::PLACEHOLDER).size().x;
+        let label_from = track.center().x - label_w / 2.0;
+        // The label is centred over fill and track: pick the colour that reads on both (QA-136).
+        let backgrounds = crate::contrast::bar_backgrounds(
+            label_from,
+            label_from + label_w,
+            track.left() + fill_w,
+            tokens.accent,
+            tokens.background,
+        );
         painter.with_clip_rect(bar_cell).text(
             track.center(),
             egui::Align2::CENTER_CENTER,
-            percent_text(tenths),
-            egui::FontId::proportional(tokens.font_small),
-            text,
+            label,
+            label_font,
+            crate::contrast::text_on(tokens, &backgrounds),
         );
     }
 
@@ -497,6 +516,38 @@ fn draw_row(
         font,
         muted,
     );
+}
+
+/// Text of the hit-count badge on a collapsed folder (`99+` caps the width).
+pub fn badge_text(count: u32) -> String {
+    if count > 99 { "99+".to_owned() } else { count.to_string() }
+}
+
+/// Draws the "hits inside" badge at the right end of the name cell.
+fn hit_badge(
+    ui: &mut egui::Ui,
+    painter: &egui::Painter,
+    cell: egui::Rect,
+    count: u32,
+    row_id: egui::Id,
+    tokens: &Tokens,
+) {
+    let font = egui::FontId::proportional(tokens.font_small);
+    let galley = painter.layout_no_wrap(badge_text(count), font, egui::Color32::PLACEHOLDER);
+    let size = egui::vec2((galley.size().x + 8.0).max(16.0), galley.size().y + 2.0);
+    let rect =
+        egui::Rect::from_min_size(egui::pos2(cell.right() - size.x - ROW_PAD, cell.center().y - size.y / 2.0), size);
+    let fill = tokens.warning;
+    painter.rect_filled(rect, size.y / 2.0, Tokens::color(fill));
+    painter.text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        badge_text(count),
+        egui::FontId::proportional(tokens.font_small),
+        crate::contrast::text_on(tokens, &[fill]),
+    );
+    let noun = if count == 1 { "search hit" } else { "search hits" };
+    ui.interact(rect, row_id.with("hit_badge"), egui::Sense::hover()).on_hover_text(format!("{count} {noun} inside"));
 }
 
 /// Hint shown above a tree that has only the root: after a finished scan the folder is empty,
@@ -546,12 +597,12 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState, token
     {
         area = area.vertical_scroll_offset((i as f32 * row_h - row_h * 2.0).max(0.0));
     }
-    let hits = state.search.hit_set();
+    let search = &state.search;
     let tree = session.tree();
     area.show_rows(ui, row_h, total_rows, |ui, range| {
         ui.spacing_mut().item_spacing.y = 0.0;
         for row in cache.flat.rows.get(range).unwrap_or_default() {
-            draw_row(ui, tree, *row, widths, row_h, mode, selection, hits, tokens, &mut actions);
+            draw_row(ui, tree, *row, widths, row_h, mode, selection, search, tokens, &mut actions);
         }
     });
     if cache.flat.truncated {
@@ -590,6 +641,14 @@ mod tests {
         tree.add_child(root, "alpha", NodeKind::File, 300).unwrap();
         tree.aggregate();
         tree
+    }
+
+    #[test]
+    fn hit_badges_cap_at_99_plus() {
+        assert_eq!(badge_text(1), "1");
+        assert_eq!(badge_text(99), "99");
+        assert_eq!(badge_text(100), "99+");
+        assert_eq!(badge_text(u32::MAX), "99+");
     }
 
     #[test]

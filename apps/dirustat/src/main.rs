@@ -10,6 +10,7 @@ mod bridge;
 use bridge::UiEndpoint;
 use dirustat_control::{ControlServer, SharedSession, default_key_dir, lock_session};
 use dirustat_engine::{LAUNCH_USAGE, LaunchArgs, Session, Settings, settings_dir, settings_path};
+use dirustat_ui::demo::DemoFixture;
 use dirustat_ui::{DirustatApp, ScreenshotStatus, WINDOW_TITLE};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,10 +87,17 @@ fn enable_journal(session: &mut Session, dir: Option<std::path::PathBuf>) {
 }
 
 /// Builds the session from the launch arguments: demo data or saved settings, then `--size-mode`.
+/// The fixture (only for `DIRUSTAT_DEMO_DELETABLE=1`) must stay alive until the app exits.
 #[allow(clippy::print_stderr)]
-fn build_session(args: &LaunchArgs) -> Result<Session, String> {
+fn build_session(args: &LaunchArgs) -> Result<(Session, Option<DemoFixture>), String> {
+    let mut fixture = None;
     let mut session = if args.demo && std::env::var_os("DIRUSTAT_DEMO_EMPTY").is_some() {
         dirustat_ui::demo::empty_demo_session()
+    } else if args.demo && std::env::var_os("DIRUSTAT_DEMO_DELETABLE").is_some() {
+        let (session, dir) =
+            dirustat_ui::demo::deletable_demo_session().map_err(|m| format!("cannot build demo data: {m}"))?;
+        fixture = Some(dir);
+        session
     } else if args.demo {
         dirustat_ui::demo::demo_session().map_err(|m| format!("cannot build demo data: {m}"))?
     } else {
@@ -107,7 +115,7 @@ fn build_session(args: &LaunchArgs) -> Result<Session, String> {
     if let Some(mode) = args.size_mode {
         session.set_map_size_mode(mode);
     }
-    Ok(session)
+    Ok((session, fixture))
 }
 
 /// Saves the settings on exit; a failure is only a warning. Demo runs never call this.
@@ -133,7 +141,7 @@ fn main() -> eframe::Result {
         println!("{LAUNCH_USAGE}");
         return Ok(());
     }
-    let session = match build_session(&args) {
+    let (session, mut fixture) = match build_session(&args) {
         Ok(s) => s,
         Err(message) => {
             eprintln!("{message}");
@@ -151,6 +159,7 @@ fn main() -> eframe::Result {
     if let Some(port) = args.control {
         let Some(key_dir) = default_key_dir() else {
             eprintln!("cannot start the control channel: no per-user config directory");
+            drop(fixture.take());
             std::process::exit(1);
         };
         let (ui_bridge, ui_endpoint) = bridge::channel();
@@ -162,6 +171,7 @@ fn main() -> eframe::Result {
             }
             Err(e) => {
                 eprintln!("cannot start the control channel on port {port}: {e}");
+                drop(fixture.take());
                 std::process::exit(1);
             }
         }
@@ -187,6 +197,8 @@ fn main() -> eframe::Result {
         WINDOW_TITLE,
         options,
         Box::new(move |cc| {
+            // A system CJK font as the last fallback; absent fonts leave the built-in ones (QA-126).
+            let _ = dirustat_ui::fonts::install_cjk_fallback(&cc.egui_ctx);
             if let Some(endpoint) = &shell.endpoint {
                 endpoint.attach(&cc.egui_ctx);
             }
@@ -199,6 +211,7 @@ fn main() -> eframe::Result {
     if let Some(server) = server {
         server.shutdown();
     }
+    drop(fixture.take());
     if failed.load(Ordering::SeqCst) {
         std::process::exit(1);
     }
@@ -246,7 +259,8 @@ mod tests {
     #[test]
     fn demo_session_honours_size_mode_and_has_a_neutral_root() {
         let args = parse(&["--demo", "--size-mode", "logical"]).unwrap();
-        let session = build_session(&args).unwrap();
+        let (session, fixture) = build_session(&args).unwrap();
+        assert!(fixture.is_none(), "the default demo has no files behind it");
         assert_eq!(session.map_size_mode(), dirustat_model::SizeMode::Logical);
         let root = session.tree().root();
         assert_eq!(session.tree().get(root).map(|n| n.name()), Some("demo"));

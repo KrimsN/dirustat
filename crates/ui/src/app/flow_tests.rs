@@ -153,7 +153,7 @@ fn recycle_flow_preview_cancel_then_confirm() {
     assert!(r.app.state().delete_dialog.is_none());
     let toast = r.app.state().toast.clone().expect("a toast reports the outcome");
     assert!(toast.text.contains("Recycle Bin") && toast.text.contains("big.bin"), "{}", toast.text);
-    assert!(toast.text.contains("8.7 KiB"), "{}", toast.text);
+    assert!(toast.text.contains("8.8 KiB"), "{}", toast.text);
     assert!(r.app.session().revision() > revision);
     assert!(r.app.session().selection().is_none());
     assert_eq!(r.journal_total(), 1);
@@ -653,4 +653,191 @@ fn new_ui_state_round_trips_through_json() {
     )
     .unwrap();
     assert!(old.delete_dialog.is_none() && !old.cleanups.open && !old.journal.open && old.toast.is_none());
+}
+
+/// Texts drawn in the last of `n` frames (galley contents of every text shape).
+fn drawn_texts(r: &mut Rig, n: usize) -> Vec<String> {
+    fn walk(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+        match shape {
+            egui::epaint::Shape::Text(t) => out.push(t.galley.text().to_owned()),
+            egui::epaint::Shape::Vec(v) => v.iter().for_each(|s| walk(s, out)),
+            _ => {}
+        }
+    }
+    let mut texts = Vec::new();
+    for _ in 0..n {
+        texts.clear();
+        let input = egui::RawInput { screen_rect: Some(screen()), ..egui::RawInput::default() };
+        let out = r.ctx.run_ui(input, |ui| r.app.show(ui));
+        for clipped in &out.shapes {
+            walk(&clipped.shape, &mut texts);
+        }
+        out.drop_without_applying_deltas();
+    }
+    texts
+}
+
+/// QA-125: with a long common prefix the delete list, the journal and the cleanup preview must
+/// still show the end of every path (the file name).
+#[test]
+fn long_paths_keep_their_file_names_visible_in_dialog_journal_and_preview() {
+    let mut r = Rig::new(0, None);
+    let prefix = "C:\\Users\\someone\\AppData\\Local\\Temp\\a_rather_long_fixture_folder\\nested\\deeper\\and_deeper";
+    let paths: Vec<String> = (0..30).map(|i| format!("{prefix}\\file_{i:03}_name.txt")).collect();
+    for theme in [ThemeKind::Dark, ThemeKind::Light] {
+        r.app.state_mut().theme = theme;
+        let mut dialog = literal_dialog(0, 0, DeleteMode::Permanent);
+        dialog.path = prefix.to_owned();
+        dialog.count = 30;
+        dialog.files = 30;
+        dialog.paths = paths.clone();
+        r.app.state_mut().delete_dialog = Some(dialog);
+        let texts = drawn_texts(&mut r, 4);
+        let rows: Vec<&String> = texts.iter().filter(|t| t.contains("file_")).collect();
+        assert!(rows.len() >= 5, "the list draws several rows: {texts:?}");
+        for row in rows {
+            assert!(row.ends_with("_name.txt"), "the end of the path is visible: {row}");
+        }
+        r.app.state_mut().delete_dialog = None;
+    }
+    r.app.state_mut().journal.open = true;
+    r.app.state_mut().journal.loaded = true;
+    r.app.state_mut().journal.total = 3;
+    r.app.state_mut().journal.rows = (0..3)
+        .map(|i| journal_ui::JournalRow {
+            time: 1_700_000_000,
+            op: "file.delete".into(),
+            path: format!("{prefix}\\entry_{i}_name.txt"),
+            destination: None,
+            size: 10,
+            mode: "recycle".into(),
+            ok: true,
+            error: None,
+        })
+        .collect();
+    let texts = drawn_texts(&mut r, 4);
+    let rows: Vec<&String> = texts.iter().filter(|t| t.contains("entry_")).collect();
+    assert_eq!(rows.len(), 3, "{texts:?}");
+    for row in rows {
+        assert!(row.ends_with("_name.txt"), "{row}");
+    }
+    r.app.state_mut().journal.open = false;
+    r.app.state_mut().cleanups.open = true;
+    r.app.state_mut().cleanups.loaded = true;
+    let key = cleanups_ui::settings_key(&r.app.session());
+    let revision = r.app.session().revision();
+    r.app.state_mut().cleanups.settings_key = Some(key);
+    r.app.state_mut().cleanups.preview = Some(cleanups_ui::PreviewView {
+        id: "x".into(),
+        name: "X".into(),
+        action: "recycle".into(),
+        revision,
+        count: 3,
+        size: 30,
+        truncated: false,
+        ok: 3,
+        protected: 0,
+        stale: 0,
+        invalid: 0,
+        partial: 0,
+        items: (0..3)
+            .map(|i| cleanups_ui::PreviewItem {
+                name: format!("p{i}"),
+                kind: "file".into(),
+                path: format!("{prefix}\\preview_{i}_name.txt"),
+                size: 10,
+                status: "ok".into(),
+                partial_tree: false,
+                error: None,
+            })
+            .collect(),
+    });
+    let texts = drawn_texts(&mut r, 4);
+    let rows: Vec<&String> = texts.iter().filter(|t| t.contains("preview_")).collect();
+    assert_eq!(rows.len(), 3, "{texts:?}");
+    for row in rows {
+        assert!(row.ends_with("_name.txt"), "{row}");
+    }
+}
+
+#[test]
+fn a_single_item_dialog_does_not_print_its_path_twice() {
+    let mut d = literal_dialog(0, 0, DeleteMode::Recycle);
+    d.path = "C:\\x\\a.txt".into();
+    d.paths = vec!["C:\\x\\a.txt".into()];
+    assert!(!delete_dialog::shows_path_list(&d));
+    d.paths.push("C:\\x\\b.txt".into());
+    assert!(delete_dialog::shows_path_list(&d));
+    d.paths = vec!["C:\\x\\other.txt".into()];
+    assert!(delete_dialog::shows_path_list(&d));
+    d.paths.clear();
+    assert!(!delete_dialog::shows_path_list(&d));
+}
+
+/// QA-127: a refusal notice goes away when the scan it complained about ends.
+#[test]
+fn the_wait_for_the_scan_notice_clears_when_the_scan_ends() {
+    let mut r = Rig::new(0, None);
+    r.select("big.bin");
+    r.app.start_scan();
+    r.frames(1, vec![]);
+    let _ = r.app.run_command("file.delete");
+    assert_eq!(r.app.state().notice.as_deref(), Some("Wait for the scan to finish"));
+    r.frames(1, vec![]);
+    assert!(r.app.state().notice.is_some() || !r.app.is_scanning(), "it stays while the scan runs");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while r.app.is_scanning() && Instant::now() < deadline {
+        r.frames(1, vec![]);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    r.frames(3, vec![]);
+    assert!(matches!(r.app.state().scan, ScanStatus::Done { .. }));
+    assert_eq!(r.app.state().notice, None, "no contradictory 'scan complete' next to 'wait'");
+}
+
+/// QA-130: cleanups saved through the engine appear in the open window and after reopening it.
+#[test]
+fn cleanups_saved_through_the_engine_show_up_in_the_window() {
+    let mut r = Rig::new(0, None);
+    r.app.run_command("ui.cleanups").unwrap();
+    r.frames(3, vec![]);
+    let builtin = r.app.state().cleanups.entries.len();
+    assert!(builtin > 0 && r.app.state().cleanups.entries.iter().all(|e| e.builtin));
+    let save = |r: &mut Rig, id: &str| {
+        let def = json!({"id": id, "name": id, "action": "recycle", "selector": {"names": ["*.zzz"]}});
+        r.app.session().execute("cleanup.save", &json!({ "definition": def })).unwrap();
+    };
+    save(&mut r, "from-control-1");
+    r.frames(3, vec![]);
+    assert_eq!(r.app.state().cleanups.entries.len(), builtin + 1, "the open window refreshes");
+    r.app.apply_ui_patch(&json!({"cleanups_open": false})).unwrap();
+    r.frames(2, vec![]);
+    save(&mut r, "from-control-2");
+    r.app.apply_ui_patch(&json!({"cleanups_open": true})).unwrap();
+    r.frames(3, vec![]);
+    let ids: Vec<&str> = r.app.state().cleanups.entries.iter().map(|e| e.id.as_str()).collect();
+    assert!(ids.contains(&"from-control-1") && ids.contains(&"from-control-2"), "{ids:?}");
+}
+
+/// QA-129: a cleanup limited to a folder outside the scan gets a preview-worded inline message.
+#[test]
+fn a_cleanup_limited_to_a_folder_outside_the_scan_explains_itself_inline() {
+    let mut r = Rig::new(0, None);
+    let outside = if cfg!(windows) { "C:\\Windows" } else { "/usr" };
+    let def = json!({"id": "qa-x", "name": "QA x", "action": "recycle",
+        "selector": {"names": ["*"], "only_under": outside}});
+    r.app.session().execute("cleanup.save", &json!({ "definition": def })).unwrap();
+    r.app.apply_ui_patch(&json!({"cleanups_preview": "temporary-files"})).unwrap();
+    r.frames(2, vec![]);
+    assert!(r.app.state().cleanups.preview.is_some());
+    r.app.apply_ui_patch(&json!({"cleanups_preview": "qa-x"})).unwrap();
+    r.frames(2, vec![]);
+    let st = r.app.state();
+    let message = st.cleanups.error.clone().unwrap_or_default();
+    assert!(message.contains("QA x") && message.contains(outside), "{message}");
+    assert!(message.contains("outside the scanned folder"), "{message}");
+    assert!(!message.contains("delete"), "worded for a cleanup, not a delete: {message}");
+    assert!(st.cleanups.preview.is_none(), "the previous preview does not stay");
+    assert!(st.toast.is_none(), "an inline message, not a toast");
+    r.frames(2, vec![]);
 }

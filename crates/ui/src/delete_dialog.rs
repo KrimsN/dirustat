@@ -33,6 +33,9 @@ pub const UNC_REASON: &str =
     "Deleting is disabled on network (UNC) scan roots. Scan a local drive path to delete files.";
 const SCANNING_REASON: &str = "Wait for the scan to finish";
 const NO_TREE_REASON: &str = "Scan a folder first";
+/// Why nothing can be deleted in the default demo (its tree has no files behind it).
+pub const DEMO_REASON: &str = "This is synthetic demo data: there are no files on disk to delete. Start with \
+     DIRUSTAT_DEMO_DELETABLE=1 to try the delete flow on a disposable fixture.";
 pub const ROOT_REASON: &str = "The scan root cannot be deleted";
 
 /// What the dialog will do when confirmed.
@@ -210,8 +213,13 @@ pub fn block_reason(session: &Session) -> Option<&'static str> {
     if tree.len() <= 1 {
         return Some(NO_TREE_REASON);
     }
-    if session.node_path(tree.root()).is_some_and(|p| is_unc_path(&p)) {
+    let root = session.node_path(tree.root());
+    if root.as_deref().is_some_and(is_unc_path) {
         return Some(UNC_REASON);
+    }
+    // A scan root is always absolute; a relative one is the neutral label of the demo tree.
+    if root.as_deref().is_some_and(|p| !std::path::Path::new(p).is_absolute()) {
+        return Some(DEMO_REASON);
     }
     None
 }
@@ -400,7 +408,7 @@ pub fn show(ctx: &egui::Context, dialog: &mut DeleteDialog, tokens: &Tokens) -> 
         ui.label(title);
         ui.label(egui::RichText::new(&dialog.name).strong());
         if !dialog.path.is_empty() {
-            ui.add(egui::Label::new(egui::RichText::new(&dialog.path).monospace().color(muted)).wrap());
+            crate::text_fit::path_label(ui, &dialog.path, tokens.font_body, Some(muted));
         }
         ui.label(format!("{} - {}", describe_counts(dialog.count, dialog.files, dialog.dirs), human_size(dialog.size)));
         if dialog.skipped > 0 {
@@ -460,14 +468,23 @@ pub fn show(ctx: &egui::Context, dialog: &mut DeleteDialog, tokens: &Tokens) -> 
     event
 }
 
+/// The list repeats nothing: a single item whose path is already printed above is not listed again.
+pub fn shows_path_list(dialog: &DeleteDialog) -> bool {
+    match dialog.paths.as_slice() {
+        [] => false,
+        [only] => only != &dialog.path,
+        _ => true,
+    }
+}
+
 fn path_list(ui: &mut egui::Ui, dialog: &DeleteDialog, tokens: &Tokens) {
-    if dialog.paths.is_empty() {
+    if !shows_path_list(dialog) {
         return;
     }
     let muted = Tokens::color(tokens.text_muted);
     egui::ScrollArea::vertical().id_salt("delete_dialog_paths").max_height(130.0).show(ui, |ui| {
         for path in dialog.paths.iter().take(SHOWN_PATHS) {
-            ui.add(egui::Label::new(egui::RichText::new(path).monospace().size(tokens.font_small)).truncate());
+            crate::text_fit::path_label(ui, path, tokens.font_small, None);
         }
         let shown = u64::try_from(dialog.paths.len().min(SHOWN_PATHS)).unwrap_or(0);
         let more = dialog.count.saturating_sub(shown);

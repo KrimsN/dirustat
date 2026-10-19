@@ -5,7 +5,7 @@
 
 use crate::state::UiState;
 use crate::theme::{Rgba, Tokens};
-use dirustat_engine::{MapTile, Session, ext_color, extension_of};
+use dirustat_engine::{MapTile, Session, extension_of};
 use dirustat_model::{NodeId, NodeKind, SizeMode, Tree};
 use dirustat_treemap::Rect;
 use egui::{Color32, Pos2, Sense, Stroke, StrokeKind};
@@ -15,6 +15,10 @@ use std::sync::Arc;
 const MIN_TILE_PX: f32 = 1.0;
 /// Directory frames and leaf outlines are drawn only for tiles at least this large.
 const MIN_OUTLINE_PX: f32 = 5.0;
+/// Width of each of the two rings drawn around a search hit.
+const HIT_RING_PX: f32 = 2.0;
+/// Tiles smaller than this get a single ring.
+const HIT_RING_MIN_PX: f32 = 10.0;
 /// Upper bound on the number of parent hops when building a path (cyclic arenas cannot hang us).
 const MAX_PATH_DEPTH: usize = 4096;
 
@@ -38,7 +42,7 @@ pub fn tile_color(kind: NodeKind, name: &str, tokens: &Tokens, hovered: bool) ->
     let base = match kind {
         NodeKind::Dir => tokens.surface,
         NodeKind::File | NodeKind::Link => {
-            let [r, g, b] = ext_color(&extension_of(name));
+            let [r, g, b] = crate::ext_colors::ext_rgb(&extension_of(name));
             [r, g, b, 255]
         }
     };
@@ -191,10 +195,26 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
         }
     }
     if !state.search.hit_set().is_empty() {
-        let warn = Stroke::new(1.5, Tokens::color(tokens.warning));
-        for tile in tiles.iter().filter(|t| state.search.hit_set().contains(&t.node.index())) {
-            if tile.rect.w >= MIN_TILE_PX && tile.rect.h >= MIN_TILE_PX {
-                painter.rect_stroke(to_screen(origin, tile.rect), 0.0, warn, StrokeKind::Inside);
+        // Two rings in the theme's extreme colours, ordered by contrast with the tile, so a hit
+        // stands out on every tile colour (QA-131).
+        for (tile, color) in
+            tiles.iter().zip(colors.iter()).filter(|(t, _)| state.search.hit_set().contains(&t.node.index()))
+        {
+            if tile.rect.w < MIN_TILE_PX || tile.rect.h < MIN_TILE_PX {
+                continue;
+            }
+            let (inner, outer) = crate::contrast::outline_pair(&tokens, *color);
+            let screen = to_screen(origin, tile.rect);
+            if tile.rect.w >= HIT_RING_MIN_PX && tile.rect.h >= HIT_RING_MIN_PX {
+                painter.rect_stroke(screen, 0.0, Stroke::new(HIT_RING_PX, inner), StrokeKind::Inside);
+                painter.rect_stroke(
+                    screen.shrink(HIT_RING_PX),
+                    0.0,
+                    Stroke::new(HIT_RING_PX, outer),
+                    StrokeKind::Inside,
+                );
+            } else {
+                painter.rect_stroke(screen, 0.0, Stroke::new(HIT_RING_PX, inner), StrokeKind::Inside);
             }
         }
     }
