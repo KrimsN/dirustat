@@ -321,6 +321,7 @@ fn literal_dialog(id: usize, revision: u64, mode: DeleteMode) -> DeleteDialog {
         paths: vec![],
         truncated: false,
         partial_tree: false,
+        subtree_changed: None,
         skipped: 0,
         ack_permanent: true,
         ack_partial: true,
@@ -735,6 +736,8 @@ fn long_paths_keep_their_file_names_visible_in_dialog_journal_and_preview() {
         count: 3,
         size: 30,
         truncated: false,
+        budget_exhausted: false,
+        unchecked: 0,
         ok: 3,
         protected: 0,
         stale: 0,
@@ -840,4 +843,77 @@ fn a_cleanup_limited_to_a_folder_outside_the_scan_explains_itself_inline() {
     assert!(st.cleanups.preview.is_none(), "the previous preview does not stay");
     assert!(st.toast.is_none(), "an inline message, not a toast");
     r.frames(2, vec![]);
+}
+
+/// G-056: the engine's M4.8 refusals get specific, friendly messages.
+#[test]
+fn engine_refusals_of_m48_have_friendly_messages() {
+    use dirustat_engine::CommandError;
+    let unaddr = CommandError::Unsupported(
+        "refused: the name ends with a dot or a space; this item cannot be addressed by a unique path, so it was not touched"
+            .to_owned(),
+    );
+    for mode in [DeleteMode::Recycle, DeleteMode::Permanent] {
+        let m = delete_dialog::friendly(&unaddr, mode);
+        assert!(m.message.contains("will not touch this item"), "{}", m.message);
+        assert!(m.message.contains("the name ends with a dot or a space"), "{}", m.message);
+        assert_eq!(m.hint, Hint::None, "no permanent-delete offer for an unaddressable name");
+    }
+    let recycle = delete_dialog::friendly(&CommandError::Unsupported("recycle bin".into()), DeleteMode::Recycle);
+    assert_eq!(recycle.hint, Hint::OfferPermanent, "the missing recycle bin still offers permanent deletion");
+    let drift = CommandError::StaleTree("a new file appeared: sub\\NEW.docx".to_owned());
+    let m = delete_dialog::friendly(&drift, DeleteMode::Permanent);
+    assert!(m.message.contains("A new file appeared: sub\\NEW.docx."), "{}", m.message);
+    assert!(m.message.contains("Nothing was deleted"), "{}", m.message);
+    assert_eq!(m.hint, Hint::Rescan);
+    let revision = CommandError::StaleTree("node ids were read at revision 3 but the tree is at revision 4".into());
+    let m = delete_dialog::friendly(&revision, DeleteMode::Recycle);
+    assert!(m.message.contains("refreshed after the dialog opened"), "{}", m.message);
+    assert_eq!(m.hint, Hint::Rescan);
+}
+
+/// G-056: `subtree_changed` of a recycle preview is shown as a warning in the dialog.
+#[test]
+fn a_recycle_preview_with_subtree_changed_warns_in_the_dialog() {
+    let mut r = Rig::new(0, None);
+    let report = json!({"path": "C:\\x\\dir", "count": 2, "files": 1, "dirs": 1, "size": 5, "paths": ["C:\\x\\dir"],
+        "subtree_changed": "a new file appeared: NEW.docx"});
+    let dialog = DeleteDialog::from_report(&report, DeleteMode::Recycle, 1, 1, "dir");
+    assert_eq!(dialog.subtree_changed.as_deref(), Some("a new file appeared: NEW.docx"));
+    assert!(
+        DeleteDialog::from_report(&json!({"subtree_changed": null}), DeleteMode::Recycle, 1, 1, "d")
+            .subtree_changed
+            .is_none()
+    );
+    for theme in [ThemeKind::Dark, ThemeKind::Light] {
+        r.app.state_mut().theme = theme;
+        r.app.state_mut().delete_dialog = Some(dialog.clone());
+        let texts = drawn_texts(&mut r, 4);
+        assert!(
+            texts.iter().any(|t| t.contains("The folder has changed since the scan") && t.contains("NEW.docx")),
+            "{texts:?}"
+        );
+    }
+}
+
+/// G-056: `budget_exhausted` and `unchecked` show up in the cleanup preview.
+#[test]
+fn a_cleanup_preview_reports_the_time_budget_and_unchecked_items() {
+    let mut r = Rig::new(0, None);
+    let revision = r.app.session().revision();
+    r.app.state_mut().cleanups.open = true;
+    r.app.state_mut().cleanups.loaded = true;
+    let key = cleanups_ui::settings_key(&r.app.session());
+    r.app.state_mut().cleanups.settings_key = Some(key);
+    let view = cleanups_ui::parse_preview(&json!({"id": "x", "name": "X", "action": "recycle", "revision": revision,
+        "count": 2, "size": 20, "truncated": false, "budget_exhausted": true,
+        "items": [
+            {"id": 1, "name": "a", "kind": "file", "path": "C:\\a", "size": 10, "status": "ok"},
+            {"id": 2, "name": "b", "kind": "file", "path": "C:\\b", "size": 10, "status": "unchecked"}]}));
+    assert!(view.budget_exhausted);
+    assert_eq!((view.ok, view.unchecked), (1, 1));
+    r.app.state_mut().cleanups.preview = Some(view);
+    let texts = drawn_texts(&mut r, 4);
+    assert!(texts.iter().any(|t| t.contains("1 unchecked")), "{texts:?}");
+    assert!(texts.iter().any(|t| t.contains("ran out of time")), "{texts:?}");
 }

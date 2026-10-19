@@ -114,6 +114,9 @@ pub struct DeleteDialog {
     pub truncated: bool,
     /// The tree may omit entries that exist on disk (exclusions or read errors).
     pub partial_tree: bool,
+    /// First difference found when a recycle preview re-read the folder on disk (`subtree_changed`).
+    #[serde(default)]
+    pub subtree_changed: Option<String>,
     /// Items of a cleanup that are protected, stale or invalid and will be skipped.
     pub skipped: u64,
     /// Checkbox: "I understand this cannot be undone" (`i_understand_permanent`).
@@ -176,7 +179,7 @@ impl DeleteDialog {
     }
 
     /// Builds the dialog of a node from a `file.delete_preview` report.
-    fn from_report(report: &Value, mode: DeleteMode, id: usize, revision: u64, name: &str) -> Self {
+    pub(crate) fn from_report(report: &Value, mode: DeleteMode, id: usize, revision: u64, name: &str) -> Self {
         let num = |k: &str| report.get(k).and_then(Value::as_u64).unwrap_or(0);
         let paths = report
             .get("paths")
@@ -195,6 +198,7 @@ impl DeleteDialog {
             paths,
             truncated: report.get("truncated").and_then(Value::as_bool).unwrap_or(false),
             partial_tree: report.get("partial_tree").and_then(Value::as_bool).unwrap_or(false),
+            subtree_changed: report.get("subtree_changed").and_then(Value::as_str).map(str::to_owned),
             skipped: 0,
             ack_permanent: false,
             ack_partial: false,
@@ -229,6 +233,20 @@ pub fn node_block_reason(session: &Session, node: NodeId) -> Option<&'static str
     block_reason(session).or_else(|| (node == session.tree().root()).then_some(ROOT_REASON))
 }
 
+/// `text` as a sentence: first letter upper-case, ending in a full stop.
+fn sentence(text: &str) -> String {
+    let text = text.trim().trim_end_matches('.');
+    let mut chars = text.chars();
+    let Some(first) = chars.next() else { return "something changed.".to_owned() };
+    format!("{}{}.", first.to_uppercase(), chars.as_str())
+}
+
+/// The `why` of the engine's "refused: {why}; this item cannot be addressed ..." message.
+fn unaddressable_reason(message: &str) -> &str {
+    let rest = message.strip_prefix("refused: ").unwrap_or(message);
+    rest.split("; this item").next().unwrap_or(rest)
+}
+
 /// A user-readable message for a refused or failed destructive command.
 pub fn friendly(err: &CommandError, mode: DeleteMode) -> DialogError {
     let (message, hint) = match err {
@@ -238,11 +256,27 @@ pub fn friendly(err: &CommandError, mode: DeleteMode) -> DialogError {
                 .to_owned(),
             Hint::None,
         ),
-        CommandError::StaleTree(_) => (
-            "The folder tree no longer matches the disk: something changed after the scan. Nothing was \
-             deleted. Scan again to refresh the tree."
+        CommandError::StaleTree(m) if m.contains("node ids were read at revision") => (
+            "The folder tree no longer matches this dialog: it was refreshed after the dialog opened. Nothing \
+             was deleted. Close the dialog and try again, or scan again."
                 .to_owned(),
             Hint::Rescan,
+        ),
+        CommandError::StaleTree(m) => (
+            format!(
+                "The folder no longer matches the scan: {} Nothing was deleted. Scan again to refresh the tree.",
+                sentence(m)
+            ),
+            Hint::Rescan,
+        ),
+        CommandError::Unsupported(m) if m.contains("cannot be addressed") => (
+            format!(
+                "diRUSTat will not touch this item: {}. Its name cannot be written as one exact path \
+                 (unreadable characters, a trailing dot or space, a reserved character or a device name), \
+                 so the command could hit a different file. Nothing was changed.",
+                unaddressable_reason(m)
+            ),
+            Hint::None,
         ),
         CommandError::Unsupported(_) if mode == DeleteMode::Recycle => (
             "This volume has no Recycle Bin (network, removable or unknown drive), so nothing was touched. \
@@ -455,6 +489,19 @@ pub fn show(ctx: &egui::Context, dialog: &mut DeleteDialog, tokens: &Tokens) -> 
             if permanent {
                 ui.checkbox(&mut dialog.ack_partial, "I understand more items than listed may be deleted");
             }
+        }
+        if let Some(change) = &dialog.subtree_changed {
+            let warn = Tokens::color(tokens.warning);
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new(format!(
+                        "The folder has changed since the scan ({}). The Recycle Bin will take what is on disk now.",
+                        change.trim().trim_end_matches('.')
+                    ))
+                    .color(warn),
+                )
+                .wrap(),
+            );
         }
         if let Some(error) = &dialog.error {
             ui.add(egui::Label::new(egui::RichText::new(&error.message).color(danger)).wrap());

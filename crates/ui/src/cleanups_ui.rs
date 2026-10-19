@@ -55,6 +55,12 @@ pub struct PreviewView {
     pub count: u64,
     pub size: u64,
     pub truncated: bool,
+    /// The engine's time budget ran out: the rest of the matches was not checked.
+    #[serde(default)]
+    pub budget_exhausted: bool,
+    /// Items with status `unchecked` (listed but not verified before the budget ran out).
+    #[serde(default)]
+    pub unchecked: u64,
     pub ok: u64,
     pub protected: u64,
     pub stale: u64,
@@ -84,6 +90,8 @@ pub struct RunSummary {
     pub failed: u64,
     pub not_attempted: u64,
     pub stopped: Option<String>,
+    #[serde(default)]
+    pub budget_exhausted: bool,
     pub rescan_recommended: bool,
     pub results: Vec<RunItem>,
 }
@@ -273,7 +281,7 @@ pub fn load(session: &mut Session, state: &mut UiState) {
     state.cleanups.loaded = true;
 }
 
-fn parse_preview(v: &Value) -> PreviewView {
+pub fn parse_preview(v: &Value) -> PreviewView {
     let items: Vec<PreviewItem> = v
         .get("items")
         .and_then(Value::as_array)
@@ -303,6 +311,8 @@ fn parse_preview(v: &Value) -> PreviewView {
         count: u64_of(v, "count"),
         size: u64_of(v, "size"),
         truncated: v.get("truncated").and_then(Value::as_bool).unwrap_or(false),
+        budget_exhausted: v.get("budget_exhausted").and_then(Value::as_bool).unwrap_or(false),
+        unchecked: count_of("unchecked"),
         ok: count_of("ok"),
         protected: count_of("protected"),
         stale: count_of("stale"),
@@ -391,6 +401,7 @@ pub fn open_run_dialog(session: &mut Session, state: &mut UiState, id: &str) -> 
         paths: ok_items.iter().take(MAX_STORED_PATHS).map(|i| i.path.clone()).collect(),
         truncated: view.truncated,
         partial_tree: ok_items.iter().any(|i| i.partial_tree),
+        subtree_changed: None,
         skipped: view.count.saturating_sub(ok_count),
         ack_permanent: false,
         ack_partial: false,
@@ -426,6 +437,7 @@ fn parse_run(v: &Value, name: &str) -> RunSummary {
         failed: u64_of(v, "failed"),
         not_attempted: u64_of(v, "not_attempted"),
         stopped: v.get("stopped").and_then(Value::as_str).map(str::to_owned),
+        budget_exhausted: v.get("budget_exhausted").and_then(Value::as_bool).unwrap_or(false),
         rescan_recommended: v.get("rescan_recommended").and_then(Value::as_bool).unwrap_or(false),
         results,
     }
@@ -457,6 +469,9 @@ fn run_text(s: &RunSummary, mode: DeleteMode) -> String {
     text.push('.');
     if let Some(reason) = &s.stopped {
         text.push_str(&format!(" Stopped: {reason}."));
+    }
+    if s.budget_exhausted {
+        text.push_str(" Some matches were not checked in time and were skipped.");
     }
     if s.rescan_recommended {
         text.push_str(" Scan again to refresh the tree.");
@@ -774,10 +789,14 @@ fn entry_buttons(
     action
 }
 
+/// Shown when the engine's time budget ran out while matching or checking a cleanup.
+const BUDGET_TEXT: &str = "The check ran out of time, so part of the matches was not verified (status \
+     \"unchecked\") and will be skipped. Narrow the cleanup or preview again.";
+
 fn status_color(status: &str, tokens: &Tokens) -> egui::Color32 {
     Tokens::color(match status {
         "ok" | "done" => tokens.success,
-        "protected" | "stale" | "needs_confirmation" => tokens.warning,
+        "protected" | "stale" | "needs_confirmation" | "unchecked" => tokens.warning,
         _ => tokens.error,
     })
 }
@@ -790,6 +809,7 @@ fn preview_ui(ui: &mut egui::Ui, view: &PreviewView, tokens: &Tokens, revision: 
         (view.ok, "ok"),
         (view.protected, "protected"),
         (view.stale, "stale"),
+        (view.unchecked, "unchecked"),
         (view.invalid, "invalid"),
         (view.partial, "partial"),
     ] {
@@ -803,6 +823,9 @@ fn preview_ui(ui: &mut egui::Ui, view: &PreviewView, tokens: &Tokens, revision: 
     }
     if view.truncated {
         ui.colored_label(Tokens::color(tokens.warning), "The list is cut at the engine limit.");
+    }
+    if view.budget_exhausted {
+        ui.add(egui::Label::new(egui::RichText::new(BUDGET_TEXT).color(Tokens::color(tokens.warning))).wrap());
     }
     egui::ScrollArea::vertical().id_salt("cleanup_preview").max_height(200.0).auto_shrink([false, true]).show(
         ui,
@@ -842,6 +865,9 @@ fn run_ui(ui: &mut egui::Ui, run: &RunSummary, tokens: &Tokens) {
             egui::Label::new(egui::RichText::new(format!("Stopped: {reason}")).color(Tokens::color(tokens.error)))
                 .wrap(),
         );
+    }
+    if run.budget_exhausted {
+        ui.add(egui::Label::new(egui::RichText::new(BUDGET_TEXT).color(Tokens::color(tokens.warning))).wrap());
     }
     if run.rescan_recommended {
         ui.colored_label(Tokens::color(tokens.warning), "Scan again to refresh the tree.");
