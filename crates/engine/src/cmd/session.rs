@@ -69,6 +69,7 @@ impl Session {
             "size_mode": view.size_mode,
             "partial_scan": self.partial_scan,
             "rescan_recommended": self.rescan_recommended,
+            "removal_in_progress": self.removal_in_progress(),
         })
     }
 }

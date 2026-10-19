@@ -6,13 +6,15 @@
 //! return at once. Parameters are validated by the platform layer (empty, relative, NUL and
 //! over-long paths are `invalid_params`).
 
+use super::detached::BusyGuard;
 use super::{CommandSpec, always, parse_params};
 use crate::{CommandError, Session};
-use dirustat_platform::PlatformError;
+use dirustat_platform::{PlatformError, PlatformServices};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 pub(super) fn specs() -> Vec<CommandSpec> {
@@ -48,7 +50,10 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params_doc: "{\"path\": string} an existing absolute local drive path (X:\\...; network, device and \
                 relative paths are invalid_params). Returns {path, total, free} in bytes of the volume that holds \
-                it; gives up with an internal error after 3 s if the volume does not answer.",
+                it; gives up with an internal error after 3 s if the volume does not answer. At most one query per \
+                session waits on the OS: while an earlier one is still stuck, a new call fails at once with an \
+                internal error (\"has not returned yet\"). Hosts that share the session call it through \
+                Session::execute_split, which keeps the session free while the OS is asked.",
             destructive: false,
             enabled: always,
             run: run_free_space,
@@ -119,29 +124,61 @@ fn require_local(path: &str) -> Result<(), CommandError> {
     }
 }
 
-/// How long a volume query may take before the command gives up (a mapped network drive can hang).
-const FREE_SPACE_TIMEOUT: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(3) };
+/// A validated `platform.free_space` query, ready to run without the session (QA-143).
+#[derive(Debug)]
+pub(super) struct FreeSpaceJob {
+    platform: Arc<dyn PlatformServices>,
+    target: PathBuf,
+    path: String,
+    busy: Arc<AtomicBool>,
+    timeout: Duration,
+}
 
-fn run_free_space(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
+/// Validates the params and captures what the OS call needs; touches no disk.
+pub(super) fn begin_free_space(session: &Session, params: &Value) -> Result<FreeSpaceJob, CommandError> {
     let p: PathParams = parse_params(params)?;
     require_local(&p.path)?;
-    // The query runs on a helper thread so a stuck volume (a mapped network drive, a dead device)
-    // cannot hold the session lock for longer than the timeout; the thread is left to finish alone.
-    let platform = session.platform();
-    let target = PathBuf::from(&p.path);
-    let (tx, rx) = mpsc::channel();
-    let worker = std::thread::Builder::new()
-        .name("dirustat-free-space".to_owned())
-        .spawn(move || {
-            let _ = tx.send(platform.free_space(&target));
-        })
-        .map_err(|e| CommandError::Platform(format!("cannot start the volume query: {e}")))?;
-    drop(worker);
-    let space = rx
-        .recv_timeout(FREE_SPACE_TIMEOUT)
-        .map_err(|_| CommandError::Platform("the volume did not answer in time".to_owned()))?
-        .map_err(platform_error)?;
-    Ok(json!({ "path": p.path, "total": space.total, "free": space.free }))
+    Ok(FreeSpaceJob {
+        platform: session.platform(),
+        target: PathBuf::from(&p.path),
+        path: p.path,
+        busy: Arc::clone(&session.volume_query_busy),
+        timeout: session.volume_query_timeout,
+    })
+}
+
+impl FreeSpaceJob {
+    /// Asks the OS on a helper thread and waits at most the timeout, so a stuck volume (a mapped
+    /// network drive, a dead device) cannot hold the caller for long. At most one helper exists per
+    /// session: while a previous query is still stuck, a new one is refused at once instead of
+    /// leaking another thread (QA-143). The helper clears the flag when the OS finally answers.
+    pub(super) fn run(self) -> Result<Value, CommandError> {
+        let Some(claim) = BusyGuard::claim(&self.busy) else {
+            return Err(CommandError::Platform(
+                "an earlier query of a volume has not returned yet (the volume may be hung); try again later"
+                    .to_owned(),
+            ));
+        };
+        let (tx, rx) = mpsc::channel();
+        let (platform, target) = (self.platform, self.target);
+        std::thread::Builder::new()
+            .name("dirustat-free-space".to_owned())
+            .spawn(move || {
+                let answer = platform.free_space(&target);
+                drop(claim);
+                let _ = tx.send(answer);
+            })
+            .map_err(|e| CommandError::Platform(format!("cannot start the volume query: {e}")))?;
+        let space = rx
+            .recv_timeout(self.timeout)
+            .map_err(|_| CommandError::Platform("the volume did not answer in time".to_owned()))?
+            .map_err(platform_error)?;
+        Ok(json!({ "path": self.path, "total": space.total, "free": space.free }))
+    }
+}
+
+fn run_free_space(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
+    begin_free_space(session, params)?.run()
 }
 
 #[cfg(test)]

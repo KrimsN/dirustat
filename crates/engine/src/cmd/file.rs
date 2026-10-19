@@ -14,13 +14,14 @@
 //! the session tree (`prune`), the revision is bumped (arena ids change, selection is cleared)
 //! and the action is journaled.
 
+use super::detached::BusyGuard;
 use super::platform::platform_error;
 use super::select::node_by_index;
 use super::tree::{kind_name, page_limit};
 use super::{CommandSpec, always, parse_params};
 use crate::journal::{JournalEntry, now_secs};
 use crate::protected::{ProtectedPaths, key_exact, key_of, name_matches};
-use crate::{CommandError, Session, fsops, prune};
+use crate::{CommandError, Session, fsops, guard, prune};
 use dirustat_model::{NodeId, NodeKind, SizeMode};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -116,7 +117,7 @@ fn has_tree(session: &Session) -> bool {
     session.tree().len() > 1 && !session.is_scanning()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Mode {
     Recycle,
     Permanent,
@@ -483,20 +484,8 @@ fn run_delete(session: &mut Session, params: &Value) -> Result<Value, CommandErr
 
 fn run_delete_permanent(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
     let p: PermanentParams = parse_params(params)?;
-    let dry_run = p.dry_run.unwrap_or(false);
-    if !dry_run && p.i_understand_permanent != Some(true) {
-        return Err(CommandError::ConfirmationRequired("file.delete_permanent: i_understand_permanent".to_owned()));
-    }
-    let addr = Addr { id: p.id, revision: p.revision, path: p.path.as_deref() };
-    execute(
-        session,
-        "file.delete_permanent",
-        Mode::Permanent,
-        addr,
-        dry_run,
-        None,
-        p.i_understand_partial == Some(true),
-    )
+    let (addr, dry_run, allow_partial) = permanent_args(&p)?;
+    execute(session, "file.delete_permanent", Mode::Permanent, addr, dry_run, None, allow_partial)
 }
 
 fn run_move(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
@@ -558,15 +547,38 @@ fn check_destination(plan: &Plan, destination: &str) -> Result<(), CommandError>
     Ok(())
 }
 
-fn execute(
-    session: &mut Session,
+/// Everything decided before the disk is touched: the checks passed, the report is built.
+#[derive(Debug)]
+struct Ready {
+    node: NodeId,
+    op: String,
+    mode: Mode,
+    path: String,
+    destination: Option<String>,
+    size: u64,
+    /// The session revision the plan was made against; the tree is pruned only if it is unchanged.
+    revision: u64,
+    out: Value,
+}
+
+/// The result of staging a destructive command.
+enum Staged {
+    /// Nothing to do on disk (a dry run): this is the answer.
+    Report(Value),
+    /// All checks passed; act, then call [`complete`].
+    Act(Box<Ready>),
+}
+
+/// Runs every check of a destructive command and builds its report. Reads the disk, changes nothing.
+fn stage(
+    session: &Session,
     op: &str,
     mode: Mode,
     addr: Addr<'_>,
     dry_run: bool,
     destination: Option<&str>,
     allow_partial: bool,
-) -> Result<Value, CommandError> {
+) -> Result<Staged, CommandError> {
     let plan = plan(session, addr, mode)?;
     if let Some(dest) = destination {
         check_destination(&plan, dest)?;
@@ -580,7 +592,7 @@ fn execute(
         map.insert("rescan_recommended".to_owned(), json!(inside));
     }
     if dry_run {
-        return Ok(out);
+        return Ok(Staged::Report(out));
     }
     if mode == Mode::Permanent && plan.kind == NodeKind::Dir && plan.partial && !allow_partial {
         return Err(CommandError::ConfirmationRequired(
@@ -593,46 +605,171 @@ fn execute(
     // and the action is as small as it can be (the residual race is documented in docs/safety.md).
     let path = preflight(session, plan.node, &ProtectedPaths::from_env(), mode)?;
     let size = plan.report.size(session.map_size_mode());
-    if let Err(err) = perform(session, op, mode, &path, destination, size) {
+    Ok(Staged::Act(Box::new(Ready {
+        node: plan.node,
+        op: op.to_owned(),
+        mode,
+        path,
+        destination: destination.map(str::to_owned),
+        size,
+        revision: session.revision(),
+        out,
+    })))
+}
+
+/// Journals the outcome of the action on `ready.path` and updates the tree: prunes the node on
+/// success (or when a failed removal left it gone), flags `rescan_recommended` when the tree was
+/// replaced under a detached deletion, and completes the report.
+fn complete(session: &mut Session, ready: Ready, result: Result<(), CommandError>) -> Result<Value, CommandError> {
+    let Ready { node, op, mode, path, destination, size, revision, mut out } = ready;
+    record(session, &op, mode, &path, destination.as_deref(), size, &result);
+    let current = session.revision() == revision;
+    if let Err(err) = result {
         let gone = std::fs::symlink_metadata(&path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound);
         if mode == Mode::Permanent && gone {
             // It is gone after all (removed half-way or by someone else): keep the tree honest.
-            session.forget_node(plan.node);
+            if current {
+                session.forget_node(node);
+            } else {
+                session.rescan_recommended = true;
+            }
         }
         return Err(err);
     }
-    let updated = session.forget_node(plan.node);
+    let updated = current && session.forget_node(node);
+    if !current {
+        // The tree was replaced while the deletion ran without the lock: its ids are not ours.
+        session.rescan_recommended = true;
+    }
     if let Some(map) = out.as_object_mut() {
         map.insert("done".to_owned(), json!(true));
         map.insert("tree_updated".to_owned(), json!(updated));
         map.insert("revision".to_owned(), json!(session.revision()));
         map.insert("ids_invalidated".to_owned(), json!(updated));
+        if !current {
+            map.insert("rescan_recommended".to_owned(), json!(true));
+        }
     }
     Ok(out)
 }
 
-/// Performs one already-checked operation on `path` (recycle, permanent removal or move) and
-/// journals the outcome, success or failure. The tree is not touched; callers prune afterwards.
-/// A failed permanent removal may have deleted part of a folder: the session is then flagged
-/// `rescan_recommended`.
-pub(super) fn perform(
+fn execute(
+    session: &mut Session,
+    op: &str,
+    mode: Mode,
+    addr: Addr<'_>,
+    dry_run: bool,
+    destination: Option<&str>,
+    allow_partial: bool,
+) -> Result<Value, CommandError> {
+    match stage(session, op, mode, addr, dry_run, destination, allow_partial)? {
+        Staged::Report(report) => Ok(report),
+        Staged::Act(ready) => {
+            let result = act(session, ready.mode, &ready.path, ready.destination.as_deref());
+            complete(session, *ready, result)
+        }
+    }
+}
+
+/// The first phase of `file.delete_permanent` for a host that runs the removal without the
+/// session lock (see `cmd::detached`).
+pub(super) enum Begun {
+    /// A dry run: the report is the whole answer.
+    Report(Value),
+    /// The checks passed; run the job, then [`finish_removal`].
+    Job(RemovalJob),
+}
+
+/// A checked permanent removal that owns everything it needs to run without the session.
+#[derive(Debug)]
+pub(super) struct RemovalJob {
+    ready: Box<Ready>,
+    busy: BusyGuard,
+}
+
+/// The removal's result, to be completed under the lock.
+#[derive(Debug)]
+pub(super) struct RemovalOutcome {
+    ready: Box<Ready>,
+    result: Result<(), CommandError>,
+    busy: BusyGuard,
+}
+
+impl RemovalJob {
+    /// Removes the item (the slow part). Needs no session; a panic becomes an error.
+    pub(super) fn run(self) -> RemovalOutcome {
+        let path = std::path::PathBuf::from(&self.ready.path);
+        let result = guard::guarded("file.delete_permanent", || remove_on_disk(&path));
+        RemovalOutcome { ready: self.ready, result, busy: self.busy }
+    }
+}
+
+/// Journals and prunes after a detached removal, then lets other deletions proceed again.
+pub(super) fn finish_removal(session: &mut Session, done: RemovalOutcome) -> Result<Value, CommandError> {
+    let RemovalOutcome { ready, result, busy } = done;
+    let answer = complete(session, *ready, result);
+    drop(busy);
+    answer
+}
+
+/// `file.delete_permanent` up to the point where the disk is touched, claiming the session's
+/// removal slot so no other destructive command or scan can start meanwhile.
+pub(super) fn begin_permanent(session: &Session, params: &Value) -> Result<Begun, CommandError> {
+    let p: PermanentParams = parse_params(params)?;
+    let (addr, dry_run, allow_partial) = permanent_args(&p)?;
+    match stage(session, "file.delete_permanent", Mode::Permanent, addr, dry_run, None, allow_partial)? {
+        Staged::Report(report) => Ok(Begun::Report(report)),
+        Staged::Act(ready) => {
+            let busy = BusyGuard::claim(&session.removal_busy).ok_or_else(|| {
+                CommandError::NotEnabled(
+                    "file.delete_permanent: a permanent deletion is still running; wait for it to finish".to_owned(),
+                )
+            })?;
+            Ok(Begun::Job(RemovalJob { ready, busy }))
+        }
+    }
+}
+
+/// Parameters of `file.delete_permanent` after the confirmation check: the address, `dry_run` and
+/// `i_understand_partial`.
+fn permanent_args(p: &PermanentParams) -> Result<(Addr<'_>, bool, bool), CommandError> {
+    let dry_run = p.dry_run.unwrap_or(false);
+    if !dry_run && p.i_understand_permanent != Some(true) {
+        return Err(CommandError::ConfirmationRequired("file.delete_permanent: i_understand_permanent".to_owned()));
+    }
+    let addr = Addr { id: p.id, revision: p.revision, path: p.path.as_deref() };
+    Ok((addr, dry_run, p.i_understand_partial == Some(true)))
+}
+
+fn remove_on_disk(path: &Path) -> Result<(), CommandError> {
+    fsops::remove_permanently(path).map_err(|e| CommandError::Platform(format!("permanent deletion failed: {e}")))
+}
+
+/// Does one already-checked operation on `path` (recycle, permanent removal or move). The tree and
+/// the journal are not touched.
+fn act(session: &Session, mode: Mode, path: &str, destination: Option<&str>) -> Result<(), CommandError> {
+    let target = Path::new(path);
+    match mode {
+        Mode::Recycle => recycle(session, target),
+        Mode::Permanent => remove_on_disk(target),
+        Mode::Move => match destination {
+            Some(dest) => session.platform().rename_no_replace(target, Path::new(dest)).map_err(platform_error),
+            None => Ok(()),
+        },
+    }
+}
+
+/// Journals the outcome of an action, success or failure. A failed permanent removal may have
+/// deleted part of a folder: the session is then flagged `rescan_recommended`.
+fn record(
     session: &mut Session,
     op: &str,
     mode: Mode,
     path: &str,
     destination: Option<&str>,
     size: u64,
-) -> Result<(), CommandError> {
-    let target = Path::new(path);
-    let result = match mode {
-        Mode::Recycle => recycle(session, target),
-        Mode::Permanent => fsops::remove_permanently(target)
-            .map_err(|e| CommandError::Platform(format!("permanent deletion failed: {e}"))),
-        Mode::Move => match destination {
-            Some(dest) => session.platform().rename_no_replace(target, Path::new(dest)).map_err(platform_error),
-            None => Ok(()),
-        },
-    };
+    result: &Result<(), CommandError>,
+) {
     if result.is_err() && mode == Mode::Permanent {
         session.rescan_recommended = true;
     }
@@ -646,6 +783,20 @@ pub(super) fn perform(
         ok: result.is_ok(),
         error: result.as_ref().err().map(ToString::to_string),
     });
+}
+
+/// Performs one already-checked operation on `path` (recycle, permanent removal or move) and
+/// journals the outcome, success or failure. The tree is not touched; callers prune afterwards.
+pub(super) fn perform(
+    session: &mut Session,
+    op: &str,
+    mode: Mode,
+    path: &str,
+    destination: Option<&str>,
+    size: u64,
+) -> Result<(), CommandError> {
+    let result = act(session, mode, path, destination);
+    record(session, op, mode, path, destination, size, &result);
     result
 }
 

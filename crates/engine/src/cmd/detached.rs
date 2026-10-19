@@ -1,0 +1,391 @@
+//! Commands whose slow part runs **without the session lock** (QA-143, QA-144).
+//!
+//! A host that shares the session behind a mutex (the control server, MCP) calls
+//! [`Session::execute_split`] under the lock. For `platform.free_space` and `file.delete_permanent`
+//! it returns a [`DetachedJob`] instead of a result: everything that needs the session (parameters,
+//! every safety check, the plan) is already done, and the job owns what the slow part needs. The
+//! host releases the lock, calls [`DetachedJob::run`], re-locks and hands the outcome to
+//! [`Session::finish_job`], which journals and prunes the tree. Any other command is simply run.
+//!
+//! While a permanent deletion is running the session refuses destructive commands and `scan.*`
+//! (`not_enabled`), so the plan cannot be invalidated by a second deleter; every other command
+//! (state, listings, search) keeps working on the not-yet-pruned tree. If the tree was replaced
+//! anyway (a host called `replace_tree` or `finish_scan` directly) the outcome is journaled and the
+//! session is flagged `rescan_recommended` instead of pruning the wrong tree.
+//!
+//! `Session::execute` keeps the all-in-one behaviour for single-threaded callers (CLI, tests).
+
+use super::file::{self, Begun, RemovalJob, RemovalOutcome};
+use super::platform::{self, FreeSpaceJob};
+use super::{admit, registry};
+use crate::{CommandError, Session, guard};
+use serde_json::Value;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// What [`Session::execute_split`] gives back.
+#[derive(Debug)]
+pub enum Prepared {
+    /// The command finished under the lock (including every error).
+    Done(Result<Value, CommandError>),
+    /// The slow part is left to the caller: run it without the lock.
+    Job(DetachedJob),
+}
+
+/// The slow part of a command. `Send + 'static`: it holds no reference to the session.
+#[derive(Debug)]
+pub struct DetachedJob(Kind);
+
+#[derive(Debug)]
+enum Kind {
+    FreeSpace(FreeSpaceJob),
+    Removal(RemovalJob),
+}
+
+/// The result of [`DetachedJob::run`], to be passed to [`Session::finish_job`].
+#[derive(Debug)]
+pub struct JobOutcome(Done);
+
+#[derive(Debug)]
+enum Done {
+    Value(Result<Value, CommandError>),
+    Removal(RemovalOutcome),
+}
+
+impl DetachedJob {
+    /// Does the slow work. Needs no session; never panics (a panic becomes an error).
+    pub fn run(self) -> JobOutcome {
+        JobOutcome(match self.0 {
+            Kind::FreeSpace(job) => Done::Value(job.run()),
+            Kind::Removal(job) => Done::Removal(job.run()),
+        })
+    }
+}
+
+/// A flag held for as long as a slow operation is in flight. Dropping it, also while unwinding
+/// from a panic, clears the flag, so a crashed helper cannot block the feature for good.
+#[derive(Debug)]
+pub(crate) struct BusyGuard(Arc<AtomicBool>);
+
+impl BusyGuard {
+    /// Takes the flag; `None` when somebody else holds it.
+    pub(crate) fn claim(flag: &Arc<AtomicBool>) -> Option<Self> {
+        flag.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok().map(|_| Self(Arc::clone(flag)))
+    }
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+impl Session {
+    /// Like [`Session::execute`], but the slow part of `platform.free_space` and
+    /// `file.delete_permanent` is returned as a [`DetachedJob`] for the caller to run without
+    /// holding the session. All other commands are executed here.
+    pub fn execute_split(&mut self, id: &str, params: &Value) -> Prepared {
+        let begun = match id {
+            "platform.free_space" => begin(self, id, params, |s, p| {
+                platform::begin_free_space(s, p).map(|job| Ok(DetachedJob(Kind::FreeSpace(job))))
+            }),
+            "file.delete_permanent" => begin(self, id, params, |s, p| {
+                file::begin_permanent(s, p).map(|b| match b {
+                    Begun::Report(report) => Err(report),
+                    Begun::Job(job) => Ok(DetachedJob(Kind::Removal(job))),
+                })
+            }),
+            _ => return Prepared::Done(self.execute(id, params)),
+        };
+        match begun {
+            Ok(Ok(job)) => Prepared::Job(job),
+            Ok(Err(report)) => Prepared::Done(Ok(report)),
+            Err(err) => Prepared::Done(Err(err)),
+        }
+    }
+
+    /// Completes a job under the lock: journals the outcome and prunes the tree. A free-space
+    /// outcome just carries its result.
+    pub fn finish_job(&mut self, outcome: JobOutcome) -> Result<Value, CommandError> {
+        match outcome.0 {
+            Done::Value(result) => result,
+            Done::Removal(done) => guard::guarded("file.delete_permanent", || file::finish_removal(self, done)),
+        }
+    }
+
+    /// How long a volume query may take before `platform.free_space` gives up (default 3 s).
+    pub fn set_volume_query_timeout(&mut self, timeout: std::time::Duration) {
+        self.volume_query_timeout = timeout;
+    }
+
+    /// True while a detached permanent deletion is running.
+    pub fn removal_in_progress(&self) -> bool {
+        self.removal_busy.load(Ordering::SeqCst)
+    }
+}
+
+/// Admits the command (enabled, confirmation, busy gate) and runs its first phase under the guard.
+/// `Ok(Ok(job))` is a job to run, `Ok(Err(report))` a result that is already complete (a dry run).
+fn begin(
+    session: &Session,
+    id: &str,
+    params: &Value,
+    first_phase: impl FnOnce(&Session, &Value) -> Result<Result<DetachedJob, Value>, CommandError>,
+) -> Result<Result<DetachedJob, Value>, CommandError> {
+    let spec = registry().iter().find(|s| s.id == id).ok_or_else(|| CommandError::UnknownCommand(id.to_owned()))?;
+    guard::guarded(id, || {
+        let params = admit(session, spec, params)?;
+        first_phase(session, &params)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dirustat_platform::{FakePlatform, PlatformServices, SpaceInfo};
+    use serde_json::json;
+    use std::path::Path;
+    use std::sync::{Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// `root/{keep.txt, sub/{a.txt, deep/b.txt}}` scanned, with a fake platform.
+    fn fixture() -> (tempfile::TempDir, Session) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("sub").join("deep")).unwrap();
+        std::fs::write(root.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(root.join("sub").join("a.txt"), b"aaaa").unwrap();
+        std::fs::write(root.join("sub").join("deep").join("b.txt"), b"bb").unwrap();
+        let mut s = Session::new();
+        let handle = dirustat_scan::start(&root, dirustat_scan::ScanOptions::default()).unwrap();
+        assert_eq!(s.finish_scan(handle), Ok(true));
+        s.set_platform(Arc::new(FakePlatform::new()));
+        (dir, s)
+    }
+
+    fn perm(path: &Path) -> Value {
+        json!({"path": path.to_string_lossy(), "confirm": true, "i_understand_permanent": true})
+    }
+
+    fn job(prepared: Prepared) -> DetachedJob {
+        match prepared {
+            Prepared::Job(job) => job,
+            Prepared::Done(done) => panic!("expected a job, got {done:?}"),
+        }
+    }
+
+    fn done(prepared: Prepared) -> Result<Value, CommandError> {
+        match prepared {
+            Prepared::Done(done) => done,
+            Prepared::Job(job) => panic!("expected a finished command, got {job:?}"),
+        }
+    }
+
+    /// QA-144: while the removal runs, the session is free for other commands and refuses the ones
+    /// that could invalidate the plan; finishing journals and prunes.
+    #[test]
+    fn permanent_removal_runs_without_holding_the_session() {
+        let (dir, mut s) = fixture();
+        let sub = dir.path().join("root").join("sub");
+        let rev = s.revision();
+        let job = job(s.execute_split("file.delete_permanent", &perm(&sub)));
+        // Nothing has been touched yet; the lock-free window is open.
+        assert!(sub.exists() && s.revision() == rev);
+        assert!(s.removal_in_progress());
+        assert_eq!(s.execute("session.state", &json!({})).unwrap()["removal_in_progress"], true);
+        assert!(s.execute("tree.children", &json!({})).is_ok());
+        assert!(s.execute("search.find", &json!({"query": "a"})).is_ok());
+        for (id, params) in [
+            ("file.delete", json!({"path": sub.to_string_lossy(), "confirm": true})),
+            ("file.delete_permanent", perm(&sub)),
+            ("file.move", json!({"path": sub.to_string_lossy(), "destination": "x", "confirm": true})),
+            ("cleanup.run", json!({"id": "temporary-files", "confirm": true})),
+            ("scan.start", json!({"path": dir.path().to_string_lossy()})),
+        ] {
+            let err = s.execute(id, &params).unwrap_err();
+            assert_eq!(err.code(), "not_enabled", "{id}: {err}");
+            assert!(err.to_string().contains("still running"), "{id}: {err}");
+            let split = done(s.execute_split(id, &params)).unwrap_err();
+            assert_eq!(split.code(), "not_enabled", "{id}");
+        }
+        assert!(sub.exists());
+        // The slow part needs no session at all.
+        let outcome = std::thread::spawn(move || job.run()).join().unwrap();
+        assert!(!sub.exists());
+        assert!(s.removal_in_progress(), "the slot is held until the outcome is completed");
+        assert_eq!(s.execute("file.journal", &json!({})).unwrap()["total"], 0);
+        let out = s.finish_job(outcome).unwrap();
+        assert_eq!((out["done"].clone(), out["tree_updated"].clone()), (json!(true), json!(true)));
+        assert!(!s.removal_in_progress());
+        assert!(s.revision() > rev);
+        let journal = s.execute("file.journal", &json!({})).unwrap();
+        assert_eq!((journal["total"].clone(), journal["entries"][0]["mode"].clone()), (json!(1), json!("permanent")));
+        assert_eq!(s.tree().len(), 2, "root and keep.txt are left");
+        // The slot is free again.
+        let keep = dir.path().join("root").join("keep.txt");
+        assert_eq!(s.execute("file.delete_permanent", &perm(&keep)).unwrap()["done"], true);
+    }
+
+    #[test]
+    fn dry_runs_and_refusals_finish_under_the_lock() {
+        let (dir, mut s) = fixture();
+        let sub = dir.path().join("root").join("sub");
+        let dry = json!({"path": sub.to_string_lossy(), "dry_run": true, "confirm": true});
+        let out = done(s.execute_split("file.delete_permanent", &dry)).unwrap();
+        assert_eq!(out["dry_run"], true);
+        assert!(!s.removal_in_progress());
+        for (params, code) in [
+            (json!({"path": sub.to_string_lossy()}), "confirmation_required"),
+            (json!({"path": sub.to_string_lossy(), "confirm": true}), "confirmation_required"),
+            (json!({"path": "C:\\nope\\x", "confirm": true, "i_understand_permanent": true}), "invalid_params"),
+            (json!({"bogus": 1, "confirm": true, "i_understand_permanent": true}), "invalid_params"),
+        ] {
+            assert_eq!(done(s.execute_split("file.delete_permanent", &params)).unwrap_err().code(), code);
+            assert!(!s.removal_in_progress());
+        }
+        // Any other command is simply executed.
+        assert!(done(s.execute_split("session.state", &json!({}))).is_ok());
+        assert_eq!(done(s.execute_split("no.such", &json!({}))).unwrap_err().code(), "unknown_command");
+        assert!(sub.exists());
+    }
+
+    /// A job that is dropped without running frees the slot (a crashed host must not wedge deletes).
+    #[test]
+    fn dropping_a_job_releases_the_slot() {
+        let (dir, mut s) = fixture();
+        let sub = dir.path().join("root").join("sub");
+        let pending = job(s.execute_split("file.delete_permanent", &perm(&sub)));
+        assert!(s.removal_in_progress());
+        drop(pending);
+        assert!(!s.removal_in_progress());
+        assert!(sub.exists());
+        assert_eq!(s.execute("file.delete_permanent", &perm(&sub)).unwrap()["done"], true);
+    }
+
+    /// If the tree was replaced while the removal ran, the wrong tree is not pruned: the outcome
+    /// is journaled and a rescan is recommended.
+    #[test]
+    fn a_tree_replaced_during_the_removal_is_not_pruned() {
+        let (dir, mut s) = fixture();
+        let sub = dir.path().join("root").join("sub");
+        let job = job(s.execute_split("file.delete_permanent", &perm(&sub)));
+        let outcome = job.run();
+        let mut other = dirustat_model::Tree::new("other");
+        other.add_child(other.root(), "f", dirustat_model::NodeKind::File, 1).unwrap();
+        other.aggregate();
+        s.replace_tree(other);
+        let nodes = s.tree().len();
+        let out = s.finish_job(outcome).unwrap();
+        assert_eq!((out["done"].clone(), out["tree_updated"].clone()), (json!(true), json!(false)));
+        assert_eq!(out["rescan_recommended"], true);
+        assert_eq!(s.tree().len(), nodes, "the replacement tree is untouched");
+        let state = s.execute("session.state", &json!({})).unwrap();
+        assert_eq!(state["rescan_recommended"], true);
+        assert_eq!(state["removal_in_progress"], false);
+        assert_eq!(s.execute("file.journal", &json!({})).unwrap()["total"], 1);
+    }
+
+    /// A removal that fails is journaled as failed and still releases the slot.
+    #[test]
+    fn a_failed_removal_is_reported_and_releases_the_slot() {
+        let (dir, mut s) = fixture();
+        let sub = dir.path().join("root").join("sub");
+        let job = job(s.execute_split("file.delete_permanent", &perm(&sub)));
+        std::fs::remove_dir_all(&sub).unwrap(); // somebody else got there first
+        let err = s.finish_job(job.run()).unwrap_err();
+        assert_eq!(err.code(), "internal");
+        assert!(!s.removal_in_progress());
+        let journal = s.execute("file.journal", &json!({})).unwrap();
+        assert_eq!(journal["entries"][0]["ok"], false);
+        assert_eq!(s.tree().len(), 2, "the node that is gone is pruned");
+        assert_eq!(s.execute("session.state", &json!({})).unwrap()["rescan_recommended"], true);
+    }
+
+    /// A platform whose volume query blocks until it is released.
+    #[derive(Debug, Default)]
+    struct StuckPlatform {
+        gate: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl StuckPlatform {
+        fn release(&self) {
+            *self.gate.0.lock().unwrap() = true;
+            self.gate.1.notify_all();
+        }
+    }
+
+    impl PlatformServices for StuckPlatform {
+        fn drives(&self) -> dirustat_platform::Result<Vec<dirustat_platform::DriveInfo>> {
+            Ok(Vec::new())
+        }
+        fn free_space(&self, _path: &Path) -> dirustat_platform::Result<SpaceInfo> {
+            let (lock, cv) = &*self.gate;
+            let mut released = lock.lock().unwrap();
+            while !*released {
+                released = cv.wait(released).unwrap();
+            }
+            Ok(SpaceInfo { total: 10, free: 4 })
+        }
+        fn move_to_recycle_bin(&self, _path: &Path) -> dirustat_platform::Result<()> {
+            Ok(())
+        }
+        fn reveal_in_file_manager(&self, _path: &Path) -> dirustat_platform::Result<()> {
+            Ok(())
+        }
+        fn show_properties(&self, _path: &Path) -> dirustat_platform::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// QA-143: the OS call is made without the session, and a stuck volume costs one helper
+    /// thread, not one per call: later calls are refused at once until the OS answers.
+    #[test]
+    fn a_stuck_volume_holds_neither_the_session_nor_more_than_one_thread() {
+        let (dir, mut s) = fixture();
+        let stuck = Arc::new(StuckPlatform::default());
+        s.set_platform(stuck.clone());
+        s.set_volume_query_timeout(Duration::from_millis(250));
+        let params = json!({"path": dir.path().to_string_lossy()});
+        let first = job(s.execute_split("platform.free_space", &params));
+        // The session is free while the (stuck) OS call is pending.
+        let waiter = std::thread::spawn(move || first.run());
+        std::thread::sleep(Duration::from_millis(60));
+        let t = Instant::now();
+        assert!(s.execute("session.state", &json!({})).is_ok());
+        assert!(t.elapsed() < Duration::from_millis(100), "{:?}", t.elapsed());
+        let timed_out = s.finish_job(waiter.join().unwrap()).unwrap_err();
+        assert!(timed_out.to_string().contains("in time"), "{timed_out}");
+        // The helper is still stuck: a second call does not start another thread and does not wait.
+        for _ in 0..5 {
+            let again = job(s.execute_split("platform.free_space", &params));
+            let t = Instant::now();
+            let err = s.finish_job(again.run()).unwrap_err();
+            assert!(t.elapsed() < Duration::from_millis(100), "{:?}", t.elapsed());
+            assert!(err.to_string().contains("has not returned yet"), "{err}");
+        }
+        // The in-lock path behaves the same.
+        let err = s.execute("platform.free_space", &params).unwrap_err();
+        assert!(err.to_string().contains("has not returned yet"), "{err}");
+        // Once the OS answers, the next call works.
+        stuck.release();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let out = loop {
+            match s.execute("platform.free_space", &params) {
+                Ok(out) => break out,
+                Err(err) => {
+                    assert!(Instant::now() < deadline, "the helper never finished: {err}");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+        assert_eq!((out["total"].clone(), out["free"].clone()), (json!(10), json!(4)));
+    }
+
+    #[test]
+    fn free_space_validates_before_any_thread_starts() {
+        let (_dir, mut s) = fixture();
+        for p in [json!({}), json!({"path": "relative"}), json!({"path": "\\\\server\\share"}), json!({"x": 1})] {
+            assert_eq!(done(s.execute_split("platform.free_space", &p)).unwrap_err().code(), "invalid_params");
+        }
+    }
+}

@@ -3,7 +3,7 @@
 use crate::bridge::{NullBridge, Region, ScreenshotRequest, UiBridge};
 use crate::error::{self, ControlError};
 use crate::tree::session_tree;
-use dirustat_engine::{PathClass, Session, classify_path, is_local_path, is_unc_path};
+use dirustat_engine::{PathClass, Prepared, Session, classify_path, is_local_path, is_unc_path};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::panic::{self, AssertUnwindSafe};
@@ -191,8 +191,17 @@ impl Dispatcher {
                  relative paths are not supported",
             ));
         }
-        let result = lock_session(&self.session).execute(&p.command, &p.params)?;
-        Ok(result)
+        // The slow part of `file.delete_permanent` (the removal) and `platform.free_space` (the OS
+        // query) runs with the session unlocked, so one big deletion or a hung drive does not stall
+        // every other request (QA-143, QA-144). Everything else runs under the lock.
+        let prepared = lock_session(&self.session).execute_split(&p.command, &p.params);
+        match prepared {
+            Prepared::Done(result) => Ok(result?),
+            Prepared::Job(job) => {
+                let outcome = job.run();
+                Ok(lock_session(&self.session).finish_job(outcome)?)
+            }
+        }
     }
 
     fn session_state(&self, params: &Value) -> Result<Value, ControlError> {
@@ -449,6 +458,48 @@ mod tests {
         assert_eq!(call(&d, "session.state", json!({}))["ok"], true);
     }
 
+    /// QA-144 over the wire: `file.delete_permanent` goes through the split path and still
+    /// removes, prunes and journals; the session is not left marked as busy.
+    #[test]
+    fn engine_execute_runs_a_permanent_removal_through_the_split_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("keep.txt"), b"keep").unwrap();
+        std::fs::write(root.join("sub").join("a.txt"), b"aaaa").unwrap();
+        let (d, _) = fake();
+        let start =
+            call(&d, "engine.execute", json!({"command": "scan.start", "params": {"path": root.to_string_lossy()}}));
+        assert_eq!(start["ok"], true, "{start}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let state = call(&d, "session.state", json!({}));
+            if state["result"]["scanning"] == false && state["result"]["nodes"].as_u64() > Some(1) {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "scan did not finish: {state}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let sub = root.join("sub");
+        let params = json!({"path": sub.to_string_lossy(), "confirm": true, "i_understand_permanent": true});
+        let out = call(&d, "engine.execute", json!({"command": "file.delete_permanent", "params": params}));
+        assert_eq!(out["ok"], true, "{out}");
+        assert_eq!((out["result"]["done"].clone(), out["result"]["tree_updated"].clone()), (json!(true), json!(true)));
+        assert!(!sub.exists());
+        let state = call(&d, "session.state", json!({}));
+        assert_eq!(state["result"]["removal_in_progress"], false);
+        assert_eq!(state["result"]["nodes"], 2);
+        let journal = call(&d, "engine.execute", json!({"command": "file.journal"}));
+        assert_eq!(journal["result"]["total"], 1, "{journal}");
+        // A refusal inside the split path is reported with its code and leaves the slot free.
+        let again = call(
+            &d,
+            "engine.execute",
+            json!({"command": "file.delete_permanent", "params": {"path": sub.to_string_lossy()}}),
+        );
+        assert_eq!(code(&again), "confirmation_required");
+        assert_eq!(call(&d, "session.state", json!({}))["result"]["removal_in_progress"], false);
+    }
     #[test]
     fn confirmation_required_is_reported() {
         let session = share(Session::new());

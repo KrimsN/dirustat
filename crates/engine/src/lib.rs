@@ -21,7 +21,9 @@ pub mod search;
 mod settings;
 mod subtree;
 
-pub use cmd::{CommandInfo, CommandSpec, FastPathStatus, fast_path_status, volume_root_of};
+pub use cmd::{
+    CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, fast_path_status, volume_root_of,
+};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
 pub use paths::{PathClass, classify_path, is_local_path, is_unc_path, normalize_scan_root};
 
@@ -41,6 +43,8 @@ use dirustat_scan::{ScanBackend, ScanHandle, empty_tree};
 use dirustat_treemap::{Rect, squarify};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 /// Command execution error. `run` must return it instead of panicking, for any params.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -126,7 +130,16 @@ pub struct Session {
     partial_scan: bool,
     /// A destructive action failed half-way; the tree may no longer match the disk.
     rescan_recommended: bool,
+    /// Set while a detached permanent deletion runs without the session lock (QA-144).
+    removal_busy: Arc<AtomicBool>,
+    /// Set while a helper thread waits for the OS to answer a volume query (QA-143).
+    volume_query_busy: Arc<AtomicBool>,
+    volume_query_timeout: Duration,
 }
+
+/// Default time `platform.free_space` waits for a volume (short in tests).
+const DEFAULT_VOLUME_QUERY_TIMEOUT: Duration =
+    if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(3) };
 
 /// Which backend produced the current tree and why the MFT fast path was abandoned, if it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -157,6 +170,9 @@ impl Session {
             journal: journal::Journal::new(),
             partial_scan: false,
             rescan_recommended: false,
+            removal_busy: Arc::new(AtomicBool::new(false)),
+            volume_query_busy: Arc::new(AtomicBool::new(false)),
+            volume_query_timeout: DEFAULT_VOLUME_QUERY_TIMEOUT,
         }
     }
 

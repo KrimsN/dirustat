@@ -6,6 +6,7 @@
 //! unknown params fields with `InvalidParams` (use [`parse_params`] / [`no_params`]).
 
 mod cleanup;
+mod detached;
 mod file;
 mod list;
 mod platform;
@@ -20,6 +21,7 @@ mod testing;
 mod tree;
 mod view;
 
+pub use detached::{DetachedJob, JobOutcome, Prepared};
 pub use privileges::{FastPathStatus, fast_path_status, volume_root_of};
 
 use crate::{CommandError, Session, guard};
@@ -110,24 +112,38 @@ pub(crate) fn execute_in(
 ) -> Result<Value, CommandError> {
     let spec = specs.iter().find(|s| s.id == id).ok_or_else(|| CommandError::UnknownCommand(id.to_owned()))?;
     guard::guarded(id, || {
-        if !(spec.enabled)(session) {
-            return Err(CommandError::NotEnabled(id.to_owned()));
-        }
-        let empty = Value::Object(Map::new());
-        let params = if params.is_null() { &empty } else { params };
-        if !spec.destructive {
-            return (spec.run)(session, params);
-        }
-        let Value::Object(map) = params else {
-            return Err(CommandError::ConfirmationRequired(id.to_owned()));
-        };
-        if map.get("confirm") != Some(&Value::Bool(true)) {
-            return Err(CommandError::ConfirmationRequired(id.to_owned()));
-        }
-        let mut rest = map.clone();
-        rest.remove("confirm");
-        (spec.run)(session, &Value::Object(rest))
+        let params = admit(session, spec, params)?;
+        (spec.run)(session, &params)
     })
+}
+
+/// The checks every command passes before `run`: `enabled`, the busy gate (no destructive command
+/// and no scan while a detached permanent deletion runs), and `confirm` for destructive commands.
+/// Returns the params `run` gets (`null` becomes `{}`, `confirm` is stripped).
+pub(crate) fn admit(session: &Session, spec: &CommandSpec, params: &Value) -> Result<Value, CommandError> {
+    if !(spec.enabled)(session) {
+        return Err(CommandError::NotEnabled(spec.id.to_owned()));
+    }
+    if session.removal_in_progress() && (spec.destructive || spec.id.starts_with("scan.")) {
+        return Err(CommandError::NotEnabled(format!(
+            "{}: a permanent deletion is still running; wait for it to finish",
+            spec.id
+        )));
+    }
+    let empty = Value::Object(Map::new());
+    let params = if params.is_null() { &empty } else { params };
+    if !spec.destructive {
+        return Ok(params.clone());
+    }
+    let Value::Object(map) = params else {
+        return Err(CommandError::ConfirmationRequired(spec.id.to_owned()));
+    };
+    if map.get("confirm") != Some(&Value::Bool(true)) {
+        return Err(CommandError::ConfirmationRequired(spec.id.to_owned()));
+    }
+    let mut rest = map.clone();
+    rest.remove("confirm");
+    Ok(Value::Object(rest))
 }
 
 impl Session {
