@@ -18,7 +18,6 @@ use super::platform::platform_error;
 use super::select::node_by_index;
 use super::tree::{kind_name, page_limit};
 use super::{CommandSpec, always, parse_params};
-use crate::is_unc_path;
 use crate::journal::{JournalEntry, now_secs};
 use crate::protected::{ProtectedPaths, key_of};
 use crate::{CommandError, Session, fsops, prune};
@@ -314,6 +313,19 @@ fn build_report(session: &Session, node: NodeId) -> Report {
     report
 }
 
+/// Destructive commands only work below a scan root on a local lettered drive: a network (UNC)
+/// share, a device namespace or a relative root is refused (`docs/safety.md`).
+pub(super) fn require_local_root(scan_root: &str) -> Result<(), CommandError> {
+    if crate::is_local_path(scan_root) {
+        return Ok(());
+    }
+    Err(CommandError::ProtectedPath(
+        "destructive commands are disabled unless the scan root is a local drive path; a network (UNC), device or \
+         relative root is refused, scan a path such as C:\\data"
+            .to_owned(),
+    ))
+}
+
 /// Every name from the node up to (not including) the scan root must be exactly representable as
 /// a path component: not lossy (the stored name replaced invalid UTF-16 with U+FFFD, so the path
 /// built from it could reach a different file) and, on Windows, free of the spellings Win32
@@ -362,12 +374,7 @@ pub(super) fn preflight(
     let scan_root = session
         .node_path(tree.root())
         .ok_or_else(|| CommandError::InvalidParams("the tree has no root path".to_owned()))?;
-    if is_unc_path(&scan_root) {
-        return Err(CommandError::ProtectedPath(
-            "destructive commands are disabled when the scan root is a network (UNC) path; scan a local drive path"
-                .to_owned(),
-        ));
-    }
+    require_local_root(&scan_root)?;
     protected.check(&node_path, &scan_root).map_err(CommandError::ProtectedPath)?;
     verify_addressable(session, node)?;
     fsops::verify_location(&node_path, &scan_root, protected, cfg!(windows))?;
@@ -491,8 +498,12 @@ pub(super) fn destination_component_problem(comps: &[String], windows: bool) -> 
 fn check_destination(plan: &Plan, destination: &str) -> Result<(), CommandError> {
     let windows = cfg!(windows);
     let bad = |why: &str| CommandError::InvalidParams(format!("destination: {why}"));
-    if is_unc_path(destination) {
-        return Err(CommandError::ProtectedPath("destination is a network (UNC) path".to_owned()));
+    match crate::classify_path(destination) {
+        crate::PathClass::Network => {
+            return Err(CommandError::ProtectedPath("destination is a network (UNC) path".to_owned()));
+        }
+        crate::PathClass::Device => return Err(bad("device namespace paths are not supported")),
+        crate::PathClass::Local | crate::PathClass::Other => {}
     }
     if windows && destination.ends_with(['.', ' ']) {
         return Err(bad("a name ends with a dot or a space"));

@@ -20,7 +20,8 @@ impl PlatformServices for SystemPlatform {
     }
 
     fn free_space(&self, path: &Path) -> Result<SpaceInfo> {
-        let text = crate::path::validate_absolute(path)?;
+        // Local lettered paths only: a stat on a network namespace can block for many seconds.
+        let text = crate::path::validate_local(path)?;
         crate::path::require_exists(path, text)?;
         crate::win32::free_space(text)
             .ok_or_else(|| PlatformError::Failed { op: "free_space", message: "GetDiskFreeSpaceExW failed".to_owned() })
@@ -92,7 +93,7 @@ impl PlatformServices for SystemPlatform {
     }
 
     fn free_space(&self, path: &Path) -> Result<SpaceInfo> {
-        crate::path::validate_absolute(path)?;
+        crate::path::validate_local(path)?;
         Err(PlatformError::Unsupported("free_space"))
     }
 

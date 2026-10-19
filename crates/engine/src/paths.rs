@@ -1,5 +1,14 @@
 //! Pure path helpers shared by the control channel and the UI (no I/O).
 
+pub use dirustat_platform::{PathClass, classify_path};
+
+/// True for a path on a lettered local volume (`X:\...`, `\\?\X:\...`; off Windows, any absolute
+/// path). This is the positive test behind every guarded path parameter: network shares, device
+/// namespaces (`\\.\`, `\\?\GLOBALROOT\`, `\\?\Volume{`) and relative paths are not local.
+pub fn is_local_path(path: &str) -> bool {
+    classify_path(path) == PathClass::Local
+}
+
 /// True for network paths in any spelling: `\\server\share`, `//server/share`, mixed separators,
 /// `\\?\UNC\...`, the NT form `\??\UNC\...` and device paths `\\.\...`, case-insensitive.
 /// Extended local paths such as `\\?\C:\...` are not UNC.

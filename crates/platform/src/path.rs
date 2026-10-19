@@ -6,8 +6,76 @@ use std::path::Path;
 /// Longest accepted path in UTF-16 code units, the Win32 extended-path limit.
 pub const MAX_PATH_UNITS: usize = 32_767;
 
+/// What kind of place a path string names. This is a positive classification: only [`Self::Local`]
+/// is ever trusted, everything else is spelled out so each caller can decide what it tolerates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathClass {
+    /// A path on a lettered local volume (`X:\...`, `X:/...`, `\\?\X:\...`) or, off Windows, an
+    /// absolute path.
+    Local,
+    /// A network share: `\\server\share`, `//server/share`, `\\?\UNC\...`, `\??\UNC\...`.
+    Network,
+    /// Any other Win32 or NT namespace: `\\.\...`, `\\?\GLOBALROOT\...`, `\\?\Volume{...}\...`, `\??\...`.
+    Device,
+    /// Relative, drive-relative (`C:x`), rooted without a drive (`\x`), empty or otherwise unknown.
+    Other,
+}
+
+/// [`classify_path`] for an explicit platform flavour (testable on every OS).
+pub fn classify_path_for(text: &str, windows: bool) -> PathClass {
+    if !windows {
+        return if text.starts_with('/') { PathClass::Local } else { PathClass::Other };
+    }
+    let unified = text.replace('/', "\\");
+    let drive = |s: &str| {
+        let b = s.as_bytes();
+        b.len() >= 3
+            && b.first().is_some_and(u8::is_ascii_alphabetic)
+            && b.get(1) == Some(&b':')
+            && b.get(2) == Some(&b'\\')
+    };
+    for prefix in [r"\\?\", r"\??\", r"\\.\"] {
+        let Some(rest) = unified.strip_prefix(prefix) else { continue };
+        let is_unc = rest.get(..3).is_some_and(|s| s.eq_ignore_ascii_case("UNC"))
+            && rest.get(3..).is_none_or(|t| t.is_empty() || t.starts_with('\\'));
+        return if prefix == r"\\.\" {
+            PathClass::Device
+        } else if is_unc {
+            PathClass::Network
+        } else if drive(rest) {
+            PathClass::Local
+        } else {
+            PathClass::Device
+        };
+    }
+    if unified.starts_with(r"\\") {
+        PathClass::Network
+    } else if drive(&unified) {
+        PathClass::Local
+    } else {
+        PathClass::Other
+    }
+}
+
+/// Classifies `text` for the current OS.
+pub fn classify_path(text: &str) -> PathClass {
+    classify_path_for(text, cfg!(windows))
+}
+
+/// [`validate_absolute`] that also demands a [`PathClass::Local`] path: slow or remote namespaces
+/// (network shares, device paths) are refused before any I/O happens.
+pub fn validate_local(path: &Path) -> Result<&str> {
+    let text = validate_absolute(path)?;
+    if classify_path(text) == PathClass::Local {
+        Ok(text)
+    } else {
+        Err(PlatformError::InvalidPath("not a local drive path".to_owned()))
+    }
+}
+
 /// Checks that `path` is a non-empty, absolute, NUL-free path of sane length and returns it as text.
-/// Non-UTF-8 paths are rejected: the command layer only ever hands over JSON strings.
+/// Non-UTF-8 paths are rejected: the command layer only ever hands over JSON strings. Device
+/// namespaces (`\\.\`, `\\?\GLOBALROOT\`, `\\?\Volume{`) are never accepted.
 pub fn validate_absolute(path: &Path) -> Result<&str> {
     let text = path.to_str().ok_or_else(|| PlatformError::InvalidPath("not valid UTF-8".to_owned()))?;
     if text.is_empty() {
@@ -21,6 +89,9 @@ pub fn validate_absolute(path: &Path) -> Result<&str> {
     }
     if !path.is_absolute() {
         return Err(PlatformError::InvalidPath("not absolute".to_owned()));
+    }
+    if classify_path(text) == PathClass::Device {
+        return Err(PlatformError::InvalidPath("device namespace paths are not supported".to_owned()));
     }
     Ok(text)
 }
@@ -77,6 +148,54 @@ mod tests {
         for bad in ["", "a\0b", "relative/dir", r"..\x", long.as_str()] {
             assert!(matches!(validate_absolute(Path::new(bad)), Err(PlatformError::InvalidPath(_))), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn classification_is_positive() {
+        use PathClass::{Device, Local, Network, Other};
+        let win = [
+            (r"C:\x", Local),
+            ("c:/x/y", Local),
+            (r"\\?\C:\x", Local),
+            (r"\\?\c:/x", Local),
+            (r"\\server\share", Network),
+            ("//server/share", Network),
+            (r"\\?\UNC\s\x", Network),
+            (r"\??\unc\s\x", Network),
+            ("/??/UNC/s/x", Network),
+            (r"\\?\GLOBALROOT\Device\Mup\1.2.3.4\s\x", Device),
+            (r"\\?\globalroot\device\mup\x", Device),
+            (r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\x", Device),
+            (r"\\?\UNCLE\x", Device),
+            (r"\\.\C:", Device),
+            (r"\\.\pipe\x", Device),
+            (r"\??\C:\x", Local),
+            (r"\??\GLOBALROOT\x", Device),
+            (r"\\?\C:", Device),
+            ("C:rel", Other),
+            (r"\rooted", Other),
+            (" C:\\x", Other),
+            ("rel", Other),
+            ("", Other),
+        ];
+        for (text, want) in win {
+            assert_eq!(classify_path_for(text, true), want, "{text:?}");
+        }
+        assert_eq!(classify_path_for("/home/x", false), Local);
+        assert_eq!(classify_path_for(r"\\?\GLOBALROOT\x", false), Other);
+        assert_eq!(classify_path_for("rel", false), Other);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn device_paths_never_validate() {
+        for bad in [r"\\?\GLOBALROOT\Device\Mup\x", r"\\.\C:", r"\\?\Volume{1}\x"] {
+            assert!(matches!(validate_absolute(Path::new(bad)), Err(PlatformError::InvalidPath(_))), "{bad}");
+        }
+        // Network paths validate (the engine decides) but are not local.
+        assert!(validate_absolute(Path::new(r"\\server\share\x")).is_ok());
+        assert!(matches!(validate_local(Path::new(r"\\server\share\x")), Err(PlatformError::InvalidPath(_))));
+        assert!(validate_local(Path::new(r"C:\Windows")).is_ok());
     }
 
     #[cfg(windows)]

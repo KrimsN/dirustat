@@ -18,7 +18,8 @@ mod win32;
 pub use error::{PlatformError, Result};
 pub use fake::{FakePlatform, PlatformCall};
 pub use path::{
-    DRIVE_TYPE_FIXED, MAX_PATH_UNITS, drive_root, drive_type_has_recycle_bin, explorer_select_arg, validate_absolute,
+    DRIVE_TYPE_FIXED, MAX_PATH_UNITS, PathClass, classify_path, classify_path_for, drive_root,
+    drive_type_has_recycle_bin, explorer_select_arg, validate_absolute, validate_local,
 };
 pub use system::SystemPlatform;
 

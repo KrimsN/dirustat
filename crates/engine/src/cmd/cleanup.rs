@@ -11,7 +11,7 @@
 //! before the first action; the tree is pruned once at the end (one revision bump), so arena ids
 //! stay valid while the run is in progress.
 
-use super::file::{Mode, node_for_path, perform, preflight, subtree_partial};
+use super::file::{Mode, node_for_path, perform, preflight, require_local_root, subtree_partial};
 use super::tree::kind_name;
 use super::{CommandSpec, always, no_params, parse_params};
 use crate::cleanup::{
@@ -387,10 +387,8 @@ fn run_run(session: &mut Session, params: &Value) -> Result<Value, CommandError>
     if def.action == CleanupAction::Permanent && !dry_run && p.i_understand_permanent != Some(true) {
         return Err(CommandError::ConfirmationRequired("cleanup.run: i_understand_permanent".to_owned()));
     }
-    if !dry_run && session.node_path(session.tree().root()).is_some_and(|r| crate::is_unc_path(&r)) {
-        return Err(CommandError::ProtectedPath(
-            "destructive commands are disabled when the scan root is a network (UNC) path".to_owned(),
-        ));
+    if !dry_run && let Some(root) = session.node_path(session.tree().root()) {
+        require_local_root(&root)?;
     }
     let protected = ProtectedPaths::from_env();
     let mut resolved = resolve(session, &def, &protected)?;

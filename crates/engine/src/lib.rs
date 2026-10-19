@@ -23,7 +23,7 @@ mod subtree;
 
 pub use cmd::{CommandInfo, CommandSpec, FastPathStatus, fast_path_status, volume_root_of};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
-pub use paths::{is_unc_path, normalize_scan_root};
+pub use paths::{PathClass, classify_path, is_local_path, is_unc_path, normalize_scan_root};
 
 pub use drives::{DriveInfo, MAX_DRIVES};
 pub use launch::{LaunchArgs, LaunchError, USAGE as LAUNCH_USAGE};

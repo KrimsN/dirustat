@@ -3,7 +3,7 @@
 use crate::bridge::{NullBridge, Region, ScreenshotRequest, UiBridge};
 use crate::error::{self, ControlError};
 use crate::tree::session_tree;
-use dirustat_engine::{Session, is_unc_path};
+use dirustat_engine::{PathClass, Session, classify_path, is_local_path, is_unc_path};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::panic::{self, AssertUnwindSafe};
@@ -182,11 +182,14 @@ impl Dispatcher {
             params: Value,
         }
         let p = P::deserialize(params).map_err(|e| ControlError::invalid_params(e.to_string()))?;
-        // A remote caller must not be able to point any path-taking command at a network share (it
-        // can hang on a dead server and leaks credentials to it). The CLI and UI are not affected.
-        // Every string in the params is checked, so future path parameters are covered too.
-        if contains_unc_path(&p.params, 0) {
-            return Err(ControlError::invalid_params("UNC paths are not supported over control"));
+        // A remote caller must not be able to point any path-taking command at a network share or a
+        // device namespace (it can hang on a dead server and leaks credentials to it). The CLI and
+        // UI are not affected. Path-typed parameters must be absolute local drive paths.
+        if has_non_local_path_param(&p.params, 0) {
+            return Err(ControlError::invalid_params(
+                "path parameters over control must be absolute local drive paths (X:\\...); UNC, network, device and \
+                 relative paths are not supported",
+            ));
         }
         let result = lock_session(&self.session).execute(&p.command, &p.params)?;
         Ok(result)
@@ -249,15 +252,36 @@ pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// True if any string inside `value` (bounded depth) is a UNC path.
-fn contains_unc_path(value: &Value, depth: usize) -> bool {
+/// Parameter names that carry a filesystem path in some command (`scan.start.path`,
+/// `file.move.destination`, `cleanup.save` `selector.only_under`, ...). Only these are validated as
+/// paths; queries, patterns and names are free text and may contain `\\` or `//`.
+const PATH_KEYS: &[&str] = &["path", "paths", "destination", "only_under", "root"];
+
+/// True when `value` (bounded depth) holds a path-typed parameter that is not an absolute local
+/// drive path. The test is positive (`X:\...` / `\\?\X:\...` only) so no network or device
+/// namespace spelling gets through (QA-117); free-text parameters are never inspected (QA-122).
+fn has_non_local_path_param(value: &Value, depth: usize) -> bool {
     if depth > 8 {
         return false;
     }
     match value {
-        Value::String(s) => is_unc_path(s),
-        Value::Array(items) => items.iter().any(|v| contains_unc_path(v, depth + 1)),
-        Value::Object(map) => map.values().any(|v| contains_unc_path(v, depth + 1)),
+        Value::Object(map) => map.iter().any(|(key, v)| {
+            if PATH_KEYS.contains(&key.as_str()) {
+                path_value_is_bad(v, depth + 1)
+            } else {
+                has_non_local_path_param(v, depth + 1)
+            }
+        }),
+        Value::Array(items) => items.iter().any(|v| has_non_local_path_param(v, depth + 1)),
+        _ => false,
+    }
+}
+
+fn path_value_is_bad(value: &Value, depth: usize) -> bool {
+    match value {
+        Value::String(s) => !is_local_path(s) || is_unc_path(s),
+        Value::Array(items) if depth <= 8 => items.iter().any(|v| path_value_is_bad(v, depth + 1)),
+        Value::Object(_) => has_non_local_path_param(value, depth),
         _ => false,
     }
 }
@@ -292,8 +316,8 @@ fn parse_screenshot(params: &Value) -> Result<ScreenshotRequest, ControlError> {
     if path.is_empty() || path.len() > MAX_PATH_BYTES || path.contains('\0') {
         return Err(ControlError::invalid_params("path is empty, too long or contains NUL"));
     }
-    if is_unc_path(path) {
-        return Err(ControlError::invalid_params("UNC paths are not supported over control"));
+    if is_unc_path(path) || matches!(classify_path(path), PathClass::Network | PathClass::Device) {
+        return Err(ControlError::invalid_params("UNC and device paths are not supported over control"));
     }
     let region = match obj.0.get("region") {
         None | Some(Value::Null) => None,
@@ -491,6 +515,65 @@ mod tests {
         assert!(!is_unc_path(""));
         // The session never started a scan.
         assert_eq!(call(&d, "session.state", json!({}))["result"]["scanning"], false);
+    }
+
+    /// QA-117: every namespace that is not a lettered local drive is refused at once, for every
+    /// path-typed parameter, including the ones that arrive nested (`only_under`) or in lists.
+    #[test]
+    fn non_local_namespaces_are_refused_over_control() {
+        let (d, _) = fake();
+        let bad = [
+            r"\\?\GLOBALROOT\Device\Mup\192.0.2.1\share\x",
+            r"\\?\globalroot\device\mup\x\y",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\x",
+            r"\\.\C:",
+            r"\Device\Mup\x",
+            r"\??\GLOBALROOT\x",
+            r"\\server\share",
+            r"C:rel",
+            "relative\\dir",
+            "",
+        ];
+        let started = std::time::Instant::now();
+        for path in bad {
+            for (command, params) in [
+                ("scan.start", json!({ "path": path })),
+                ("platform.free_space", json!({ "path": path })),
+                ("platform.reveal", json!({ "path": path })),
+                ("file.delete", json!({ "path": path, "confirm": true })),
+                ("file.move", json!({ "path": r"C:\a", "destination": path, "confirm": true })),
+                (
+                    "cleanup.save",
+                    json!({ "definition": { "id": "x", "name": "X", "action": "recycle",
+                    "selector": { "names": ["a"], "only_under": path } } }),
+                ),
+                ("cleanup.preview", json!({ "id": "x", "paths": [r"C:\ok", path] })),
+            ] {
+                let v = call(&d, "engine.execute", json!({ "command": command, "params": params }));
+                assert_eq!(code(&v), "invalid_params", "{command} {path:?}");
+                assert!(v["error"]["message"].as_str().unwrap().contains("local drive"), "{command} {path:?}");
+            }
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(1), "refusal must not touch the network");
+        assert_eq!(call(&d, "session.state", json!({}))["result"]["scanning"], false);
+    }
+
+    /// QA-122: free text is never treated as a path.
+    #[test]
+    fn queries_and_patterns_may_contain_doubled_separators() {
+        let (d, _) = fake();
+        let dir = tempfile::tempdir().unwrap();
+        let ok_path = dir.path().to_string_lossy().into_owned();
+        for (command, params) in [
+            ("search.find", json!({ "query": "\\\\d+", "mode": "regex" })),
+            ("search.find", json!({ "query": "a//b" })),
+            ("search.find", json!({ "query": "\\\\*", "mode": "wildcard" })),
+            ("scan.start", json!({ "path": ok_path, "exclude": ["a//b", "\\\\x"] })),
+        ] {
+            let v = call(&d, "engine.execute", json!({ "command": command, "params": params }));
+            let msg = v["error"]["message"].as_str().unwrap_or_default();
+            assert!(!msg.contains("local drive"), "{command}: {msg}");
+        }
     }
 
     #[test]

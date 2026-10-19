@@ -92,6 +92,13 @@ impl Session {
         if path.is_empty() {
             return Err(CommandError::InvalidParams("path is empty".to_owned()));
         }
+        if crate::classify_path(path) == crate::PathClass::Device {
+            return Err(CommandError::InvalidParams(
+                "device namespace paths (\\\\.\\, \\\\?\\GLOBALROOT\\, \\\\?\\Volume{...}) cannot be scanned; use a \
+                 drive path such as C:\\ or a \\\\server\\share path"
+                    .to_owned(),
+            ));
+        }
         // The root is checked on the scan thread: `metadata` on a dead network path can block for
         // a long time and this runs under the session lock. A bad root surfaces when the scan is
         // polled (`session.poll` / `session.state`) as a scan error, and the session stays usable.

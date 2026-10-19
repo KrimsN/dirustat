@@ -12,6 +12,8 @@ use dirustat_platform::PlatformError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
 
 pub(super) fn specs() -> Vec<CommandSpec> {
     vec![
@@ -44,8 +46,9 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Free space",
             menu: "",
             shortcut: None,
-            params_doc: "{\"path\": string} an existing absolute path. Returns {path, total, free} in bytes of \
-                the volume that holds it.",
+            params_doc: "{\"path\": string} an existing absolute local drive path (X:\\...; network, device and \
+                relative paths are invalid_params). Returns {path, total, free} in bytes of the volume that holds \
+                it; gives up with an internal error after 3 s if the volume does not answer.",
             destructive: false,
             enabled: always,
             run: run_free_space,
@@ -85,7 +88,7 @@ fn resolve_target(session: &Session, params: &Value) -> Result<String, CommandEr
                 .ok_or_else(|| CommandError::InvalidParams(format!("no node with id {index}")))?;
             session.node_path(node).ok_or_else(|| CommandError::InvalidParams("node has no path".to_owned()))
         }
-        (None, Some(path)) => Ok(path),
+        (None, Some(path)) => require_local(&path).map(|()| path),
         _ => Err(CommandError::InvalidParams("give exactly one of `id` or `path`".to_owned())),
     }
 }
@@ -102,9 +105,42 @@ fn run_properties(session: &mut Session, params: &Value) -> Result<Value, Comman
     Ok(json!({ "path": path }))
 }
 
+/// An explicit `path` parameter must be a local lettered path (`X:\...`): a network or device
+/// namespace can block on the network and would leak credentials to the named host (QA-117).
+/// Paths that come from a node id were produced by a scan and are not re-checked here.
+fn require_local(path: &str) -> Result<(), CommandError> {
+    if crate::is_local_path(path) {
+        Ok(())
+    } else {
+        Err(CommandError::InvalidParams(
+            "path must be an absolute local drive path (X:\\...); network, device and relative paths are refused"
+                .to_owned(),
+        ))
+    }
+}
+
+/// How long a volume query may take before the command gives up (a mapped network drive can hang).
+const FREE_SPACE_TIMEOUT: Duration = if cfg!(test) { Duration::from_millis(300) } else { Duration::from_secs(3) };
+
 fn run_free_space(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
     let p: PathParams = parse_params(params)?;
-    let space = session.platform().free_space(&PathBuf::from(&p.path)).map_err(platform_error)?;
+    require_local(&p.path)?;
+    // The query runs on a helper thread so a stuck volume (a mapped network drive, a dead device)
+    // cannot hold the session lock for longer than the timeout; the thread is left to finish alone.
+    let platform = session.platform();
+    let target = PathBuf::from(&p.path);
+    let (tx, rx) = mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .name("dirustat-free-space".to_owned())
+        .spawn(move || {
+            let _ = tx.send(platform.free_space(&target));
+        })
+        .map_err(|e| CommandError::Platform(format!("cannot start the volume query: {e}")))?;
+    drop(worker);
+    let space = rx
+        .recv_timeout(FREE_SPACE_TIMEOUT)
+        .map_err(|_| CommandError::Platform("the volume did not answer in time".to_owned()))?
+        .map_err(platform_error)?;
     Ok(json!({ "path": p.path, "total": space.total, "free": space.free }))
 }
 
@@ -184,6 +220,66 @@ mod tests {
             fake.set_failure(Some(err));
             assert_eq!(s.execute("platform.reveal", &params).unwrap_err().code(), code);
         }
+    }
+
+    /// QA-117: namespaces other than a lettered local drive never reach the platform layer.
+    #[test]
+    fn explicit_paths_must_be_local_and_scans_refuse_devices() {
+        let (_dir, mut s, fake) = session_with_fake();
+        if cfg!(windows) {
+            for bad in [
+                r"\\?\GLOBALROOT\Device\Mup\192.0.2.1\share\x",
+                r"\\server\share\x",
+                r"\\?\UNC\server\share",
+                r"\\.\C:",
+            ] {
+                for id in ["platform.reveal", "platform.properties", "platform.free_space"] {
+                    let err = s.execute(id, &json!({"path": bad})).unwrap_err();
+                    assert_eq!(err.code(), "invalid_params", "{id} {bad}");
+                }
+            }
+            s.cancel_scan();
+            for bad in [r"\\?\GLOBALROOT\Device\Mup\192.0.2.1\share\x", r"\\.\C:", r"\\?\Volume{1}\x"] {
+                let err = s.execute("scan.start", &json!({"path": bad})).unwrap_err();
+                assert_eq!(err.code(), "invalid_params", "scan.start {bad}");
+                assert!(!s.is_scanning(), "{bad}");
+            }
+        }
+        assert!(fake.calls().is_empty());
+    }
+
+    #[derive(Debug)]
+    struct SlowPlatform;
+
+    impl dirustat_platform::PlatformServices for SlowPlatform {
+        fn drives(&self) -> dirustat_platform::Result<Vec<dirustat_platform::DriveInfo>> {
+            Ok(Vec::new())
+        }
+        fn free_space(&self, _path: &Path) -> dirustat_platform::Result<SpaceInfo> {
+            std::thread::sleep(Duration::from_secs(2));
+            Ok(SpaceInfo { total: 1, free: 1 })
+        }
+        fn move_to_recycle_bin(&self, _path: &Path) -> dirustat_platform::Result<()> {
+            Ok(())
+        }
+        fn reveal_in_file_manager(&self, _path: &Path) -> dirustat_platform::Result<()> {
+            Ok(())
+        }
+        fn show_properties(&self, _path: &Path) -> dirustat_platform::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// QA-117: a volume that never answers cannot hold the session for more than the timeout.
+    #[test]
+    fn free_space_gives_up_on_a_stuck_volume() {
+        let (dir, mut s, _fake) = session_with_fake();
+        s.set_platform(Arc::new(SlowPlatform));
+        let started = std::time::Instant::now();
+        let err = s.execute("platform.free_space", &json!({"path": dir.path().to_str().unwrap()})).unwrap_err();
+        assert_eq!(err.code(), "internal");
+        assert!(err.to_string().contains("in time"), "{err}");
+        assert!(started.elapsed() < Duration::from_millis(1500), "{:?}", started.elapsed());
     }
 
     #[test]
