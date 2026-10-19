@@ -618,7 +618,8 @@ mod tests {
         let t = empty_tree("C:\\");
         assert_eq!(t.len(), 1);
         assert_eq!(t.get(t.root()).map(|n| n.kind()), Some(NodeKind::Dir));
-        assert!(!mft_available("C:"));
+        // availability of a real volume depends on elevation (CI runners are admins), so probe a bad name
+        assert!(!mft_available("not a volume"));
     }
 
     #[test]
