@@ -9,6 +9,12 @@ use std::fmt;
 /// Node limit: `NodeId` is a `u32`, minus headroom for reserved values.
 pub const MAX_NODES: usize = (u32::MAX - 1) as usize;
 
+/// Synthetic bit in `NodeData::attributes` (no Windows file attribute uses it): this file name is a
+/// second or later hardlink of a file already counted under another name, so its stored size is 0
+/// while the file on disk has its real size. Re-validation against the disk must not compare sizes
+/// for such nodes.
+pub const ATTR_HARDLINK_DUPLICATE: u32 = 0x8000_0000;
+
 /// Index of a node in the arena.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(u32);

@@ -19,6 +19,7 @@ mod protected;
 mod prune;
 pub mod search;
 mod settings;
+mod subtree;
 
 pub use cmd::{CommandInfo, CommandSpec, FastPathStatus, fast_path_status, volume_root_of};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};

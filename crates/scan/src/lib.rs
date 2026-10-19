@@ -453,6 +453,7 @@ fn apply(
         if entry.link_id.is_some_and(|id| !seen_links.insert(id)) {
             data.logical_size = 0;
             data.allocated_size = 0;
+            data.attributes |= dirustat_model::ATTR_HARDLINK_DUPLICATE;
         }
         let Ok(id) = tree.add_node(listing.dir, &entry.name, entry.kind, data) else {
             // Node limit reached: stop adding, the rest of the disk is not representable.
@@ -494,16 +495,20 @@ fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool, exclu
             listing.error = true;
             continue;
         };
-        let name = item.file_name().to_string_lossy().into_owned();
+        let raw_name = item.file_name();
+        // A name that is not valid Unicode (a lone surrogate on Windows) is stored with U+FFFD and flagged,
+        // so two distinct on-disk names that collapse to one string are never mistaken for each other.
+        let lossy = raw_name.to_str().is_none();
+        let name = raw_name.to_string_lossy().into_owned();
         if !excludes.is_empty() && excludes.is_excluded(&name, &item.path()) {
             continue;
         }
         listing.entries.push(match item.metadata() {
-            Ok(meta) => entry_from(name, &item.path(), &meta, cluster),
+            Ok(meta) => entry_from(name, lossy, &item.path(), &meta, cluster),
             Err(_) => Entry {
                 name,
                 kind: NodeKind::File,
-                data: NodeData { error: true, ..NodeData::default() },
+                data: NodeData { error: true, name_lossy: lossy, ..NodeData::default() },
                 link_id: None,
             },
         });
@@ -512,7 +517,7 @@ fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool, exclu
     listing
 }
 
-fn entry_from(name: String, path: &Path, meta: &fs::Metadata, cluster: u64) -> Entry {
+fn entry_from(name: String, name_lossy: bool, path: &Path, meta: &fs::Metadata, cluster: u64) -> Entry {
     let attributes = attributes_of(meta);
     let kind = if meta.file_type().is_symlink() || is_reparse_point(attributes) {
         NodeKind::Link
@@ -528,7 +533,7 @@ fn entry_from(name: String, path: &Path, meta: &fs::Metadata, cluster: u64) -> E
         mtime: mtime_of(meta),
         attributes,
         error: false,
-        name_lossy: false,
+        name_lossy,
     };
     // An empty file adds nothing to any total, so it never needs the (on Windows costly) identity query.
     let link_id = if kind == NodeKind::File && logical > 0 { link_id_of(meta, path) } else { None };

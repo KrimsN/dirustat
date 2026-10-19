@@ -195,6 +195,8 @@ struct Plan {
     kind: NodeKind,
     /// The tree may omit entries of this subtree that exist on disk (exclusions, read errors).
     partial: bool,
+    /// Recycle mode only: how the real folder differs from the tree (a warning, not a refusal).
+    drift: Option<String>,
     report: Report,
 }
 
@@ -312,6 +314,38 @@ fn build_report(session: &Session, node: NodeId) -> Report {
     report
 }
 
+/// Every name from the node up to (not including) the scan root must be exactly representable as
+/// a path component: not lossy (the stored name replaced invalid UTF-16 with U+FFFD, so the path
+/// built from it could reach a different file) and, on Windows, free of the spellings Win32
+/// rewrites (QA-116). Anything else is refused as unaddressable.
+fn verify_addressable(session: &Session, node: NodeId) -> Result<(), CommandError> {
+    let tree = session.tree();
+    let refuse = |why: &str| {
+        CommandError::Unsupported(format!(
+            "refused: {why}; this item cannot be addressed by a unique path, so it was not touched"
+        ))
+    };
+    let mut cur = node;
+    for _ in 0..=tree.len() {
+        let n = tree.get(cur).ok_or_else(|| CommandError::InvalidParams("unknown node".to_owned()))?;
+        let Some(parent) = n.parent() else { return Ok(()) };
+        if n.data().name_lossy {
+            return Err(refuse("a name on the path is not valid Unicode (it was stored with U+FFFD)"));
+        }
+        if let Some(why) = fsops::name_problem(n.name(), cfg!(windows)) {
+            return Err(refuse(why));
+        }
+        cur = parent;
+    }
+    Err(CommandError::InvalidParams("the node's parent chain is broken".to_owned()))
+}
+
+/// Re-reads the real subtree of the folder `node` at `path` and compares it with the tree
+/// (QA-118). `Err` describes the first difference. A partial tree tolerates extra disk entries.
+fn subtree_drift(session: &Session, node: NodeId, path: &str) -> Result<(), String> {
+    crate::subtree::verify(session.tree(), node, std::path::PathBuf::from(path), subtree_partial(session, node))
+}
+
 /// The safety checks every destructive operation passes before anything is touched: protected
 /// paths (lexical and real location), then the stale-tree re-check of the object on disk and the
 /// link rule. Returns the node's path. Reads the disk, never changes it.
@@ -335,8 +369,15 @@ pub(super) fn preflight(
         ));
     }
     protected.check(&node_path, &scan_root).map_err(CommandError::ProtectedPath)?;
+    verify_addressable(session, node)?;
     fsops::verify_location(&node_path, &scan_root, protected, cfg!(windows))?;
+    fsops::verify_identity(Path::new(&node_path), target.kind())?;
     fsops::verify_matches(Path::new(&node_path), target.kind(), target.data())?;
+    if target.kind() == NodeKind::Dir && mode != Mode::Recycle {
+        // Permanent removal and moves take everything below the folder along: re-read the real
+        // subtree and require it to be what the preview showed (QA-118).
+        subtree_drift(session, node, &node_path).map_err(CommandError::StaleTree)?;
+    }
     if mode == Mode::Recycle && target.kind() == NodeKind::Link {
         return Err(CommandError::InvalidParams(
             "links and junctions are not sent to the recycle bin; use file.delete_permanent, which removes the link \
@@ -358,7 +399,13 @@ fn plan(session: &Session, addr: Addr<'_>, mode: Mode) -> Result<Plan, CommandEr
     let node_path = preflight(session, node, &ProtectedPaths::from_env(), mode)?;
     let report = build_report(session, node);
     let partial = subtree_partial(session, node);
-    Ok(Plan { node, path: node_path, scan_root, kind, partial, report })
+    // Recycling keeps the lighter check (the data is recoverable) but still reports drift.
+    let drift = if mode == Mode::Recycle && kind == NodeKind::Dir {
+        subtree_drift(session, node, &node_path).err()
+    } else {
+        None
+    };
+    Ok(Plan { node, path: node_path, scan_root, kind, partial, drift, report })
 }
 
 fn report_json(session: &Session, plan: &Plan, mode: Mode, dry_run: bool) -> Value {
@@ -378,6 +425,7 @@ fn report_json(session: &Session, plan: &Plan, mode: Mode, dry_run: bool) -> Val
         "paths": plan.report.paths,
         "truncated": plan.report.truncated,
         "partial_tree": plan.partial,
+        "subtree_changed": plan.drift,
     })
 }
 
@@ -436,21 +484,7 @@ fn run_move(session: &mut Session, params: &Value) -> Result<Value, CommandError
 /// address an alternate data stream, trailing dots and spaces are silently dropped by Win32, and
 /// the reserved characters cannot occur in a name at all.
 pub(super) fn destination_component_problem(comps: &[String], windows: bool) -> Option<&'static str> {
-    if !windows {
-        return None;
-    }
-    for c in comps {
-        if c.contains(':') {
-            return Some("a name contains `:` (alternate data stream)");
-        }
-        if c.contains(['*', '?', '"', '<', '>', '|']) {
-            return Some("a name contains a reserved character");
-        }
-        if c.ends_with(['.', ' ']) {
-            return Some("a name ends with a dot or a space");
-        }
-    }
-    None
+    comps.iter().find_map(|c| fsops::name_problem(c, windows))
 }
 
 /// Validates the destination of a move; returns it as given. Nothing is touched.
@@ -1233,5 +1267,177 @@ mod tests {
         s.execute("file.delete_permanent", &p).unwrap();
         assert!(!link.exists());
         assert!(target.join("precious.txt").exists());
+    }
+
+    /// Scans `root` with a fake platform.
+    fn scanned(root: &Path) -> (Session, Arc<FakePlatform>) {
+        let mut s = Session::new();
+        let handle = dirustat_scan::start(root, dirustat_scan::ScanOptions::default()).unwrap();
+        assert_eq!(s.finish_scan(handle), Ok(true));
+        let fake = Arc::new(FakePlatform::new());
+        s.set_platform(fake.clone());
+        (s, fake)
+    }
+
+    fn id_named(s: &Session, name: &str) -> u64 {
+        let t = s.tree();
+        (0..t.len())
+            .find(|&i| t.node_at(i).and_then(|n| t.get(n)).is_some_and(|n| n.name() == name))
+            .map(|i| u64::try_from(i).unwrap())
+            .unwrap()
+    }
+
+    /// QA-116: `dup` and `dup.` are two files on NTFS but Win32 normalisation maps both paths to `dup`.
+    #[cfg(windows)]
+    #[test]
+    fn trailing_dot_names_never_reach_the_wrong_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("dup"), b"same-size-data").unwrap();
+        let verbatim = format!(r"\\?\{}\dup.", root.display());
+        std::fs::write(&verbatim, b"same-size-data").unwrap();
+        let (mut s, fake) = scanned(&root);
+        let (rev, dot) = (s.revision(), id_named(&s, "dup."));
+        for id in ["file.delete", "file.delete_permanent"] {
+            let mut p = json!({"id": dot, "revision": rev, "confirm": true});
+            if id == "file.delete_permanent" {
+                p["i_understand_permanent"] = json!(true);
+            }
+            assert_eq!(s.execute(id, &p).unwrap_err().code(), "unsupported", "{id}");
+        }
+        assert!(root.join("dup").exists() && std::fs::metadata(&verbatim).is_ok());
+        assert!(fake.calls().is_empty());
+        // The plainly named file is still deletable: the check refuses ambiguity, not the whole folder.
+        let plain = id_named(&s, "dup");
+        s.execute("file.delete", &json!({"id": plain, "revision": rev, "confirm": true})).unwrap();
+        assert!(!root.join("dup").exists() && std::fs::metadata(&verbatim).is_ok());
+    }
+
+    /// QA-116: a lone surrogate and a literal U+FFFD collapse to the same stored name.
+    #[cfg(windows)]
+    #[test]
+    fn lossy_names_are_flagged_and_refused() {
+        use std::os::windows::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let wide: Vec<u16> = "x".encode_utf16().chain([0xD800]).chain(".tmp".encode_utf16()).collect();
+        let lone = root.join(std::ffi::OsString::from_wide(&wide));
+        std::fs::write(&lone, b"0123456789").unwrap();
+        std::fs::write(root.join("x\u{FFFD}.tmp"), b"0123456789").unwrap();
+        let (mut s, fake) = scanned(&root);
+        let t = s.tree();
+        let flags: Vec<bool> = t.children(t.root()).filter_map(|c| t.get(c)).map(|n| n.data().name_lossy).collect();
+        assert_eq!(flags.iter().filter(|f| **f).count(), 1, "exactly the lone-surrogate node is lossy");
+        let rev = s.revision();
+        let lossy_id = t
+            .children(t.root())
+            .find(|&c| t.get(c).is_some_and(|n| n.data().name_lossy))
+            .map(|c| u64::try_from(c.index()).unwrap())
+            .unwrap();
+        let err = s.execute("file.delete", &json!({"id": lossy_id, "revision": rev, "confirm": true})).unwrap_err();
+        assert_eq!(err.code(), "unsupported");
+        assert!(lone.exists() && root.join("x\u{FFFD}.tmp").exists());
+        assert!(fake.calls().is_empty());
+    }
+
+    /// QA-118: content added or rewritten deep inside a folder after the preview is not deleted unseen.
+    #[test]
+    fn permanent_folder_delete_detects_deep_changes() {
+        let mut f = fixture();
+        let sub = f.path_of("sub");
+        let dry = f.s.execute("file.delete_permanent", &json!({"path": sub, "dry_run": true, "confirm": true}));
+        assert_eq!(dry.unwrap()["count"], 4);
+        let new_file = f.root().join("sub").join("deep").join("NEW_UNSEEN.docx");
+        std::fs::write(&new_file, b"precious").unwrap();
+        let p = json!({"path": sub, "confirm": true, "i_understand_permanent": true});
+        let err = f.s.execute("file.delete_permanent", &p).unwrap_err();
+        assert_eq!(err.code(), "stale_tree");
+        assert!(err.to_string().contains("NEW_UNSEEN.docx"), "{err}");
+        assert!(new_file.exists() && f.root().join("sub").exists());
+        assert_eq!(f.s.execute("file.journal", &json!({})).unwrap()["total"], 0);
+        // A move of the folder is refused for the same reason.
+        let mv = json!({"path": sub, "destination": f.path_of("moved"), "confirm": true});
+        assert_eq!(f.s.execute("file.move", &mv).unwrap_err().code(), "stale_tree");
+        // Rewriting an existing file at depth is caught too.
+        std::fs::remove_file(&new_file).unwrap();
+        std::fs::write(f.root().join("sub").join("deep").join("b.txt"), b"rewritten, longer").unwrap();
+        assert_eq!(f.s.execute("file.delete_permanent", &p).unwrap_err().code(), "stale_tree");
+        assert!(f.root().join("sub").join("deep").join("b.txt").exists());
+    }
+
+    #[test]
+    fn recycle_reports_subtree_drift_as_a_warning() {
+        let mut f = fixture();
+        let sub = f.path_of("sub");
+        let clean = f.s.execute("file.delete_preview", &json!({"path": sub})).unwrap();
+        assert!(clean["subtree_changed"].is_null());
+        std::fs::write(f.root().join("sub").join("deep").join("NEW.docx"), b"new").unwrap();
+        let drift = f.s.execute("file.delete_preview", &json!({"path": sub})).unwrap();
+        assert!(drift["subtree_changed"].as_str().is_some_and(|m| m.contains("NEW.docx")));
+        // Recycling stays possible: the data is recoverable.
+        let done = f.s.execute("file.delete", &json!({"path": sub, "confirm": true})).unwrap();
+        assert_eq!(done["done"], true);
+    }
+
+    /// QA-119: every name of a hardlinked file is deletable (the tree stores size 0 for later names).
+    #[test]
+    fn second_hardlink_name_is_deletable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("hl_a.bin"), vec![5u8; 500]).unwrap();
+        if std::fs::hard_link(root.join("hl_a.bin"), root.join("hl_b.bin")).is_err() {
+            return; // hardlinks unavailable on this file system
+        }
+        let (mut s, _fake) = scanned(&root);
+        let t = s.tree();
+        let zero = t.children(t.root()).filter_map(|c| t.get(c)).filter(|n| n.data().logical_size == 0).count();
+        assert!(zero > 0 || !cfg!(windows), "the scan must charge a hardlinked file once");
+        if zero == 0 {
+            return; // no identity query on this platform; nothing to test
+        }
+        let rev = s.revision();
+        for name in ["hl_a.bin", "hl_b.bin"] {
+            let out = s.execute("file.delete_preview", &json!({"path": root.join(name).to_string_lossy()}));
+            assert!(out.is_ok(), "{name}: {out:?}");
+        }
+        let second = id_named(&s, "hl_b.bin");
+        let second_dup =
+            s.tree().get(s.tree().node_at(usize::try_from(second).unwrap()).unwrap()).unwrap().data().attributes
+                & dirustat_model::ATTR_HARDLINK_DUPLICATE
+                != 0;
+        let target = if second_dup { "hl_b.bin" } else { "hl_a.bin" };
+        let id = id_named(&s, target);
+        s.execute("file.delete", &json!({"id": id, "revision": rev, "confirm": true})).unwrap();
+        assert!(!root.join(target).exists());
+    }
+
+    /// QA-123: names Win32 treats as devices are not accepted as move destinations.
+    #[test]
+    fn device_names_are_refused_as_move_destinations() {
+        let comps = |n: &str| vec![n.to_owned()];
+        for bad in ["CON", "con", "COM1", "lpt9", "aux.txt", "LPT1.log", "nul.tar.gz", "CLOCK$", "CONIN$", "Com\u{b9}"]
+        {
+            assert!(destination_component_problem(&comps(bad), true).is_some(), "{bad}");
+        }
+        for ok in ["COM0", "COM10", "CONSOLE", "console.txt", "auxiliary", "nulled", "com", "lpt"] {
+            assert_eq!(destination_component_problem(&comps(ok), true), None, "{ok}");
+        }
+        assert_eq!(destination_component_problem(&comps("CON"), false), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn move_to_a_device_name_is_invalid_params() {
+        let mut f = fixture();
+        let src = f.path_of("keep.txt");
+        for dest in ["CON", "COM1", "aux.txt"] {
+            let p = json!({"path": src, "destination": f.path_of(dest), "confirm": true});
+            assert_eq!(f.s.execute("file.move", &p).unwrap_err().code(), "invalid_params", "{dest}");
+        }
+        assert!(Path::new(&src).exists());
+        assert!(f.fake.calls().is_empty());
     }
 }

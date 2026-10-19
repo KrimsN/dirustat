@@ -6,7 +6,7 @@
 
 use crate::CommandError;
 use crate::protected::{Key, ProtectedPaths, key_of};
-use dirustat_model::{NodeData, NodeKind};
+use dirustat_model::{ATTR_HARDLINK_DUPLICATE, NodeData, NodeKind};
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::Path;
@@ -60,7 +60,10 @@ pub(crate) fn verify_matches(path: &Path, kind: NodeKind, data: &NodeData) -> Re
     if on_disk != kind {
         return Err(stale("the kind of the object changed since the scan"));
     }
-    if kind == NodeKind::File && meta.len() != data.logical_size {
+    // A second or later hardlink name is stored with size 0 (the file is counted once), so only
+    // the first name of a file has a size to compare.
+    let hardlink_duplicate = data.attributes & ATTR_HARDLINK_DUPLICATE != 0;
+    if kind == NodeKind::File && !hardlink_duplicate && meta.len() != data.logical_size {
         return Err(stale("the file size changed since the scan"));
     }
     if let (Some(seen), Some(now)) = (data.mtime, mtime_secs(&meta))
@@ -69,6 +72,64 @@ pub(crate) fn verify_matches(path: &Path, kind: NodeKind, data: &NodeData) -> Re
         return Err(stale("the modification time changed since the scan"));
     }
     Ok(())
+}
+
+/// Win32 device names: `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9`, `LPT1`-`LPT9` (also with the
+/// superscript digits), `CONIN$`, `CONOUT$`, `CLOCK$`, with or without an extension, any case.
+fn is_reserved_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end_matches(' ').to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$") {
+        return true;
+    }
+    let mut chars = stem.chars();
+    let head: String = chars.by_ref().take(3).collect();
+    matches!(head.as_str(), "COM" | "LPT")
+        && matches!(chars.next(), Some('1'..='9' | '\u{b9}' | '\u{b2}' | '\u{b3}'))
+        && chars.next().is_none()
+}
+
+/// The first reason a single path component cannot be addressed safely on Windows: `:` would name
+/// an alternate data stream, trailing dots and spaces are silently dropped by Win32 (two different
+/// on-disk names then collapse into one path), device names open a device, and the reserved
+/// characters or control characters cannot occur in a name. `None` on other platforms.
+pub(crate) fn name_problem(name: &str, windows: bool) -> Option<&'static str> {
+    if !windows {
+        return None;
+    }
+    if name.contains(':') {
+        return Some("a name contains `:` (alternate data stream)");
+    }
+    if name.contains(['*', '?', '"', '<', '>', '|']) || name.chars().any(char::is_control) {
+        return Some("a name contains a reserved character");
+    }
+    if name.ends_with(['.', ' ']) {
+        return Some("a name ends with a dot or a space");
+    }
+    if is_reserved_device_name(name) {
+        return Some("a name is a reserved Windows device name");
+    }
+    None
+}
+
+/// The object opened through `path` must be the one the tree node names: the real name of the
+/// opened object (what `canonicalize` reports, with the on-disk spelling) has to equal the final
+/// component exactly. Win32 normalisation (`dup.` -> `dup`), 8.3 short names and similar aliases
+/// make the two differ, and the operation is refused instead of hitting a different file. Links
+/// are not resolved (a link is removed itself), so for them only the name rules apply.
+pub(crate) fn verify_identity(path: &Path, kind: NodeKind) -> Result<(), CommandError> {
+    if kind == NodeKind::Link {
+        return Ok(());
+    }
+    let alias = || {
+        CommandError::Unsupported(
+            "refused: the path resolves to an object with a different name (a Win32 name alias); the item was not \
+             touched"
+                .to_owned(),
+        )
+    };
+    let want = path.file_name().ok_or_else(alias)?;
+    let canon = fs::canonicalize(path).map_err(|_| stale("the path cannot be resolved"))?;
+    if canon.file_name() == Some(want) { Ok(()) } else { Err(alias()) }
 }
 
 /// Resolves the parent of `path` on disk and checks that it is exactly where the lexical path

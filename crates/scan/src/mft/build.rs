@@ -356,8 +356,11 @@ impl Builder {
             EntryKind::File | EntryKind::Link => self.mark(link.owner, REACHED | CHARGED),
         }
         let (logical, allocated) = if first { (entry.logical, entry.allocated) } else { (0, 0) };
-        let attributes =
+        let mut attributes =
             if entry.kind == EntryKind::Dir { entry.attributes | ATTR_DIRECTORY } else { entry.attributes };
+        if !first && entry.kind == EntryKind::File {
+            attributes |= dirustat_model::ATTR_HARDLINK_DUPLICATE;
+        }
         let data = NodeData {
             logical_size: logical,
             allocated_size: allocated,
