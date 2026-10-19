@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-19 · revision 17 (G-015 and G-017 UI closed) · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048); G-040, G-042, G-045 partial; G-052 (MFT outlier, renumbered) and G-053-G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-19 · revision 19 (G-015 and G-017 UI closed) · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048); G-040, G-042, G-045 partial; G-052 (MFT outlier, renumbered) and G-053-G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -12,6 +12,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-045 | P1 | QA | **QA-5 (S3, static).** Portable and MFT backends disagree on allocated size (resident files 0 vs 4096, sparse, compressed). Policy now documented (scan crate docs, `docs/architecture.md`): MFT exact, portable an upper bound. Left: portable needs a per-file `GetCompressedFileSize` wrapper in `dirustat-ntfs` (verify what it returns for resident files; costs another file open, see G-040 timings), plus sparse files with `compression_unit == 0` (G-033) | same fixture gives the same allocated totals on both backends; elevated parity test on a VHDX with resident, sparse and compressed files |
 | G-059 | P3 | M4.9 | Leftovers of QA-138 (S5): `engine.commands` has no menu or shortcut for `platform.reveal`, `platform.properties`, `search.clear` and reports `platform.*`/`search.clear` enabled without a tree or selection (engine); the high-contrast theme named in `docs/ui-design.md` does not exist (design text now says so); the "Previous scan" overlay is still low-contrast over a dense treemap | each item fixed or struck; engine test for the metadata |
 | G-060 | P3 | M4.9 | The extension palette lives in `engine::ext` (16 colours); the UI side maps extensions through `ui::ext_colors` (60 curated slots plus a hash) to avoid collisions. Move the palette into one place (engine API) so CLI/control clients see the same colours | one palette source; test that clients agree |
+| G-062 | P2 | M4.10 | Residual of QA-144: `Session::execute` (CLI, in-process UI) and `cleanup.run` with permanent actions hold the session lock for the whole operation. The UI should call `Session::execute_split` for `file.delete_permanent` and `platform.free_space` from a worker thread; `cleanup.run` needs the same split | UI delete does not freeze the window on a big folder; cleanup run split; test |
 | G-049 | P2 | QA | **QA-110 (S4).** `ui.state` does not round-trip through `ui.set_state`; shell `ui.*` commands are not drivable over control | documented way to run every `UI_COMMANDS` entry or a list of read-only fields |
 | G-050 | P2 | QA | **QA-111 (S4).** UI layout differs from `docs/ui-design.md` (drive picker, search, folders/attrs columns, path and free space in the status bar, Largest files menu entry) | each item lands or is struck from the design doc |
 | G-051 | P3 | QA | **QA-114 (S4, unconfirmed).** Clicking the same tree header twice in a row did not toggle the sort direction (maybe a synthetic-mouse artifact) | confirmed or dismissed with a physical mouse |
@@ -71,12 +72,14 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-047 | 2026-10-18 | QA-105: fail fast when the window does not render, stale `ui.state`, docs aligned |
 | G-048 | 2026-10-18 | QA-6: separate pre-auth slots and rate budget from authenticated clients |
 | G-015 | 2026-10-18 | M4.3: `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal` with confirm, dry run, protected paths, stale-tree re-check, journal (UI hooks remain under G-014) |
+| G-061 | 2026-10-19 | M4.10: QA-139..QA-146 fixed (exact path resolution, colliding names in subtree verification, drive-type classification, C0-only name rule, folder mtime, lock-free permanent removal and free_space, `skipped_deep`); table in `docs/qa/reports/2026-10-19-m4-code.md`; open: UI and `cleanup.run` permanent still hold the session lock |
 | G-057 | 2026-10-19 | M4.8: QA-116..QA-124 fixed in the engine/platform/scan/control/CLI (unaddressable names and name identity check, real-subtree verification, hardlink duplicate marker, positive local-path validator, bounded `free_space`, cleanup/search budgets, device-name move destinations, CLI journal); table in `docs/qa/reports/2026-10-19-m4-code.md` |
 | G-056 | 2026-10-19 | M4.9: UI follow-up of the M4.8 fixes: friendly messages for `unsupported` (unaddressable name) and `stale_tree` (first difference, stale revision), `subtree_changed` warning in the recycle dialog, `budget_exhausted` and `unchecked` in the cleanup preview and run |
 | G-058 | 2026-10-19 | M4.9: UI QA fixes QA-125..QA-138 (middle-elided paths, system CJK font fallback, notice lifetime, search highlight, cleanup refresh, hit markers, palette, prefs, start screen scroll, deletable demo, contrast, extension colours, polish); table in `docs/qa/reports/2026-10-19-m4-ui.md` |
 
 ## Revision history
 
+- 2026-10-19 · r19: M4.10 closed QA-139..QA-146 (G-061).
 - 2026-10-19 · r18: M4.9 closed G-056 (UI follow-up of M4.8) and QA-125..QA-138 (G-058); added G-059 (QA-138 leftovers) and G-060 (palette location).
 - 2026-10-13 · r1: initial list.
 - 2026-10-13 · r2: translated to English.
