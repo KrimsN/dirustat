@@ -285,6 +285,9 @@ struct Entry {
     data: NodeData,
     /// `(device, inode)` of a file with more than one hard link, when the platform exposes it.
     link_id: Option<(u64, u64)>,
+    /// The exact on-disk name when it is not valid Unicode (`name` then holds the U+FFFD form), so
+    /// a sub-directory is read through its real path and not through the lossy spelling.
+    raw_name: Option<std::ffi::OsString>,
 }
 
 /// What a worker reports about one directory.
@@ -466,7 +469,11 @@ fn apply(
         match entry.kind {
             NodeKind::Dir => {
                 counters.dirs.fetch_add(1, Ordering::Relaxed);
-                subdirs.push((id, listing.path.join(&entry.name)));
+                let child = match &entry.raw_name {
+                    Some(raw) => listing.path.join(raw),
+                    None => listing.path.join(&entry.name),
+                };
+                subdirs.push((id, child));
             }
             NodeKind::File | NodeKind::Link => {
                 counters.files.fetch_add(1, Ordering::Relaxed);
@@ -503,15 +510,18 @@ fn read_dir(dir: NodeId, path: PathBuf, cluster: u64, cancel: &AtomicBool, exclu
         if !excludes.is_empty() && excludes.is_excluded(&name, &item.path()) {
             continue;
         }
-        listing.entries.push(match item.metadata() {
+        let mut entry = match item.metadata() {
             Ok(meta) => entry_from(name, lossy, &item.path(), &meta, cluster),
             Err(_) => Entry {
                 name,
                 kind: NodeKind::File,
                 data: NodeData { error: true, name_lossy: lossy, ..NodeData::default() },
                 link_id: None,
+                raw_name: None,
             },
-        });
+        };
+        entry.raw_name = lossy.then_some(raw_name);
+        listing.entries.push(entry);
     }
     listing.entries.sort_by(|a, b| a.name.cmp(&b.name));
     listing
@@ -537,7 +547,7 @@ fn entry_from(name: String, name_lossy: bool, path: &Path, meta: &fs::Metadata, 
     };
     // An empty file adds nothing to any total, so it never needs the (on Windows costly) identity query.
     let link_id = if kind == NodeKind::File && logical > 0 { link_id_of(meta, path) } else { None };
-    Entry { name, kind, data, link_id }
+    Entry { name, kind, data, link_id, raw_name: None }
 }
 
 /// Rounds `size` up to a multiple of `cluster` (saturating); zero stays zero.
@@ -740,6 +750,7 @@ mod tests {
             kind: NodeKind::File,
             data: NodeData::with_size(100),
             link_id: Some((1, 7)),
+            raw_name: None,
         };
         let listing = Listing {
             dir: tree.root(),
@@ -805,6 +816,51 @@ mod tests {
         );
         // `a/skipme` is gone, `b/skipme` stays.
         assert_eq!(out.tree.len(), 1 + 2 + 2);
+        assert_eq!(out.tree.get(out.tree.root()).unwrap().error_count(), 0);
+    }
+
+    /// A name that is not valid Unicode, and the literal U+FFFD name its lossy text equals.
+    #[cfg(any(windows, unix))]
+    fn lone_and_literal(stem: &str) -> (std::ffi::OsString, std::ffi::OsString) {
+        #[cfg(windows)]
+        let lone = {
+            use std::os::windows::ffi::OsStringExt;
+            let wide: Vec<u16> = stem.encode_utf16().chain([0xD800]).collect();
+            std::ffi::OsString::from_wide(&wide)
+        };
+        #[cfg(unix)]
+        let lone = {
+            use std::os::unix::ffi::OsStringExt;
+            let mut bytes = stem.as_bytes().to_vec();
+            bytes.push(0xFF);
+            std::ffi::OsString::from_vec(bytes)
+        };
+        (lone, std::ffi::OsString::from(format!("{stem}\u{FFFD}")))
+    }
+
+    /// A folder with a non-Unicode name is read through its real path: its children are its own,
+    /// not those of a literal-U+FFFD twin that shares the lossy spelling.
+    #[cfg(any(windows, unix))]
+    #[test]
+    fn non_unicode_folder_is_read_through_its_real_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (lone, literal) = lone_and_literal("d");
+        if fs::create_dir(tmp.path().join(&lone)).is_err() || fs::create_dir(tmp.path().join(&literal)).is_err() {
+            return; // this file system cannot hold such names
+        }
+        write(&tmp.path().join(&lone).join("only_in_lone.bin"), 10);
+        write(&tmp.path().join(&literal).join("only_in_literal.bin"), 20);
+        let out = scan(tmp.path());
+        let tree = &out.tree;
+        let of = |lossy: bool| {
+            let dir = tree
+                .children(tree.root())
+                .find(|&c| tree.get(c).is_some_and(|n| n.data().name_lossy == lossy))
+                .unwrap();
+            names(tree, dir)
+        };
+        assert_eq!(of(true), ["only_in_lone.bin"]);
+        assert_eq!(of(false), ["only_in_literal.bin"]);
         assert_eq!(out.tree.get(out.tree.root()).unwrap().error_count(), 0);
     }
 

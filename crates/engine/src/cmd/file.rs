@@ -1464,6 +1464,28 @@ mod tests {
         s.execute("file.delete_permanent", &p)
     }
 
+    /// QA-140: a folder holding two names that collide after lossy conversion is not deleted
+    /// permanently on the strength of a comparison that cannot tell them apart.
+    #[cfg(windows)]
+    #[test]
+    fn permanent_delete_refuses_a_folder_with_colliding_names() {
+        use std::os::windows::ffi::OsStringExt;
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("root").join("sub");
+        let wide: Vec<u16> = "d".encode_utf16().chain([0xD800]).collect();
+        let (lone, literal) = (std::ffi::OsString::from_wide(&wide), std::ffi::OsString::from("d\u{FFFD}"));
+        for name in [&lone, &literal] {
+            std::fs::create_dir_all(sub.join(name)).unwrap();
+            std::fs::write(sub.join(name).join("a.txt"), b"aaaa").unwrap();
+        }
+        let (mut s, fake) = scanned(&dir.path().join("root"));
+        std::fs::write(sub.join(&lone).join("NEW_UNSEEN.docx"), b"precious").unwrap();
+        let err = delete_perm(&mut s, &sub).unwrap_err();
+        assert_eq!(err.code(), "stale_tree", "{err}");
+        assert!(sub.join(&lone).join("NEW_UNSEEN.docx").exists());
+        assert!(fake.calls().is_empty());
+    }
+
     /// QA-139: a request names exactly one node. A trailing no-break space is part of the name.
     #[test]
     fn nbsp_suffix_addresses_the_nbsp_file_and_never_its_sibling() {
