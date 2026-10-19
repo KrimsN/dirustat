@@ -197,7 +197,7 @@ pub struct FreeSpace {
 
 /// Status-bar hint shown while [`UiState::elevation_hint`] is set.
 pub const ELEVATION_HINT: &str =
-    "Fast MFT scan needs administrator rights. Restart as administrator for WizTree-class speed.";
+    "Fast MFT scan needs administrator rights. Restart as administrator for maximum scan speed.";
 
 /// Smallest accepted interface zoom.
 pub const MIN_ZOOM_PERCENT: u16 = 50;

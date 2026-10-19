@@ -1,4 +1,4 @@
-//! Per-extension statistics (WinDirStat's "extension list"): pure logic over a `model::Tree`.
+//! Per-extension statistics (the extension list): pure logic over a `model::Tree`.
 //!
 //! Extension rules: the extension is the text after the last dot of the file name, lowercased
 //! (Unicode `to_lowercase`) and without the dot. A name without a dot, a dotfile whose only dot

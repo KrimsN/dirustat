@@ -1,4 +1,4 @@
-//! L0: fast NTFS MFT parsing (the "WizTree-style" path).
+//! L0: fast NTFS MFT parsing (the fast MFT path).
 //!
 //! Status: M3.1 — safe read-only volume access (`Volume`) over an isolated Win32 FFI module; M3.2 — safe
 //! MFT record parsing (`apply_fixups`, `parse_record`, `decode_data_runs`, `mft_extents`) and the chunked
