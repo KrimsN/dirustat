@@ -18,11 +18,11 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params_doc: "{\"query\"?: string (<= 512 chars, empty = no name test), \"mode\"?: \"substring\" (default) | \
                 \"wildcard\" (* and ?) | \"regex\" (linear-time engine, size-limited), \"case_sensitive\"?: bool \
-                (default false), \"match_path\"?: bool (test the full path instead of the name; entries deeper than 2048 levels never match), \"min_size\"?: u64, \
+                (default false), \"match_path\"?: bool (test the full path instead of the name; entries deeper than 2048 levels cannot be tested and never match; they are counted in skipped_deep), \"min_size\"?: u64, \
                 \"max_size\"?: u64, \"extensions\"?: [string] (<= 64, no dot, directories never match), \"kind\"?: \
                 \"file\" | \"dir\" | \"any\" (default), \"limit\"?: 1..=10000 (default 100), \"size_mode\"?: \
                 \"logical\" | \"allocated\" (default: session mode)}. Read-only. Returns {total_matched, truncated, \
-                budget_exhausted, revision, items: [{id, name, kind, path, size}]} largest first; the ids are also \
+                budget_exhausted, skipped_deep (entries below level 2048 that match_path could not test; non-zero means the result may be incomplete), revision, items: [{id, name, kind, path, size}]} largest first; the ids are also \
                 kept as the session's highlight set until search.clear or the next scan.",
             destructive: false,
             enabled: always,
@@ -131,6 +131,7 @@ fn run_find(session: &mut Session, params: &Value) -> Result<Value, CommandError
         "total_matched": outcome.total_matched,
         "truncated": outcome.truncated,
         "budget_exhausted": outcome.budget_exhausted,
+        "skipped_deep": outcome.skipped_deep,
         "revision": session.revision(),
         "items": items,
     }))
@@ -189,6 +190,27 @@ mod tests {
         v["items"].as_array().unwrap().iter().map(|i| i["name"].as_str().unwrap()).collect()
     }
 
+    /// QA-146: `search.find match_path` reports how many entries were too deep to be tested.
+    #[test]
+    fn find_reports_entries_skipped_for_depth() {
+        let mut t = Tree::new("r");
+        let mut cur = t.root();
+        let limit = usize::try_from(search::MAX_PATH_MATCH_DEPTH).unwrap();
+        for _ in 0..limit + 3 {
+            cur = t.add_child(cur, "d", NodeKind::Dir, 0).unwrap();
+        }
+        t.aggregate();
+        let mut s = Session::new();
+        s.replace_tree(t);
+        let out = s.execute("search.find", &json!({"query": "d", "match_path": true, "limit": 1})).unwrap();
+        assert_eq!(out["skipped_deep"], 3);
+        assert_eq!(out["total_matched"], limit);
+        let out = s.execute("search.find", &json!({"query": "d"})).unwrap();
+        assert_eq!(out["skipped_deep"], 0);
+        assert_eq!(out["total_matched"], limit + 3);
+        let info = s.commands().into_iter().find(|c| c.id == "search.find").unwrap();
+        assert!(info.params_doc.contains("skipped_deep"));
+    }
     #[test]
     fn find_by_each_mode_sorted_by_size() {
         let mut s = session();

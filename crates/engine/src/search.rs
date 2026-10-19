@@ -251,6 +251,9 @@ pub struct SearchOutcome {
     pub truncated: bool,
     /// The time budget ran out before the whole tree was visited; results are partial.
     pub budget_exhausted: bool,
+    /// Entries that passed every other check but lay deeper than [`MAX_PATH_MATCH_DEPTH`], so `match_path`
+    /// could not test them (QA-146). Non-zero means the result may be missing matches.
+    pub skipped_deep: usize,
 }
 
 /// Heap key: larger size first, then smaller arena index.
@@ -278,6 +281,7 @@ fn search_with_deadline(
     let limit = limit.clamp(1, MAX_RESULTS);
     let mut heap: BinaryHeap<Reverse<Key>> = BinaryHeap::new();
     let (mut total, mut visited, mut exhausted) = (0usize, 0usize, false);
+    let skipped_deep = std::cell::Cell::new(0usize);
     let stride = if filter.needs_path() { PATH_CLOCK_STRIDE } else { CLOCK_STRIDE };
     let mut stack: Vec<(NodeId, u32)> = tree.children(tree.root()).map(|c| (c, 1)).collect();
     while let Some((id, depth)) = stack.pop() {
@@ -293,7 +297,14 @@ fn search_with_deadline(
         }
         let size = node_size(tree, id, mode);
         // Entries deeper than `MAX_PATH_MATCH_DEPTH` get no path, hence no `match_path` hit.
-        let mut path = || if depth <= MAX_PATH_MATCH_DEPTH { path_of(id) } else { None };
+        let mut path = || {
+            if depth <= MAX_PATH_MATCH_DEPTH {
+                path_of(id)
+            } else {
+                skipped_deep.set(skipped_deep.get().saturating_add(1));
+                None
+            }
+        };
         if !filter.matches(node.name(), node.kind(), size, &mut path) {
             continue;
         }
@@ -309,7 +320,13 @@ fn search_with_deadline(
     let mut best: Vec<Key> = heap.into_iter().map(|Reverse(k)| k).collect();
     best.sort_by(|a, b| b.cmp(a));
     let ids: Vec<NodeId> = best.into_iter().map(|(_, Reverse(id))| id).collect();
-    SearchOutcome { truncated: total > ids.len(), ids, total_matched: total, budget_exhausted: exhausted }
+    SearchOutcome {
+        truncated: total > ids.len(),
+        ids,
+        total_matched: total,
+        budget_exhausted: exhausted,
+        skipped_deep: skipped_deep.get(),
+    }
 }
 
 /// The last search result held by the session, valid only for the tree revision it was made on.
@@ -528,7 +545,21 @@ mod tests {
             "paths are built only down to the limit"
         );
         assert_eq!(out.total_matched, calls.get());
+        // QA-146: the entries that could not be tested are counted, not silently dropped.
+        assert_eq!(out.skipped_deep, depth + 1 - calls.get());
         assert!(!out.budget_exhausted);
+    }
+
+    #[test]
+    fn skipped_deep_is_zero_when_nothing_is_too_deep() {
+        let t = tree();
+        let mut f = Filter::default().with_name("bin", MatchMode::Substring, true).unwrap();
+        f.match_path = true;
+        let out = search(&t, &f, SizeMode::Logical, 10, &|id| t.get(id).map(|n| n.name().to_owned()));
+        assert_eq!((out.total_matched, out.skipped_deep), (2, 0));
+        // A name-only search never builds paths, so nothing is ever skipped.
+        let plain = Filter::default().with_name("bin", MatchMode::Substring, true).unwrap();
+        assert_eq!(run(&t, &plain, 10).skipped_deep, 0);
     }
 
     #[test]
