@@ -29,13 +29,35 @@ impl Key {
     }
 }
 
-/// Normalizes `path`; `None` when it is not an absolute path of the supported forms (relative,
-/// drive-relative, device paths such as `\\.\` and `\\?\GLOBALROOT`).
+/// Normalizes `path` for the protected-path checks; `None` when it is not an absolute path of the
+/// supported forms (relative, drive-relative, device paths such as `\\.\` and `\\?\GLOBALROOT`).
+///
+/// This is the **permissive** key: surrounding whitespace is trimmed and components are folded with
+/// the full Unicode lower-casing, so it over-matches on purpose (the safe direction for a deny
+/// list). It must never pick the node a destructive command acts on, see [`key_exact`].
 pub(crate) fn key_of(path: &str, windows: bool) -> Option<Key> {
+    key_impl(path, windows, false)
+}
+
+/// Normalizes `path` for **addressing** (QA-139): nothing is trimmed and the components keep their
+/// exact spelling. Only the drive letter and the `\\?\` / `/` spellings are unified. Callers
+/// compare components with [`name_matches`], which folds ASCII case only.
+pub(crate) fn key_exact(path: &str, windows: bool) -> Option<Key> {
+    key_impl(path, windows, true)
+}
+
+/// Whether the node name `name` is the path component `comp`: exact equality, except that on
+/// Windows ASCII letters compare case-insensitively. No other folding (Kelvin sign, fullwidth
+/// letters, normalisation forms) and no trimming, so a request can never alias a different name.
+pub(crate) fn name_matches(name: &str, comp: &str, windows: bool) -> bool {
+    if windows { name.eq_ignore_ascii_case(comp) } else { name == comp }
+}
+
+fn key_impl(path: &str, windows: bool, exact: bool) -> Option<Key> {
     if path.contains('\0') {
         return None;
     }
-    let mut p = path.trim().to_owned();
+    let mut p = if exact { path.to_owned() } else { path.trim().to_owned() };
     if windows {
         let unified = p.replace('/', "\\");
         // `\\?\UNC\server\share` is the network path `\\server\share`.
@@ -49,7 +71,7 @@ pub(crate) fn key_of(path: &str, windows: bool) -> Option<Key> {
         }
     }
     let n = normalize_root_for(&p, windows);
-    let fold = |s: &str| if windows { s.to_lowercase() } else { s.to_owned() };
+    let fold = |s: &str| if windows && !exact { s.to_lowercase() } else { s.to_owned() };
     let sep = if windows { '\\' } else { '/' };
     if windows {
         let b = n.as_bytes();
@@ -59,7 +81,7 @@ pub(crate) fn key_of(path: &str, windows: bool) -> Option<Key> {
             && b.get(2) == Some(&b'\\')
         {
             let comps = n.get(3..)?.split(sep).filter(|c| !c.is_empty()).map(fold).collect();
-            return Some(Key { root: fold(n.get(..2)?), comps });
+            return Some(Key { root: n.get(..2)?.to_ascii_lowercase(), comps });
         }
         if let Some(rest) = n.strip_prefix(r"\\") {
             if rest.starts_with(['?', '.']) {
@@ -510,6 +532,34 @@ mod tests {
         assert!(p.check("/home/dave/Downloads/x", "/proj").is_ok());
         assert!(p.check("/proj/a", "/proj").is_ok());
         assert!(p.check("/opt/app", "/proj").is_ok());
+    }
+
+    /// QA-139: the addressing key keeps names exact, the protection key stays permissive.
+    #[test]
+    fn exact_key_keeps_names_while_the_protection_key_over_matches() {
+        let exact = key_exact("C:\\Root\\dupe\u{a0}", true).unwrap();
+        assert_eq!(exact.root, "c:");
+        assert_eq!(exact.comps, ["Root", "dupe\u{a0}"]);
+        assert_eq!(key_exact(" C:\\x", true), None, "no trimming: a padded path is not absolute");
+        assert_eq!(key_exact("C:\\x\\", true).unwrap().comps, ["x"]);
+        assert_eq!(key_exact("/a/B", false).unwrap().comps, ["a", "B"]);
+        assert_eq!(key_exact(r"\\?\UNC\Srv\Share\X", true).unwrap().comps, ["Srv", "Share", "X"]);
+        // The permissive key still trims and folds, so the deny list over-matches.
+        let loose = key_of("C:\\WINDOWS\u{a0}", true).unwrap();
+        assert_eq!(loose.comps, ["windows"]);
+        assert!(win().check("C:\\Windows\u{a0}", r"D:\scan").is_err());
+    }
+
+    #[test]
+    fn names_match_exactly_except_ascii_case_on_windows() {
+        assert!(name_matches("Readme.TXT", "readme.txt", true));
+        assert!(!name_matches("Readme.TXT", "readme.txt", false));
+        for (name, comp) in
+            [("k", "\u{212A}"), ("a", "\u{ff41}"), ("\u{ff41}", "\u{ff21}"), ("dupe", "dupe\u{a0}"), ("dupe", "dupe ")]
+        {
+            assert!(!name_matches(name, comp, true), "{name:?} vs {comp:?}");
+            assert!(!name_matches(comp, name, true), "{comp:?} vs {name:?}");
+        }
     }
 
     #[test]

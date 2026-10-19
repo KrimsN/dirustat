@@ -954,6 +954,23 @@ mod tests {
         assert!(f.fake.calls().is_empty());
     }
 
+    /// QA-139: `only_under` is resolved exactly, like a `file.*` path: padding does not reach `sub`.
+    #[test]
+    fn only_under_is_resolved_exactly() {
+        let mut f = fixture();
+        let sub = f.root().join("sub").to_string_lossy().into_owned();
+        for (i, padded) in [format!("{sub}\u{a0}"), format!("{sub} "), format!("{sub}\u{3000}")].into_iter().enumerate()
+        {
+            let id = format!("pad{i}");
+            f.save(json!({"id": id, "name": "P", "action": "recycle",
+                "selector": {"names": ["*.tmp", "*.temp"], "only_under": padded}}))
+                .unwrap();
+            assert_eq!(f.s.execute("cleanup.preview", &json!({"id": id})).unwrap_err().code(), "invalid_params");
+            assert_eq!(f.run(&id, json!({})).unwrap_err().code(), "invalid_params");
+        }
+        assert!(f.fake.calls().is_empty() && f.exists("sub/b.temp"));
+    }
+
     #[test]
     fn platform_failure_stops_the_run_cleanly() {
         let mut f = fixture();

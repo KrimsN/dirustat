@@ -19,7 +19,7 @@ use super::select::node_by_index;
 use super::tree::{kind_name, page_limit};
 use super::{CommandSpec, always, parse_params};
 use crate::journal::{JournalEntry, now_secs};
-use crate::protected::{ProtectedPaths, key_of};
+use crate::protected::{ProtectedPaths, key_exact, key_of, name_matches};
 use crate::{CommandError, Session, fsops, prune};
 use dirustat_model::{NodeId, NodeKind, SizeMode};
 use serde::Deserialize;
@@ -263,21 +263,39 @@ pub(super) fn subtree_partial(session: &Session, node: NodeId) -> bool {
     session.partial_scan || session.tree().get(node).is_some_and(|n| n.error_count() > 0 || n.data().error)
 }
 
-/// Walks the tree from the root along the normalized `path`; case-insensitive on Windows.
+/// Walks the tree from the root along `path`, comparing components **exactly** (QA-139): no
+/// trimming, no Unicode case folding; on Windows only ASCII letters are case-insensitive. A
+/// component that matches two siblings is `stale_tree` (ambiguous), never a first-match guess.
+/// Used by every command that can act on the result, so the node a caller names is the node acted on.
 pub(super) fn node_for_path(session: &Session, path: &str) -> Result<NodeId, CommandError> {
-    let windows = cfg!(windows);
+    node_for_path_in(session, path, cfg!(windows))
+}
+
+fn node_for_path_in(session: &Session, path: &str, windows: bool) -> Result<NodeId, CommandError> {
     let tree = session.tree();
     let outside = || CommandError::InvalidParams("path does not resolve to a node of the scanned tree".to_owned());
-    let key = key_of(path, windows).ok_or_else(|| CommandError::InvalidParams("path must be absolute".to_owned()))?;
+    let key =
+        key_exact(path, windows).ok_or_else(|| CommandError::InvalidParams("path must be absolute".to_owned()))?;
     let root_path = session.node_path(tree.root()).ok_or_else(outside)?;
-    let root_key = key_of(&root_path, windows).ok_or_else(outside)?;
-    if !key.starts_with(&root_key) {
+    let root_key = key_exact(&root_path, windows).ok_or_else(outside)?;
+    let same = |a: &str, b: &str| name_matches(a, b, windows);
+    let below_root = key.comps.len() >= root_key.comps.len()
+        && key.root == root_key.root
+        && key.comps.iter().zip(&root_key.comps).all(|(a, b)| same(a, b));
+    if !below_root {
         return Err(outside());
     }
-    let fold = |s: &str| if windows { s.to_lowercase() } else { s.to_owned() };
     let mut cur = tree.root();
     for comp in key.comps.get(root_key.comps.len()..).unwrap_or_default() {
-        cur = tree.children(cur).find(|&c| tree.get(c).is_some_and(|n| fold(n.name()) == *comp)).ok_or_else(outside)?;
+        let mut hits = tree.children(cur).filter(|&c| tree.get(c).is_some_and(|n| same(n.name(), comp)));
+        let (first, second) = (hits.next().ok_or_else(outside)?, hits.next());
+        if second.is_some() {
+            return Err(CommandError::StaleTree(format!(
+                "more than one entry matches the path component {comp:?} (names that differ only in case); nothing \
+                 was touched, address the item by id and revision"
+            )));
+        }
+        cur = first;
     }
     Ok(cur)
 }
@@ -1423,6 +1441,141 @@ mod tests {
         let id = id_named(&s, target);
         s.execute("file.delete", &json!({"id": id, "revision": rev, "confirm": true})).unwrap();
         assert!(!root.join(target).exists());
+    }
+
+    /// Temp dir `root` holding `names`, each with the same content and the same modification time
+    /// (so only the name can tell the files apart), scanned, with a fake platform.
+    fn lookalikes(names: &[&str]) -> (tempfile::TempDir, Session, Arc<FakePlatform>) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        for name in names {
+            let file = std::fs::File::create(root.join(name)).unwrap();
+            std::io::Write::write_all(&mut &file, b"same-size").unwrap();
+            file.set_modified(when).unwrap();
+        }
+        let (s, fake) = scanned(&root);
+        (dir, s, fake)
+    }
+
+    fn delete_perm(s: &mut Session, path: &Path) -> Result<Value, CommandError> {
+        let p = json!({"path": path.to_string_lossy(), "confirm": true, "i_understand_permanent": true});
+        s.execute("file.delete_permanent", &p)
+    }
+
+    /// QA-139: a request names exactly one node. A trailing no-break space is part of the name.
+    #[test]
+    fn nbsp_suffix_addresses_the_nbsp_file_and_never_its_sibling() {
+        let (dir, mut s, _fake) = lookalikes(&["dupe", "dupe\u{a0}"]);
+        let root = dir.path().join("root");
+        let out = delete_perm(&mut s, &root.join("dupe\u{a0}")).unwrap();
+        assert_eq!(out["done"], true);
+        assert!(root.join("dupe").exists(), "the sibling named without NBSP must survive");
+        assert!(!root.join("dupe\u{a0}").exists());
+    }
+
+    /// QA-139: whitespace around a component is never stripped to reach another file.
+    #[test]
+    fn surrounding_whitespace_never_reaches_the_plain_name() {
+        let (dir, mut s, _fake) = lookalikes(&["dupe"]);
+        let root = dir.path().join("root");
+        let before = s.revision();
+        for name in ["dupe\u{a0}", "dupe\u{3000}", "dupe\t", "\u{a0}dupe", "dupe\u{2003}"] {
+            let err = delete_perm(&mut s, &root.join(name)).unwrap_err();
+            assert_eq!(err.code(), "invalid_params", "{name:?}: {err}");
+        }
+        // Whole-request padding is not stripped either: a trailing space, newline or NBSP stays part of the name.
+        let base = root.join("dupe").to_string_lossy().into_owned();
+        for padded in [format!("{base} "), format!("{base}\n"), format!("{base}\u{a0}"), format!(" {base}")] {
+            let p = json!({"path": padded, "confirm": true, "i_understand_permanent": true});
+            assert_eq!(s.execute("file.delete_permanent", &p).unwrap_err().code(), "invalid_params", "{padded:?}");
+        }
+        assert!(root.join("dupe").exists() && s.revision() == before);
+    }
+
+    /// QA-139: the Kelvin sign is its own name on NTFS; Rust's `to_lowercase` would fold it to `k`.
+    #[test]
+    fn kelvin_sign_is_not_k() {
+        let (dir, mut s, _fake) = lookalikes(&["k", "\u{212A}"]);
+        let root = dir.path().join("root");
+        delete_perm(&mut s, &root.join("\u{212A}")).unwrap();
+        assert!(root.join("k").exists() && !root.join("\u{212A}").exists());
+        // With only `k` left, the Kelvin spelling resolves to nothing.
+        let err = delete_perm(&mut s, &root.join("\u{212A}")).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        let (dir, mut s, _fake) = lookalikes(&["k"]);
+        let err = delete_perm(&mut s, &dir.path().join("root").join("\u{212A}")).unwrap_err();
+        assert_eq!(err.code(), "invalid_params");
+        assert!(dir.path().join("root").join("k").exists());
+    }
+
+    /// QA-139: fullwidth letters are not ASCII; only ASCII case differences are folded.
+    #[test]
+    fn fullwidth_letters_are_not_folded() {
+        let (dir, mut s, _fake) = lookalikes(&["\u{ff41}.txt"]);
+        let root = dir.path().join("root");
+        let err = delete_perm(&mut s, &root.join("\u{ff21}.txt")).unwrap_err();
+        assert_eq!(err.code(), "invalid_params", "{err}");
+        assert!(root.join("\u{ff41}.txt").exists());
+        delete_perm(&mut s, &root.join("\u{ff41}.txt")).unwrap();
+        assert!(!root.join("\u{ff41}.txt").exists());
+    }
+
+    /// QA-139: ASCII case differences resolve on Windows (NTFS semantics) and not elsewhere.
+    #[test]
+    fn ascii_case_differences_follow_the_platform() {
+        let (dir, mut s, _fake) = lookalikes(&["Readme.txt"]);
+        let root = dir.path().join("root");
+        let result = delete_perm(&mut s, &root.join("README.TXT"));
+        if cfg!(windows) {
+            assert_eq!(result.unwrap()["done"], true);
+            assert!(!root.join("Readme.txt").exists());
+        } else {
+            assert_eq!(result.unwrap_err().code(), "invalid_params");
+            assert!(root.join("Readme.txt").exists());
+        }
+    }
+
+    fn synthetic_session(names: &[&str]) -> Session {
+        let root = if cfg!(windows) { r"C:\scan" } else { "/scan" };
+        let mut t = dirustat_model::Tree::new(root);
+        for name in names {
+            t.add_child(t.root(), name, NodeKind::File, 1).unwrap();
+        }
+        t.aggregate();
+        let mut s = Session::new();
+        s.replace_tree(t);
+        s
+    }
+
+    /// QA-139: two siblings that match under the fold are refused as ambiguous, never first-match.
+    #[test]
+    fn siblings_matching_under_the_fold_are_ambiguous() {
+        let s = synthetic_session(&["A", "a", "b"]);
+        let at =
+            |name: &str| node_for_path(&s, &format!("{}{name}", if cfg!(windows) { r"C:\scan\" } else { "/scan/" }));
+        if cfg!(windows) {
+            assert_eq!(at("a").unwrap_err().code(), "stale_tree");
+            assert_eq!(at("A").unwrap_err().code(), "stale_tree");
+        } else {
+            assert_ne!(at("a").unwrap(), at("A").unwrap());
+        }
+        assert!(at("b").is_ok());
+        assert_eq!(at("B").is_ok(), cfg!(windows));
+    }
+
+    /// QA-139: trailing dots and spaces are part of the requested name, not stripped.
+    #[test]
+    fn trailing_dots_and_spaces_do_not_resolve_to_the_plain_name() {
+        let s = synthetic_session(&["dupe"]);
+        let base = if cfg!(windows) { r"C:\scan\" } else { "/scan/" };
+        assert!(node_for_path(&s, &format!("{base}dupe")).is_ok());
+        for suffix in [".", " ", "..", ". ", "\u{a0}", "\u{200b}"] {
+            let err = node_for_path(&s, &format!("{base}dupe{suffix}"));
+            // `dupe..` ends in the parent marker only for the exact component "..".
+            assert!(err.is_err(), "{suffix:?} must not resolve to `dupe`");
+        }
     }
 
     /// QA-123: names Win32 treats as devices are not accepted as move destinations.
