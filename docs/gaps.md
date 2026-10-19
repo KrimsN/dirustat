@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-18 · revision 16 (G-015 and G-017 UI closed) · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048); G-040, G-042, G-045 partial; G-052 (MFT outlier, renumbered) and G-053-G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-19 · revision 17 (G-015 and G-017 UI closed) · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048); G-040, G-042, G-045 partial; G-052 (MFT outlier, renumbered) and G-053-G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -10,6 +10,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 |---|---|---|---|---|
 | G-040 | P0 | QA | **QA-3 (S2).** Windows portable scan counts hardlinks N times (`link_id_of` returns `None` outside unix). Fixed by `dirustat_ntfs::file_identity`; remaining: cost, every non-empty file is opened once (100k fixture, release, warm: 0.04 s -> about 1.1 s), so a cheaper source is wanted (directory enumeration by handle with file ids, or an opt-out option) | fixture with 3 hardlinks counts the size once; parity with the MFT backend; works under `unsafe_code = forbid` (safe wrapper or `dirustat-ntfs`) |
 | G-045 | P1 | QA | **QA-5 (S3, static).** Portable and MFT backends disagree on allocated size (resident files 0 vs 4096, sparse, compressed). Policy now documented (scan crate docs, `docs/architecture.md`): MFT exact, portable an upper bound. Left: portable needs a per-file `GetCompressedFileSize` wrapper in `dirustat-ntfs` (verify what it returns for resident files; costs another file open, see G-040 timings), plus sparse files with `compression_unit == 0` (G-033) | same fixture gives the same allocated totals on both backends; elevated parity test on a VHDX with resident, sparse and compressed files |
+| G-056 | P1 | M4.8 | UI follow-up of the M4.8 engine fixes (crates/ui, not touched by M4.8): show `subtree_changed` as a warning in the recycle dialog, map the new `unsupported` refusal (unaddressable name) and the `stale_tree` subtree messages to friendly toasts, show `budget_exhausted`/`unchecked` in the cleanup preview, tell the user that explicit paths must be local drive paths | dialogs and toasts handle each case; UI test per case |
 | G-049 | P2 | QA | **QA-110 (S4).** `ui.state` does not round-trip through `ui.set_state`; shell `ui.*` commands are not drivable over control | documented way to run every `UI_COMMANDS` entry or a list of read-only fields |
 | G-050 | P2 | QA | **QA-111 (S4).** UI layout differs from `docs/ui-design.md` (drive picker, search, folders/attrs columns, path and free space in the status bar, Largest files menu entry) | each item lands or is struck from the design doc |
 | G-051 | P3 | QA | **QA-114 (S4, unconfirmed).** Clicking the same tree header twice in a row did not toggle the sort direction (maybe a synthetic-mouse artifact) | confirmed or dismissed with a physical mouse |
@@ -69,6 +70,7 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 | G-047 | 2026-10-18 | QA-105: fail fast when the window does not render, stale `ui.state`, docs aligned |
 | G-048 | 2026-10-18 | QA-6: separate pre-auth slots and rate budget from authenticated clients |
 | G-015 | 2026-10-18 | M4.3: `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal` with confirm, dry run, protected paths, stale-tree re-check, journal (UI hooks remain under G-014) |
+| G-057 | 2026-10-19 | M4.8: QA-116..QA-124 fixed in the engine/platform/scan/control/CLI (unaddressable names and name identity check, real-subtree verification, hardlink duplicate marker, positive local-path validator, bounded `free_space`, cleanup/search budgets, device-name move destinations, CLI journal); table in `docs/qa/reports/2026-10-19-m4-code.md` |
 
 ## Revision history
 
@@ -90,3 +92,4 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 - 2026-10-18 · r15: G-015 closed (destructive file commands).
 - 2026-10-19 · M4.6 review fixes for G-015/G-017 landed (see log/devlog.md): UI follow-ups: send `revision` with `id`, handle `partial_tree`/`i_understand_partial`, `needs_confirmation`, `unsupported` for recycling on volumes without a bin.
 - 2026-10-19 · r16: M4.7 closed the UI parts of G-015 (confirmation dialogs, toasts, Tools > Journal) and G-017 (Tools > Cleanups). Remaining: `file.move` has no UI.
+- 2026-10-19 · r17: M4.8 closed QA-116..QA-124 (G-057); added G-056 (UI follow-up).
