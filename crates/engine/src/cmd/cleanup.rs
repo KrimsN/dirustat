@@ -15,11 +15,12 @@ use super::file::{Mode, node_for_path, perform, preflight, require_local_root, s
 use super::tree::kind_name;
 use super::{CommandSpec, always, no_params, parse_params};
 use crate::cleanup::{
-    CleanupAction, CleanupDef, Compiled, DEF_KEYS, MAX_CLEANUPS, MAX_NODES_PER_RUN, SELECTOR_KEYS, builtins,
-    dir_is_empty_on_disk, is_builtin, select,
+    CleanupAction, CleanupDef, Compiled, DEF_KEYS, MAX_CLEANUPS, MAX_NODES_PER_RUN, SELECT_BUDGET, SELECTOR_KEYS,
+    builtins, dir_is_empty_on_disk, is_builtin, select_budgeted,
 };
 use crate::journal::now_secs;
 use crate::protected::ProtectedPaths;
+use crate::search::Budget;
 use crate::{CommandError, Session, prune};
 use dirustat_model::{NodeId, NodeKind};
 use serde::Deserialize;
@@ -80,7 +81,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params_doc: "{\"id\": string}. Read-only, never touches the disk beyond stat calls. Resolves the selector \
                 against the current tree (never the scan root, no node inside another selected node) and returns \
-                {id, name, action, revision, count, size, truncated, items: [{id, name, kind, path, size, partial_tree, \
+                {id, name, action, revision, count, size, truncated, budget_exhausted (the 5 s time budget ran out: the \
+                list is partial and unchecked items have status unchecked), items: [{id, name, kind, path, size, partial_tree, \
                 status, error?}]}; ids are valid only for the returned revision largest first, at most 10000 items. status: ok | protected | stale | invalid. For \
                 empty_dir_contents the items are the entries inside each selected folder.",
             destructive: false,
@@ -100,7 +102,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
                 confirm: true. Re-resolves the selector and applies the action node by node with the same checks \
                 and journal as file.delete / file.delete_permanent (recycle bin by default, protected paths and \
                 stale nodes are reported, not touched). At most 10000 nodes per run (truncated). Best effort: \
-                returns {id, action, dry_run, count, size, truncated, deleted, failed, not_attempted, stopped, \
+                returns {id, action, dry_run, count, size, truncated, budget_exhausted (selection hit its 5 s \
+                budget: only the nodes found so far are processed), deleted, failed, not_attempted, stopped, \
                 results: [{id, path, ok, status, error?}], done, tree_updated, rescan_recommended, revision, \
                 ids_invalidated}. A run stops (stopped: reason) when the platform has no recycle bin or fails 5 \
                 times in a row. After a run node ids are invalid. The reveal action shows only the largest match.",
@@ -233,6 +236,8 @@ struct Target {
 struct Resolved {
     targets: Vec<Target>,
     truncated: bool,
+    /// The selection stopped at its time budget; `targets` is what was found so far.
+    budget_exhausted: bool,
 }
 
 fn mode_of(action: CleanupAction) -> Option<Mode> {
@@ -260,8 +265,10 @@ fn resolve(session: &Session, def: &CleanupDef, protected: &ProtectedPaths) -> R
         None => tree.root(),
     };
     let mode = session.map_size_mode();
-    let selection = select(tree, start, &compiled, mode, MAX_NODES_PER_RUN);
+    let selection =
+        select_budgeted(tree, start, &compiled, mode, MAX_NODES_PER_RUN, &mut Budget::with_limit(SELECT_BUDGET));
     let mut truncated = selection.truncated;
+    let budget_exhausted = selection.budget_exhausted;
     let mut targets = Vec::new();
     let target_of = |id: NodeId, container_error: Option<CommandError>| {
         let node = tree.get(id)?;
@@ -288,7 +295,7 @@ fn resolve(session: &Session, def: &CleanupDef, protected: &ProtectedPaths) -> R
             targets.extend(target_of(child, refusal.clone()));
         }
     }
-    Ok(Resolved { targets, truncated })
+    Ok(Resolved { targets, truncated, budget_exhausted })
 }
 
 /// Status word and message of a refusal.
@@ -336,6 +343,9 @@ fn run_preview(session: &mut Session, params: &Value) -> Result<Value, CommandEr
     let def = find_def(session, &p.id)?;
     let protected = ProtectedPaths::from_env();
     let resolved = resolve(session, &def, &protected)?;
+    // The per-item disk checks have their own budget: thousands of folders to re-read are slow too.
+    let mut check_budget = Budget::with_limit(SELECT_BUDGET);
+    let mut budget_exhausted = resolved.budget_exhausted;
     let items: Vec<Value> = resolved
         .targets
         .iter()
@@ -344,11 +354,16 @@ fn run_preview(session: &mut Session, params: &Value) -> Result<Value, CommandEr
                 "id": t.id.index(), "name": t.name, "kind": kind_name(t.kind), "path": t.path, "size": t.size,
                 "partial_tree": subtree_partial(session, t.id),
             });
-            let (status, error) = match check(session, &protected, &def, t, false) {
-                Ok(_) => ("ok", None),
-                Err(e) => {
-                    let (word, msg) = status_of(&e);
-                    (word, Some(msg))
+            let (status, error) = if check_budget.tick() {
+                budget_exhausted = true;
+                ("unchecked", Some("not checked: the time budget of the preview ran out".to_owned()))
+            } else {
+                match check(session, &protected, &def, t, false) {
+                    Ok(_) => ("ok", None),
+                    Err(e) => {
+                        let (word, msg) = status_of(&e);
+                        (word, Some(msg))
+                    }
                 }
             };
             if let Some(map) = item.as_object_mut() {
@@ -367,7 +382,8 @@ fn run_preview(session: &mut Session, params: &Value) -> Result<Value, CommandEr
         "revision": session.revision(),
         "count": resolved.targets.len(),
         "size": total_size(&resolved.targets),
-        "truncated": resolved.truncated,
+        "truncated": resolved.truncated || budget_exhausted,
+        "budget_exhausted": budget_exhausted,
         "items": items,
     }))
 }
@@ -459,6 +475,7 @@ fn run_run(session: &mut Session, params: &Value) -> Result<Value, CommandError>
         "count": resolved.targets.len(),
         "size": total_size(&resolved.targets),
         "truncated": resolved.truncated,
+        "budget_exhausted": resolved.budget_exhausted,
         "deleted": if dry_run { 0 } else { deleted },
         "deleted_size": deleted_size,
         "failed": failed,
@@ -804,6 +821,48 @@ mod tests {
         let all = json!({"id": "dirs", "confirm": true, "i_understand_permanent": true, "i_understand_partial": true});
         assert_eq!(s.execute("cleanup.run", &all).unwrap()["deleted"], 1);
         assert!(!root.join("build").exists());
+    }
+
+    /// QA-120: 64 worst-case globs over many long names stop at the time budget instead of running
+    /// for minutes, and say so.
+    #[test]
+    fn pathological_globs_hit_the_budget() {
+        let mut t = dirustat_model::Tree::new("root");
+        let long = "a".repeat(240);
+        for _ in 0..40_000 {
+            t.add_child(t.root(), &long, NodeKind::File, 1).unwrap();
+        }
+        t.aggregate();
+        let mut s = Session::new();
+        s.replace_tree(t);
+        let pattern = format!("{}b", "*a".repeat(127));
+        let names: Vec<String> = (0..64).map(|_| pattern.clone()).collect();
+        let def = json!({"id": "slow", "name": "Slow", "action": "recycle", "selector": {"names": names}});
+        s.execute("cleanup.save", &json!({ "definition": def })).unwrap();
+        let started = std::time::Instant::now();
+        let out = s.execute("cleanup.preview", &json!({"id": "slow"})).unwrap();
+        assert_eq!(out["budget_exhausted"], true);
+        assert_eq!(out["truncated"], true);
+        assert_eq!(out["count"], 0);
+        let run = s.execute("cleanup.run", &json!({"id": "slow", "dry_run": true, "confirm": true})).unwrap();
+        assert_eq!(run["budget_exhausted"], true);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10), "{:?}", started.elapsed());
+    }
+
+    #[test]
+    fn select_stops_when_the_budget_is_spent() {
+        let mut t = dirustat_model::Tree::new("root");
+        for i in 0..1000 {
+            t.add_child(t.root(), &format!("f{i}.tmp"), NodeKind::File, 1).unwrap();
+        }
+        t.aggregate();
+        let selector = crate::cleanup::Selector { names: vec!["*.tmp".to_owned()], ..Default::default() };
+        let def = CleanupDef { id: "x".into(), name: "X".into(), action: CleanupAction::Recycle, selector };
+        let c = Compiled::new(&def, 0).unwrap();
+        let mut spent = Budget::with_deadline(Some(std::time::Instant::now()));
+        let out = crate::cleanup::select_budgeted(&t, t.root(), &c, dirustat_model::SizeMode::Logical, 100, &mut spent);
+        assert!(out.budget_exhausted && out.truncated);
+        assert!(out.nodes.len() < 100);
     }
 
     #[cfg(windows)]

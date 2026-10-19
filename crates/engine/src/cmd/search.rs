@@ -18,7 +18,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params_doc: "{\"query\"?: string (<= 512 chars, empty = no name test), \"mode\"?: \"substring\" (default) | \
                 \"wildcard\" (* and ?) | \"regex\" (linear-time engine, size-limited), \"case_sensitive\"?: bool \
-                (default false), \"match_path\"?: bool (test the full path instead of the name), \"min_size\"?: u64, \
+                (default false), \"match_path\"?: bool (test the full path instead of the name; entries deeper than 2048 levels never match), \"min_size\"?: u64, \
                 \"max_size\"?: u64, \"extensions\"?: [string] (<= 64, no dot, directories never match), \"kind\"?: \
                 \"file\" | \"dir\" | \"any\" (default), \"limit\"?: 1..=10000 (default 100), \"size_mode\"?: \
                 \"logical\" | \"allocated\" (default: session mode)}. Read-only. Returns {total_matched, truncated, \

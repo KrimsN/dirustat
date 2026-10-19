@@ -10,12 +10,13 @@
 
 use crate::CommandError;
 use crate::protected::key_of;
-use crate::search::{Filter, KindFilter};
+use crate::search::{Budget, Filter, KindFilter};
 use dirustat_model::{NodeId, NodeKind, SizeMode, Tree};
 use dirustat_scan::Glob;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::path::Path;
+use std::time::Duration;
 
 /// Most cleanups one settings file holds (user-defined ones; built-ins are extra).
 pub const MAX_CLEANUPS: usize = 64;
@@ -304,19 +305,43 @@ impl Compiled {
 pub struct Selection {
     /// Matched nodes, largest first (ties by arena index). No node lies inside another one.
     pub nodes: Vec<NodeId>,
-    /// More than the cap matched; the rest was not collected.
+    /// More than the cap matched, or the time budget ran out; the rest was not collected.
     pub truncated: bool,
+    /// The time budget ran out before the whole tree was visited (`truncated` is set too).
+    pub budget_exhausted: bool,
+}
+
+/// Wall-clock budget of one selection pass (a preview or a run holds the session meanwhile).
+pub(crate) const SELECT_BUDGET: Duration = if cfg!(test) { Duration::from_millis(250) } else { Duration::from_secs(5) };
+
+/// Like [`select_budgeted`] with the standard [`SELECT_BUDGET`].
+pub fn select(tree: &Tree, start: NodeId, compiled: &Compiled, mode: SizeMode, cap: usize) -> Selection {
+    select_budgeted(tree, start, compiled, mode, cap, &mut Budget::with_limit(SELECT_BUDGET))
 }
 
 /// Walks the descendants of `start` (never `start` itself, so never the scan root when started
 /// there) and collects the nodes that match. A matched node is not descended into, which is the
-/// ancestor de-duplication: a match inside a match would be deleted with it. Iterative.
-pub fn select(tree: &Tree, start: NodeId, compiled: &Compiled, mode: SizeMode, cap: usize) -> Selection {
+/// ancestor de-duplication: a match inside a match would be deleted with it. Iterative. Every
+/// visited node ticks `budget`; when it runs out the walk stops and the partial selection is
+/// returned flagged `budget_exhausted` (a pathological glob set cannot hold the session for
+/// minutes, QA-120).
+pub(crate) fn select_budgeted(
+    tree: &Tree,
+    start: NodeId,
+    compiled: &Compiled,
+    mode: SizeMode,
+    cap: usize,
+    budget: &mut Budget,
+) -> Selection {
     let cap = cap.clamp(1, MAX_NODES_PER_RUN);
     let mut nodes: Vec<NodeId> = Vec::new();
     let mut truncated = false;
     let mut stack: Vec<NodeId> = tree.children(start).collect();
     while let Some(id) = stack.pop() {
+        if budget.tick() {
+            truncated = true;
+            break;
+        }
         if compiled.matches(tree, id, mode) {
             if nodes.len() >= cap {
                 truncated = true;
@@ -331,7 +356,7 @@ pub fn select(tree: &Tree, start: NodeId, compiled: &Compiled, mode: SizeMode, c
         let (sa, sb) = (crate::search::node_size(tree, *a, mode), crate::search::node_size(tree, *b, mode));
         sb.cmp(&sa).then(a.cmp(b))
     });
-    Selection { nodes, truncated }
+    Selection { nodes, truncated, budget_exhausted: budget.exhausted() }
 }
 
 /// Read-only guard: the folder at `path` contains, at any depth, only folders. Any file, link,

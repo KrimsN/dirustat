@@ -27,7 +27,11 @@ const TIME_BUDGET: Duration = Duration::from_secs(10);
 /// The clock is read once per this many visited nodes.
 const CLOCK_STRIDE: usize = 4096;
 /// Stride when every node builds a path string (`match_path`): far more expensive per node.
-const PATH_CLOCK_STRIDE: usize = 64;
+const PATH_CLOCK_STRIDE: usize = 16;
+/// Deepest level (path components below the root) at which `match_path` still builds a path. Win32 paths are
+/// at most 32767 characters, so a legitimate path never has more than about 16k components; building and
+/// scanning a longer one per node is quadratic on a hostile chain (QA-121), so deeper entries do not match.
+pub const MAX_PATH_MATCH_DEPTH: u32 = 2048;
 /// Stride of [`Budget`], used by the listing commands that run name filters.
 const BUDGET_STRIDE: usize = 64;
 
@@ -43,6 +47,11 @@ impl Budget {
     /// The standard 10 s budget starting now.
     pub(crate) fn new() -> Self {
         Self::with_deadline(Instant::now().checked_add(TIME_BUDGET))
+    }
+
+    /// A budget of `limit` starting now.
+    pub(crate) fn with_limit(limit: Duration) -> Self {
+        Self::with_deadline(Instant::now().checked_add(limit))
     }
 
     pub(crate) fn with_deadline(deadline: Option<Instant>) -> Self {
@@ -270,8 +279,8 @@ fn search_with_deadline(
     let mut heap: BinaryHeap<Reverse<Key>> = BinaryHeap::new();
     let (mut total, mut visited, mut exhausted) = (0usize, 0usize, false);
     let stride = if filter.needs_path() { PATH_CLOCK_STRIDE } else { CLOCK_STRIDE };
-    let mut stack: Vec<NodeId> = tree.children(tree.root()).collect();
-    while let Some(id) = stack.pop() {
+    let mut stack: Vec<(NodeId, u32)> = tree.children(tree.root()).map(|c| (c, 1)).collect();
+    while let Some((id, depth)) = stack.pop() {
         visited = visited.saturating_add(1);
         if visited.is_multiple_of(stride) && deadline.is_some_and(|d| Instant::now() >= d) {
             exhausted = true;
@@ -279,10 +288,13 @@ fn search_with_deadline(
         }
         let Some(node) = tree.get(id) else { continue };
         if node.kind() == NodeKind::Dir {
-            stack.extend(tree.children(id));
+            let below = depth.saturating_add(1);
+            stack.extend(tree.children(id).map(|c| (c, below)));
         }
         let size = node_size(tree, id, mode);
-        if !filter.matches(node.name(), node.kind(), size, &mut || path_of(id)) {
+        // Entries deeper than `MAX_PATH_MATCH_DEPTH` get no path, hence no `match_path` hit.
+        let mut path = || if depth <= MAX_PATH_MATCH_DEPTH { path_of(id) } else { None };
+        if !filter.matches(node.name(), node.kind(), size, &mut path) {
             continue;
         }
         total = total.saturating_add(1);
@@ -490,6 +502,33 @@ mod tests {
         assert!(out.budget_exhausted, "a path search must notice an expired budget within a few dozen nodes");
         let plain = Filter::default().with_name("zzz", MatchMode::Substring, true).unwrap();
         assert!(!search_with_deadline(&t, &plain, SizeMode::Logical, 10, &|_| None, past).budget_exhausted);
+    }
+
+    /// QA-121: a very deep chain must not make every node build a path as long as its depth.
+    #[test]
+    fn path_matching_is_bounded_on_deep_chains() {
+        let mut t = Tree::new("r");
+        let mut cur = t.root();
+        let depth = usize::try_from(MAX_PATH_MATCH_DEPTH).unwrap() * 3;
+        for _ in 0..depth {
+            cur = t.add_child(cur, "d", NodeKind::Dir, 0).unwrap();
+        }
+        t.add_child(cur, "leaf", NodeKind::File, 5).unwrap();
+        t.aggregate();
+        let mut f = Filter::default().with_name("d", MatchMode::Substring, true).unwrap();
+        f.match_path = true;
+        let calls = std::cell::Cell::new(0usize);
+        let out = search(&t, &f, SizeMode::Logical, 10_000, &|_| {
+            calls.set(calls.get() + 1);
+            Some("d".to_owned())
+        });
+        assert_eq!(
+            calls.get(),
+            usize::try_from(MAX_PATH_MATCH_DEPTH).unwrap(),
+            "paths are built only down to the limit"
+        );
+        assert_eq!(out.total_matched, calls.get());
+        assert!(!out.budget_exhausted);
     }
 
     #[test]
