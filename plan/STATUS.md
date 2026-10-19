@@ -2,15 +2,23 @@
 
 > A snapshot for hand-off between agent sessions. Overwrite at the end of every session (it is not a journal; the journal is `log/devlog.md`).
 
-- **Updated:** 2026-10-19 (M4.9: UI QA fixes QA-125..QA-138 and G-056 landed in crates/ui; leftovers G-059, G-060; folder picker: `ui.browse_folder`, Browse buttons, `PlatformServices::pick_folder`; earlier M4.8: code QA fixes QA-116..QA-124 landed in the engine; UI follow-up G-056: `subtree_changed`, new `unsupported` refusals, `budget_exhausted`/`unchecked` in cleanup preview)
-- **Milestone:** M1 and M2 done. M3 "Fast MFT" is code-complete except the M3.5 outlier (G-052). A QA pass (2026-10-15) found 23 bugs; 20 fix commits landed on main on 2026-10-18 (treemap QA-2/QA-1/QA-102, scan QA-3/QA-5, control QA-4/6/7/8/9/112, ui QA-103..109/113/115). Closed gaps: G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048.
-- **Tree:** `cargo xtask ci` reported green by the fixing agents (fmt, clippy `-D warnings`, tests, layers; wasm-core skipped when the target is not installed, G-030).
-- **Next task:** (1) visual re-test of the treemap (also frame times on resize with G-042 background layout) on a maximized window with `100k-seed1` and `1m-seed1` (compare with `docs/qa/evidence/ui-100k-1000.png`; also check scan dimming and the "too small" hint); (2) remainders of G-040 (hardlink identity cost); (3) G-052 (explain the 3.26 s MFT outlier; budget 3 s met in 2 of 3 runs on NVMe), then close G-012 and set `enforce = true` in `perf/budgets.toml`; (4) M4 (platform services, destructive commands per `docs/safety.md`). Repeat MFT measurements with: `cargo run -p dirustat-scan --release --example mft_bench -- Z:\ 3` (elevated; the fixture VHDX must live on an SSD).
-- **Known limits:** extension records (`$ATTRIBUTE_LIST`) are not merged, alternate data streams are not counted in sizes, real elevation is M6. Portable scan on Windows is slower (100k fixture 0.04 s -> about 1.1 s) because of hardlink identity (G-040).
-- **Open leftovers (not blocking):** G-045 (allocated size parity), G-053 (tooltip path separator), G-054 (`select.node` cleared after scan), G-055 (QA-115 polish), G-049/G-050/G-051 (QA S4), G-011, G-025-G-030, G-002, G-031-G-037.
+- **Updated:** 2026-10-19 (M4 code complete: M4.1-M4.10, UI M4.9)
+- **Milestone:** M1, M2 and M4 done (M4 with known issues, see `docs/roadmap.md` exit criteria). M3 is code-complete; its exit criterion (1M-file MFT scan within 3 s) is not met because the measurement needs an elevated human run (G-052). Next milestone: M5 (cushion shading, export, snapshots, duplicates).
+- **Parity:** WinDirStat 11/34 done (16 partial), WizTree 2/12 done (4 partial) (`docs/target-app-parity.md`).
+- **QA state:** `docs/qa/reports/2026-10-19-m4-code.md` (QA-116..QA-146, all fixed, regression tests shown to fail without their fixes) and `2026-10-19-m4-ui.md`. The M4.10 fixes (QA-139..QA-146) have not been retested independently.
+- **Open items from M4:**
+  - G-059: UI leftovers of QA-138 (menu/shortcut metadata for `platform.reveal`, `platform.properties`, `search.clear`; missing high-contrast theme; low-contrast "Previous scan" overlay).
+  - G-060: one extension palette (engine `ext` has 16 colours, UI `ext_colors` has its own).
+  - G-061 / G-062: permanent delete no longer holds the session lock for `execute_split` hosts (control, MCP, bridge), but the UI must move to `Session::execute_split` on a worker thread for `file.delete_permanent` and `platform.free_space`, and `cleanup.run` with permanent actions needs the same split. Residual of QA-144 (113.6 s lock hold measured for a 1M-file folder before the split).
+  - ASCII-only case fold in exclusions, search and request-path matching (non-ASCII case differences are not folded; deliberate after QA-139).
+  - Unverified by agents: MFT backend (hardlink marker, `name_lossy`, name identity), the real recycle bin, `platform.reveal` and `platform.properties` windows, real mapped network drives (drive-type classification is tested with a fake provider only). Identity checks are name-based (no file id in the model).
+  - G-016 remainder: date filter, exclusions on the MFT fast path, Preferences screenshot.
+- **Other open leftovers (not blocking):** G-052 (MFT outlier, then close G-012 and set `enforce = true` in `perf/budgets.toml`; repeat with `cargo run -p dirustat-scan --release --example mft_bench -- Z:\ 3`, elevated, VHDX on an SSD), G-040, G-045, G-053, G-054, G-055, G-049/G-050/G-051, G-011, G-025-G-030, G-002, G-031-G-037. Visual re-test of the treemap on maximized `100k-seed1` and `1m-seed1` is still pending.
+- **Next task:** the M4 leftovers above (G-062 first), then the top unblocked M5 row of `docs/gaps.md` (G-018 cushion shading, G-019 export and snapshots).
+- **Known limits:** extension records (`$ATTRIBUTE_LIST`) are not merged, alternate data streams are not counted in sizes, real elevation is M6. Portable scan on Windows is slower (100k fixture 0.04 s -> about 1.1 s) because of hardlink identity (G-040). `log/devlog.md` has no entries for M4.1-M4.3, M4.5-M4.10 yet; the report and `git log` hold the facts.
 - **Blockers:** none (elevated re-measurements need a human run).
 - **Waiting for a human decision:**
   - reserving the name `dirustat` on crates.io / a GitHub organization;
   - publishing the repository and choosing its owner;
-  - release verdict from `docs/qa/reports/2026-10-15-summary.md` was NO-GO; the treemap, hardlink and UNC fixes landed, the visual re-test is pending.
-- **Notes:** environment is Windows 11, Rust 1.96. In bash-like shells long heredocs break; write files with the file-writing tool. Repository text is English (`AGENTS.md` §0); talk to the user in their language. Parity numbers are unchanged by this batch (see `docs/target-app-parity.md`).
+  - release verdict: the destructive commands passed the retest with known issues; the final go for shipping them is the human's.
+- **Notes:** environment is Windows 11, Rust 1.96. In bash-like shells long heredocs break; write files with the file-writing tool. Repository text is English (`AGENTS.md` §0); talk to the user in their language. Test counts were not re-measured by this documentation update.
