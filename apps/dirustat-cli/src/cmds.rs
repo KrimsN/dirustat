@@ -71,7 +71,12 @@ fn mcp(connect: Option<&str>) -> Outcome {
     let stdin = io::stdin().lock();
     let stdout = io::stdout().lock();
     let served = match connect {
-        None => dirustat_control::serve_mcp(dirustat_control::share(Session::new()), stdin, stdout),
+        None => {
+            // An MCP client can call destructive commands, so this session is journaled to disk too.
+            let mut session = Session::new();
+            enable_journal(&mut session, dirustat_engine::settings_dir());
+            dirustat_control::serve_mcp(dirustat_control::share(session), stdin, stdout)
+        }
         Some(addr) => {
             let dir = dirustat_control::default_key_dir()
                 .ok_or_else(|| Failure::runtime("no per-user config directory for the control key".into()))?;
@@ -92,9 +97,15 @@ pub fn execute(cli: Cli, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
             scan(&folder, json_out.as_deref(), size_mode, top, Deadline::after(timeout), out, err)
         }
         Cli::Info { folder } => info(&folder, out, err),
-        Cli::Run { scan, cmds, confirm, timeout } => {
-            run_cmds(scan.as_deref(), &cmds, confirm, Deadline::after(timeout), out, err)
-        }
+        Cli::Run { scan, cmds, confirm, timeout } => run_cmds(
+            scan.as_deref(),
+            &cmds,
+            confirm,
+            Deadline::after(timeout),
+            dirustat_engine::settings_dir(),
+            out,
+            err,
+        ),
         Cli::Mcp { connect } => mcp(connect.as_deref()),
     };
     match result {
@@ -247,6 +258,7 @@ fn run_cmds(
     cmds: &[CmdCall],
     confirm: bool,
     deadline: Option<Deadline>,
+    journal_dir: Option<PathBuf>,
     out: &mut dyn Write,
     err: &mut dyn Write,
 ) -> Outcome {
@@ -255,6 +267,12 @@ fn run_cmds(
         scan_blocking(&mut session, folder, deadline, err)?;
     }
     let destructive: Vec<&str> = session.commands().iter().filter(|c| c.destructive).map(|c| c.id).collect();
+    // The audit trail of `docs/safety.md` must also exist for the headless path: when the run
+    // contains a destructive command, mirror the journal to `<dir>/journal.jsonl` like the app does.
+    // Nothing is created for read-only runs.
+    if cmds.iter().any(|c| destructive.contains(&c.id.as_str())) {
+        enable_journal(&mut session, journal_dir);
+    }
     for call in cmds {
         let params = with_confirm(&call.params, confirm && destructive.contains(&call.id.as_str()));
         let value = session.execute(&call.id, &params)?;
@@ -265,6 +283,15 @@ fn run_cmds(
         writeln!(out, "{line}")?;
     }
     Ok(())
+}
+
+/// Mirrors the destructive-action journal to `<dir>/journal.jsonl` (best effort: without a
+/// directory the journal stays in memory and is lost at exit).
+fn enable_journal(session: &mut Session, dir: Option<PathBuf>) {
+    let Some(dir) = dir else { return };
+    // The engine never creates the directory itself; this is the app's own settings folder.
+    let _ = std::fs::create_dir_all(&dir);
+    session.set_journal_file(Some(dir.join("journal.jsonl")));
 }
 
 /// Adds `confirm: true` to an object (or null) params value when requested.
@@ -352,6 +379,38 @@ mod tests {
         let deadline = Deadline::after(Some(600));
         let mut err = Vec::new();
         assert!(scan_blocking(&mut session, &dir.path().to_string_lossy(), deadline, &mut err).is_ok());
+    }
+
+    fn call(id: &str, params: Value) -> CmdCall {
+        CmdCall { id: id.to_owned(), params }
+    }
+
+    /// QA-124: a destructive `run` leaves a persistent journal line; a read-only run creates nothing.
+    #[test]
+    fn destructive_runs_are_journaled_to_a_file() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("junk.bin"), b"12345").unwrap();
+        std::fs::write(root.join("keep.txt"), b"keep").unwrap();
+        let settings = tempfile::tempdir().unwrap();
+        let journal = settings.path().join("journal.jsonl");
+        let root_s = root.to_string_lossy().into_owned();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+
+        let read_only = [call("session.state", Value::Null)];
+        let ran =
+            run_cmds(Some(&root_s), &read_only, false, None, Some(settings.path().to_path_buf()), &mut out, &mut err);
+        assert!(ran.is_ok());
+        assert!(!journal.exists(), "a read-only run must not create the journal");
+
+        let target = root.join("junk.bin").to_string_lossy().into_owned();
+        let delete = [call("file.delete_permanent", json!({ "path": target, "i_understand_permanent": true }))];
+        let ran = run_cmds(Some(&root_s), &delete, true, None, Some(settings.path().to_path_buf()), &mut out, &mut err);
+        assert!(ran.is_ok(), "{:?}", ran.err().map(|f| f.message));
+        assert!(!root.join("junk.bin").exists() && root.join("keep.txt").exists());
+        let text = std::fs::read_to_string(&journal).unwrap();
+        assert!(text.contains("file.delete_permanent") && text.contains("junk.bin"), "{text}");
     }
 
     #[test]
