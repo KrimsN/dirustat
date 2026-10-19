@@ -1464,6 +1464,75 @@ mod tests {
         s.execute("file.delete_permanent", &p)
     }
 
+    /// QA-141: DEL and C1 control characters are legal in names, so such files and folders are deletable.
+    #[test]
+    fn c1_control_characters_in_names_are_deletable() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        let folder = root.join("c1\u{85}dir");
+        std::fs::create_dir_all(&folder).unwrap();
+        let files = [root.join("del\u{7f}.txt"), root.join("c1\u{85}.txt"), root.join("c1b\u{9f}.txt")];
+        for f in &files {
+            std::fs::write(f, b"x").unwrap();
+        }
+        std::fs::write(folder.join("inner.txt"), b"inner").unwrap();
+        let (mut s, _fake) = scanned(&root);
+        for f in &files {
+            let out = delete_perm(&mut s, f).unwrap();
+            assert_eq!(out["done"], true, "{f:?}");
+            assert!(!f.exists());
+        }
+        let out = delete_perm(&mut s, &folder).unwrap();
+        assert_eq!(out["done"], true);
+        assert!(!folder.exists());
+    }
+
+    /// QA-142: creating a junction in a folder just before the scan once made the next permanent
+    /// delete fail intermittently with "the modification time changed" (a lazily updated folder
+    /// time in the directory listing). The original repro, 50 times.
+    #[cfg(windows)]
+    #[test]
+    fn folder_with_a_fresh_junction_is_never_falsely_stale() {
+        let mut made_any = false;
+        for round in 0..50 {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("root");
+            let sub = root.join("sub");
+            let elsewhere = dir.path().join("elsewhere");
+            std::fs::create_dir_all(&sub).unwrap();
+            std::fs::create_dir_all(&elsewhere).unwrap();
+            std::fs::write(sub.join("a.txt"), b"a").unwrap();
+            let made = std::process::Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(sub.join("lnk"))
+                .arg(&elsewhere)
+                .output()
+                .is_ok_and(|o| o.status.success());
+            if !made {
+                return; // junction creation unavailable here
+            }
+            made_any = true;
+            let (mut s, _fake) = scanned(&root);
+            let p = json!({"path": sub.to_string_lossy(), "dry_run": true, "confirm": true, "i_understand_permanent": true});
+            let out = s.execute("file.delete_permanent", &p);
+            assert!(out.is_ok(), "round {round}: {out:?}");
+        }
+        assert!(made_any);
+    }
+
+    /// QA-142: the relaxed folder time still leaves the content protected (QA-118): a file added to
+    /// the folder after the scan is refused.
+    #[test]
+    fn folder_time_relaxation_keeps_the_content_check() {
+        let mut f = fixture();
+        let sub = f.path_of("sub");
+        std::fs::write(f.root().join("sub").join("NEW.docx"), b"new").unwrap();
+        let p = json!({"path": sub, "confirm": true, "i_understand_permanent": true});
+        let err = f.s.execute("file.delete_permanent", &p).unwrap_err();
+        assert_eq!(err.code(), "stale_tree");
+        assert!(err.to_string().contains("NEW.docx"), "{err}");
+    }
+
     /// QA-140: a folder holding two names that collide after lossy conversion is not deleted
     /// permanently on the strength of a comparison that cannot tell them apart.
     #[cfg(windows)]

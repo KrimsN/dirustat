@@ -43,8 +43,9 @@ fn stale(why: &str) -> CommandError {
 }
 
 /// The object at `path` must still be what the tree says: it exists, has the same kind (file,
-/// directory, link), and for files the same size; where the tree knows a modification time it
-/// must match too. The model stores no file id, so size and mtime are the identity.
+/// directory, link), and for files the same size; where the tree knows a modification time of a
+/// file or link it must match too (a folder's own time is not compared, see below). The model
+/// stores no file id, so size and mtime are the identity.
 pub(crate) fn verify_matches(path: &Path, kind: NodeKind, data: &NodeData) -> Result<(), CommandError> {
     let meta = fs::symlink_metadata(path).map_err(|e| match e.kind() {
         io::ErrorKind::NotFound => stale("the path no longer exists"),
@@ -66,7 +67,13 @@ pub(crate) fn verify_matches(path: &Path, kind: NodeKind, data: &NodeData) -> Re
     if kind == NodeKind::File && !hardlink_duplicate && meta.len() != data.logical_size {
         return Err(stale("the file size changed since the scan"));
     }
-    if let (Some(seen), Some(now)) = (data.mtime, mtime_secs(&meta))
+    // A folder's own modification time is not compared (QA-142): NTFS updates the copy in a
+    // directory listing lazily, so the scan can legitimately hold an older value than the folder
+    // reports now (for example right after a junction was created in it). A changed folder
+    // shows up as added, removed or changed entries, which the subtree check compares by name,
+    // size and file time.
+    if kind != NodeKind::Dir
+        && let (Some(seen), Some(now)) = (data.mtime, mtime_secs(&meta))
         && seen != now
     {
         return Err(stale("the modification time changed since the scan"));
@@ -99,8 +106,13 @@ pub(crate) fn name_problem(name: &str, windows: bool) -> Option<&'static str> {
     if name.contains(':') {
         return Some("a name contains `:` (alternate data stream)");
     }
-    if name.contains(['*', '?', '"', '<', '>', '|']) || name.chars().any(char::is_control) {
-        return Some("a name contains a reserved character");
+    if name.contains(['*', '?', '"', '<', '>', '|', '/', '\\']) {
+        return Some("a name contains a reserved character (one of < > \" / \\ | ? *)");
+    }
+    // Win32 forbids exactly the code units 0-31 (C0 controls). DEL (U+007F) and the C1 controls
+    // (U+0080..U+009F) are legal in a name and are not refused (QA-141).
+    if name.chars().any(|c| u32::from(c) < 0x20) {
+        return Some("a name contains a control character (code units 0 to 31)");
     }
     if name.ends_with(['.', ' ']) {
         return Some("a name ends with a dot or a space");
@@ -304,6 +316,65 @@ mod tests {
         assert_eq!(verify_matches(&f, NodeKind::File, &wrong_time).unwrap_err().code(), "stale_tree");
         fs::remove_file(&f).unwrap();
         assert_eq!(verify_matches(&f, NodeKind::File, &data).unwrap_err().code(), "stale_tree");
+    }
+
+    /// QA-142: the scan may hold an older folder time than the folder reports now (NTFS updates the
+    /// directory-listing copy lazily), which must not look like a change. Files still compare.
+    #[test]
+    fn folder_mtime_is_not_part_of_the_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        let now = mtime_secs(&fs::metadata(&sub).unwrap());
+        let older = NodeData { mtime: now.map(|t| t - 10), ..NodeData::default() };
+        assert!(verify_matches(&sub, NodeKind::Dir, &older).is_ok());
+        let file = dir.path().join("f.bin");
+        fs::write(&file, b"1").unwrap();
+        let file_data = NodeData {
+            logical_size: 1,
+            mtime: mtime_secs(&fs::metadata(&file).unwrap()).map(|t| t - 10),
+            ..NodeData::default()
+        };
+        assert_eq!(verify_matches(&file, NodeKind::File, &file_data).unwrap_err().code(), "stale_tree");
+        // A folder replaced by a file (or the reverse) is still caught by the kind check.
+        assert!(verify_matches(&sub, NodeKind::File, &older).is_err());
+    }
+
+    /// QA-141: only what Win32 forbids is refused; DEL and the C1 controls are legal in names.
+    #[test]
+    fn name_problem_refuses_exactly_what_win32_forbids() {
+        for ok in [
+            "del\u{7f}.txt",
+            "c1\u{85}.txt",
+            "c1b\u{9f}",
+            "\u{80}",
+            "a\u{a0}b",
+            "caf\u{e9}",
+            "\u{200b}x",
+            "tab\u{2028}",
+        ] {
+            assert_eq!(name_problem(ok, true), None, "{ok:?}");
+        }
+        for (bad, word) in [
+            ("a\u{0}b", "control"),
+            ("a\u{1}", "control"),
+            ("a\tb", "control"),
+            ("a\nb", "control"),
+            ("a\u{1f}", "control"),
+            ("a<b", "reserved"),
+            ("a>b", "reserved"),
+            ("a\"b", "reserved"),
+            ("a|b", "reserved"),
+            ("a?b", "reserved"),
+            ("a*b", "reserved"),
+            ("a/b", "reserved"),
+            ("a\\b", "reserved"),
+        ] {
+            let why = name_problem(bad, true).unwrap_or_default();
+            assert!(why.contains(word), "{bad:?}: {why:?}");
+        }
+        assert!(name_problem("a:b", true).is_some_and(|w| w.contains("alternate data stream")));
+        assert_eq!(name_problem("a\u{1}b", false), None, "only Windows has these rules");
     }
 
     #[test]
