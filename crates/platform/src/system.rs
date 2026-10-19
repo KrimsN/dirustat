@@ -51,8 +51,9 @@ impl PlatformServices for SystemPlatform {
     }
 
     fn rename_no_replace(&self, from: &Path, to: &Path) -> Result<()> {
-        let from_text = crate::path::validate_absolute(from)?;
-        let to_text = crate::path::validate_absolute(to)?;
+        // Both ends must be on local disks (QA-145): a mapped network drive is not trusted.
+        let from_text = crate::path::validate_local(from)?;
+        let to_text = crate::path::validate_local(to)?;
         crate::path::require_exists(from, from_text)?;
         crate::win32::move_no_replace(from_text, to_text).map_err(|err| match err.kind() {
             std::io::ErrorKind::AlreadyExists => PlatformError::Failed {
@@ -133,6 +134,23 @@ mod tests {
             assert!(d.total >= d.free, "{d:?}");
             assert!(d.path.ends_with('\\'));
         }
+    }
+
+    /// QA-145: a path on a letter without a local volume is refused before any I/O.
+    #[test]
+    fn move_refuses_paths_on_non_local_letters() {
+        let dir = tempfile::tempdir().unwrap();
+        let free = ('D'..='Z').find(|c| !Path::new(&format!("{c}:\\")).exists()).unwrap();
+        let ghost = PathBuf::from(format!("{free}:\\a.txt"));
+        let real = dir.path().join("b.txt");
+        std::fs::write(&real, b"x").unwrap();
+        assert!(matches!(
+            SystemPlatform.rename_no_replace(&ghost, &dir.path().join("c.txt")),
+            Err(PlatformError::InvalidPath(_))
+        ));
+        assert!(matches!(SystemPlatform.rename_no_replace(&real, &ghost), Err(PlatformError::InvalidPath(_))));
+        assert!(real.exists());
+        assert!(matches!(SystemPlatform.free_space(&ghost), Err(PlatformError::InvalidPath(_))));
     }
 
     #[test]

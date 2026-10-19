@@ -1242,6 +1242,33 @@ mod tests {
         assert!(fake.calls().is_empty());
     }
 
+    /// QA-145: a lettered root is trusted only when the drive really is a local disk. A letter with
+    /// no volume (or a mapped network drive, whose type is "remote") is refused like a UNC root.
+    #[cfg(windows)]
+    #[test]
+    fn lettered_roots_on_non_local_drives_refuse_every_destructive_command() {
+        let free = ('D'..='Z').find(|c| !Path::new(&format!("{c}:\\")).exists()).unwrap();
+        let root = format!("{free}:\\data");
+        let mut tree = dirustat_model::Tree::new(&root);
+        tree.add_child(tree.root(), "f.txt", NodeKind::File, 5).unwrap();
+        tree.aggregate();
+        let mut s = Session::new();
+        s.replace_tree(tree);
+        let fake = Arc::new(FakePlatform::new());
+        s.set_platform(fake.clone());
+        let path = format!("{root}\\f.txt");
+        for (id, p) in [
+            ("file.delete", json!({"path": path, "confirm": true})),
+            ("file.delete_permanent", json!({"path": path, "confirm": true, "i_understand_permanent": true})),
+            ("file.move", json!({"path": path, "destination": r"C:\x\y.txt", "confirm": true})),
+            ("file.delete_preview", json!({"path": path})),
+        ] {
+            let err = s.execute(id, &p).unwrap_err();
+            assert_eq!(err.code(), "protected_path", "{id}: {err}");
+        }
+        assert!(fake.calls().is_empty());
+    }
+
     #[cfg(windows)]
     #[test]
     fn failed_permanent_removal_flags_a_rescan() {

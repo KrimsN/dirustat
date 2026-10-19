@@ -57,9 +57,38 @@ pub fn classify_path_for(text: &str, windows: bool) -> PathClass {
     }
 }
 
-/// Classifies `text` for the current OS.
+/// Classifies `text` for the current OS. On Windows a lettered path is also checked against the
+/// real drive type (QA-145): a mapped network drive (`Z:\` -> `\\server\share`) is
+/// [`PathClass::Network`], a letter that is not a mounted volume is [`PathClass::Other`]. Only a
+/// path whose drive is a fixed, removable, optical or RAM disk is [`PathClass::Local`].
 pub fn classify_path(text: &str) -> PathClass {
-    classify_path_for(text, cfg!(windows))
+    classify_path_with(text, cfg!(windows), &live_drive_type)
+}
+
+/// [`classify_path_for`] plus the drive-type check of [`classify_path`], with the
+/// `GetDriveTypeW` lookup supplied by the caller (`root` is `X:\`; `None` = the query failed).
+/// Lexical `Network`, `Device` and `Other` answers are final and never reach `drive_type`.
+pub fn classify_path_with(text: &str, windows: bool, drive_type: &dyn Fn(&str) -> Option<u32>) -> PathClass {
+    let lexical = classify_path_for(text, windows);
+    if !windows || lexical != PathClass::Local {
+        return lexical;
+    }
+    let Some(root) = drive_root(text) else { return PathClass::Other };
+    match drive_type(&root) {
+        Some(kind) if drive_type_is_local(kind) => PathClass::Local,
+        Some(DRIVE_TYPE_REMOTE) => PathClass::Network,
+        _ => PathClass::Other,
+    }
+}
+
+#[cfg(windows)]
+fn live_drive_type(root: &str) -> Option<u32> {
+    crate::win32::drive_type(root)
+}
+
+#[cfg(not(windows))]
+fn live_drive_type(_root: &str) -> Option<u32> {
+    None
 }
 
 /// [`validate_absolute`] that also demands a [`PathClass::Local`] path: slow or remote namespaces
@@ -107,12 +136,21 @@ pub fn require_exists(path: &Path, text: &str) -> Result<()> {
 /// Win32 `GetDriveTypeW` code of a fixed (internal) disk, the only kind with a recycle bin that
 /// this layer trusts.
 pub const DRIVE_TYPE_FIXED: u32 = 3;
+/// `GetDriveTypeW` code of a network (mapped) drive.
+pub const DRIVE_TYPE_REMOTE: u32 = 4;
 
-/// The volume root `X:\` of a path on a lettered volume (`C:\x`, `c:/x`, `\\?\C:\x`); `None` for
-/// network (`\\server\share`), device, relative or otherwise unrecognized paths.
+/// Whether a `GetDriveTypeW` code names a volume attached to this machine: removable (2), fixed
+/// (3), optical (5) or RAM disk (6). Unknown (0), no root directory (1), remote (4) and any code
+/// this build does not know are not local.
+pub fn drive_type_is_local(kind: u32) -> bool {
+    matches!(kind, 2 | 3 | 5 | 6)
+}
+
+/// The volume root `X:\` of a path on a lettered volume (`C:\x`, `c:/x`, `\\?\C:\x`, `\??\C:\x`);
+/// `None` for network (`\\server\share`), device, relative or otherwise unrecognized paths.
 pub fn drive_root(text: &str) -> Option<String> {
     let unified = text.replace('/', "\\");
-    let local = unified.strip_prefix(r"\\?\").unwrap_or(&unified);
+    let local = unified.strip_prefix(r"\\?\").or_else(|| unified.strip_prefix(r"\??\")).unwrap_or(&unified);
     let mut chars = local.chars();
     let letter = chars.next().filter(char::is_ascii_alphabetic)?;
     if chars.next() != Some(':') || chars.next() != Some('\\') {
@@ -184,6 +222,80 @@ mod tests {
         assert_eq!(classify_path_for("/home/x", false), Local);
         assert_eq!(classify_path_for(r"\\?\GLOBALROOT\x", false), Other);
         assert_eq!(classify_path_for("rel", false), Other);
+    }
+
+    /// QA-145: a lettered path is local only when its drive is a local disk; the lookup is a fake.
+    #[test]
+    fn drive_type_decides_whether_a_lettered_path_is_local() {
+        use PathClass::{Device, Local, Network, Other};
+        let provider = |root: &str| match root {
+            r"C:\" => Some(3),
+            r"D:\" => Some(2),
+            r"E:\" => Some(5),
+            r"F:\" => Some(6),
+            r"Z:\" => Some(4),
+            r"Y:\" => Some(1),
+            r"X:\" => Some(0),
+            r"W:\" => Some(77),
+            _ => None,
+        };
+        let cases = [
+            (r"C:\x", Local),
+            ("c:/x/y", Local),
+            (r"\\?\C:\x", Local),
+            (r"\??\C:\x", Local),
+            (r"D:\x", Local),
+            (r"E:\x", Local),
+            (r"F:\x", Local),
+            (r"Z:\data", Network),
+            (r"\\?\Z:\data", Network),
+            ("z:/data", Network),
+            (r"Y:\x", Other),
+            (r"X:\x", Other),
+            (r"W:\x", Other),
+            (r"V:\x", Other),
+            // The lexical answers are final.
+            (r"\\server\share", Network),
+            (r"\\?\UNC\s\x", Network),
+            (r"\\.\C:", Device),
+            (r"\\?\GLOBALROOT\x", Device),
+            ("C:rel", Other),
+            ("rel", Other),
+        ];
+        for (text, want) in cases {
+            assert_eq!(classify_path_with(text, true, &provider), want, "{text:?}");
+        }
+        // Off Windows no drive type is consulted at all.
+        let never = |_: &str| -> Option<u32> { panic!("the drive type must not be queried off Windows") };
+        assert_eq!(classify_path_with("/home/x", false, &never), Local);
+        assert_eq!(classify_path_with("rel", false, &never), Other);
+        // The pure helper: removable, fixed, optical and RAM disks are local; nothing else is.
+        for kind in [2, 3, 5, 6] {
+            assert!(drive_type_is_local(kind), "{kind}");
+        }
+        for kind in [0, 1, 4, 7, 99, u32::MAX] {
+            assert!(!drive_type_is_local(kind), "{kind}");
+        }
+    }
+
+    #[test]
+    fn drive_root_understands_the_nt_prefix() {
+        assert_eq!(drive_root(r"\??\c:\x").as_deref(), Some(r"C:\"));
+        assert_eq!(drive_root(r"\??\UNC\s\x"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn live_classification_trusts_real_local_drives_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let text = dir.path().to_str().unwrap();
+        assert_eq!(classify_path(text), PathClass::Local, "{text}");
+        assert!(validate_local(dir.path()).is_ok());
+        // A letter with no volume behind it is not trusted as local.
+        let free = ('D'..='Z').find(|c| !Path::new(&format!("{c}:\\")).exists()).unwrap();
+        let path = format!("{free}:\\data");
+        assert_eq!(classify_path(&path), PathClass::Other, "{path}");
+        assert!(matches!(validate_local(Path::new(&path)), Err(PlatformError::InvalidPath(_))));
     }
 
     #[cfg(windows)]
