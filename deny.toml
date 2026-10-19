@@ -5,6 +5,15 @@ allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", 
 exceptions = [{ allow = ["Ubuntu-font-1.0"], crate = "epaint_default_fonts" }]
 confidence-threshold = 0.9
 
+[advisories]
+# "Unmaintained" notices for the zbus stack, pulled in transitively by the Linux windowing/accessibility
+# dependencies of egui/winit. There is no vulnerability; revisit when upstream moves off these crates.
+ignore = [
+    { id = "RUSTSEC-2026-0370", reason = "unmaintained zbus_names, transitive via egui/winit on Linux" },
+    { id = "RUSTSEC-2026-0371", reason = "unmaintained zvariant, transitive via egui/winit on Linux" },
+    { id = "RUSTSEC-2026-0372", reason = "unmaintained zvariant_derive, transitive via egui/winit on Linux" },
+]
+
 [bans]
 multiple-versions = "warn"
 # Forbidden UI/web shells (AGENTS.md rule: Rust only, no webview)

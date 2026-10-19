@@ -39,9 +39,5 @@ pub(crate) fn le_int(bytes: &[u8]) -> i64 {
 /// Decodes `units` UTF-16LE code units starting at `offset`.
 pub(crate) fn utf16_units(bytes: &[u8], offset: usize, units: usize) -> Option<Vec<u16>> {
     let raw = slice_at(bytes, offset, units.checked_mul(2)?)?;
-    Some(
-        raw.chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c.first().copied().unwrap_or(0), c.get(1).copied().unwrap_or(0)]))
-            .collect(),
-    )
+    Some(raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect())
 }

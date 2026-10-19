@@ -267,7 +267,7 @@ pub fn apply_fixups(record: &mut [u8], bytes_per_sector: usize) -> Result<(), Pa
             return Err(ParseError::BadFixup);
         }
     }
-    for (k, original) in usa.chunks_exact(2).enumerate().skip(1) {
+    for (k, original) in usa.as_chunks::<2>().0.iter().enumerate().skip(1) {
         let trailer = k.checked_mul(bytes_per_sector).and_then(|e| e.checked_sub(2)).ok_or(ParseError::BadFixup)?;
         let dst =
             record.get_mut(trailer..trailer.checked_add(2).ok_or(ParseError::BadFixup)?).ok_or(ParseError::BadFixup)?;
