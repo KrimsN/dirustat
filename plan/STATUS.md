@@ -26,5 +26,5 @@
   - reserving the name `dirustat` on crates.io / a GitHub organization;
   - publishing the repository and choosing its owner;
   - release verdict for the destructive commands: the retest said NO-GO only because of QA-147, which is now fixed but not retested; the final go is the human's.
-  - the four stale agent worktrees under `.claude/worktrees/agent-*` (their commits are all on `main`) and `.claude/worktrees/g062` can be removed.
-- **Notes:** environment is Windows 11, Rust 1.96. In bash-like shells long heredocs break; write files with the file-writing tool. Repository text is English (`AGENTS.md` §0); talk to the user in their language. Each agent uses its own `CARGO_TARGET_DIR=target/agent-<name>`; `target/agent-qa-retest` and `target/agent-g062` can be deleted.
+  - the four stale agent worktrees under `.claude/worktrees/agent-*` (their commits are all on `main` under new hashes) can be removed.
+- **Notes:** environment is Windows 11, Rust 1.96. In bash-like shells long heredocs break; write files with the file-writing tool. Repository text is English (`AGENTS.md` §0); talk to the user in their language. Each agent uses its own `CARGO_TARGET_DIR=target/agent-<name>`.
