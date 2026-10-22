@@ -11,7 +11,8 @@
 //! before the first action; the tree is pruned once at the end (one revision bump), so arena ids
 //! stay valid while the run is in progress.
 
-use super::file::{Mode, node_for_path, perform, preflight, require_local_root, subtree_partial};
+use super::detached::BusyGuard;
+use super::file::{Mode, act_with, node_for_path, preflight, record, require_local_root, subtree_partial};
 use super::tree::kind_name;
 use super::{CommandSpec, always, no_params, parse_params};
 use crate::cleanup::{
@@ -21,8 +22,9 @@ use crate::cleanup::{
 use crate::journal::now_secs;
 use crate::protected::ProtectedPaths;
 use crate::search::Budget;
-use crate::{CommandError, Session, prune};
+use crate::{CommandError, Session, guard, prune};
 use dirustat_model::{NodeId, NodeKind};
+use dirustat_platform::PlatformServices;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -222,6 +224,7 @@ fn find_def(session: &Session, id: &str) -> Result<CleanupDef, CommandError> {
 }
 
 /// One node a cleanup would act on.
+#[derive(Debug)]
 struct Target {
     id: NodeId,
     path: String,
@@ -233,6 +236,7 @@ struct Target {
     container_error: Option<CommandError>,
 }
 
+#[derive(Debug)]
 struct Resolved {
     targets: Vec<Target>,
     truncated: bool,
@@ -396,7 +400,82 @@ fn result_entry(t: &Target, ok: bool, status: &str, error: Option<String>) -> Va
     v
 }
 
+/// `cleanup.run` in one go: the same steps a host that shares the session runs one by one
+/// (`Session::execute_split`), here with the session held throughout.
 fn run_run(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
+    let mut next = begin_run(session, params)?;
+    loop {
+        match next {
+            Next::Done(report) => return Ok(report),
+            Next::Act(step) => next = finish_step(session, step.run()),
+        }
+    }
+}
+
+/// What a cleanup run needs next.
+pub(super) enum Next {
+    /// The run is over (or was a dry run): this is the answer.
+    Done(Value),
+    /// One checked action to run without the session, then [`finish_step`].
+    Act(CleanupStep),
+}
+
+/// A confirmed cleanup run between two actions. Owns everything it needs, so the session can be
+/// released while an action runs; the targets keep their ids because the tree is pruned only once,
+/// at the end, and only if its revision is still the one the run was planned against.
+#[derive(Debug)]
+pub(super) struct CleanupRun {
+    def: CleanupDef,
+    dry_run: bool,
+    allow_partial: bool,
+    protected: ProtectedPaths,
+    resolved: Resolved,
+    revision: u64,
+    /// Index of the next target to check.
+    next: usize,
+    results: Vec<Value>,
+    removed: Vec<NodeId>,
+    deleted: u64,
+    failed: u64,
+    deleted_size: u64,
+    stopped: Option<String>,
+    consecutive: u32,
+    /// The session's removal slot: no other destructive command and no scan while the run is in
+    /// flight. `None` for a dry run.
+    busy: Option<BusyGuard>,
+}
+
+/// One checked action of a run: the slow part, done without the session.
+#[derive(Debug)]
+pub(super) struct CleanupStep {
+    run: Box<CleanupRun>,
+    path: String,
+    platform: Arc<dyn PlatformServices>,
+}
+
+/// The result of a [`CleanupStep`], completed under the session by [`finish_step`].
+#[derive(Debug)]
+pub(super) struct StepOutcome {
+    run: Box<CleanupRun>,
+    path: String,
+    result: Result<(), CommandError>,
+}
+
+impl CleanupStep {
+    /// Recycles, removes or reveals one item. Needs no session; a panic becomes an error.
+    pub(super) fn run(self) -> StepOutcome {
+        let Self { run, path, platform } = self;
+        let mode = mode_of(run.def.action);
+        let result = guard::guarded(OP, || match mode {
+            Some(mode) => act_with(platform.as_ref(), mode, &path, None),
+            None => platform.reveal_in_file_manager(Path::new(&path)).map_err(super::platform::platform_error),
+        });
+        StepOutcome { run, path, result }
+    }
+}
+
+/// Parses and admits a run, resolves its targets and checks them up to the first action.
+pub(super) fn begin_run(session: &Session, params: &Value) -> Result<Next, CommandError> {
     let p: RunParams = parse_params(params)?;
     let def = find_def(session, &p.id)?;
     let dry_run = p.dry_run.unwrap_or(false);
@@ -411,64 +490,119 @@ fn run_run(session: &mut Session, params: &Value) -> Result<Value, CommandError>
     if def.action == CleanupAction::Reveal {
         resolved.targets.truncate(1);
     }
-    let mode = mode_of(def.action);
-    let mut results: Vec<Value> = Vec::new();
-    let mut removed: Vec<NodeId> = Vec::new();
-    let (mut deleted, mut failed, mut deleted_size) = (0u64, 0u64, 0u64);
-    let mut stopped: Option<String> = None;
-    let mut consecutive = 0u32;
-    for t in &resolved.targets {
-        if stopped.is_some() {
-            break;
+    let busy = if dry_run {
+        None
+    } else {
+        Some(BusyGuard::claim(&session.removal_busy).ok_or_else(|| {
+            CommandError::NotEnabled("cleanup.run: a deletion is still running; wait for it to finish".to_owned())
+        })?)
+    };
+    let run = Box::new(CleanupRun {
+        def,
+        dry_run,
+        allow_partial: p.i_understand_partial == Some(true),
+        protected,
+        resolved,
+        revision: session.revision(),
+        next: 0,
+        results: Vec::new(),
+        removed: Vec::new(),
+        deleted: 0,
+        failed: 0,
+        deleted_size: 0,
+        stopped: None,
+        consecutive: 0,
+        busy,
+    });
+    match advance(session, run) {
+        Ok(step) => Ok(Next::Act(step)),
+        // Nothing was acted on yet, so there is nothing to prune.
+        Err(run) => Ok(Next::Done(report(session, run, false))),
+    }
+}
+
+/// Journals the outcome of one action and checks the targets up to the next one.
+pub(super) fn finish_step(session: &mut Session, outcome: StepOutcome) -> Next {
+    let StepOutcome { mut run, path, result } = outcome;
+    let Some(t) = run.next.checked_sub(1).and_then(|i| run.resolved.targets.get(i)) else {
+        return Next::Done(finish(session, run));
+    };
+    let mode = mode_of(run.def.action);
+    if let Some(mode) = mode {
+        record(session, OP, mode, &path, None, t.size, &result);
+    }
+    match result {
+        Ok(()) => {
+            run.consecutive = 0;
+            run.deleted = run.deleted.saturating_add(1);
+            run.deleted_size = run.deleted_size.saturating_add(t.size);
+            if mode.is_some() {
+                run.removed.push(t.id);
+            }
+            run.results.push(result_entry(t, true, "done", None));
         }
-        let path = match check(session, &protected, &def, t, p.i_understand_partial == Some(true)) {
-            Ok(path) => path,
-            Err(e) => {
-                let (word, msg) = status_of(&e);
-                failed = failed.saturating_add(1);
-                results.push(result_entry(t, false, word, Some(msg)));
-                continue;
-            }
-        };
-        if dry_run {
-            results.push(result_entry(t, true, "ok", None));
-            continue;
-        }
-        let outcome = match mode {
-            Some(mode) => perform(session, OP, mode, &path, None, t.size),
-            None => {
-                session.platform().reveal_in_file_manager(Path::new(&path)).map_err(super::platform::platform_error)
-            }
-        };
-        match outcome {
-            Ok(()) => {
-                consecutive = 0;
-                deleted = deleted.saturating_add(1);
-                deleted_size = deleted_size.saturating_add(t.size);
-                if mode.is_some() {
-                    removed.push(t.id);
-                }
-                results.push(result_entry(t, true, "done", None));
-            }
-            Err(e) => {
-                failed = failed.saturating_add(1);
-                results.push(result_entry(t, false, "failed", Some(e.to_string())));
-                match e {
-                    CommandError::Unsupported(_) => stopped = Some(e.to_string()),
-                    CommandError::Platform(_) => {
-                        consecutive = consecutive.saturating_add(1);
-                        if consecutive >= MAX_CONSECUTIVE_PLATFORM_FAILURES {
-                            stopped = Some(format!("{consecutive} platform failures in a row; last: {e}"));
-                        }
+        Err(e) => {
+            run.failed = run.failed.saturating_add(1);
+            run.results.push(result_entry(t, false, "failed", Some(e.to_string())));
+            match e {
+                CommandError::Unsupported(_) => run.stopped = Some(e.to_string()),
+                CommandError::Platform(_) => {
+                    run.consecutive = run.consecutive.saturating_add(1);
+                    if run.consecutive >= MAX_CONSECUTIVE_PLATFORM_FAILURES {
+                        run.stopped = Some(format!("{} platform failures in a row; last: {e}", run.consecutive));
                     }
-                    _ => consecutive = 0,
                 }
+                _ => run.consecutive = 0,
             }
         }
     }
+    match advance(session, run) {
+        Ok(step) => Next::Act(step),
+        Err(run) => Next::Done(finish(session, run)),
+    }
+}
+
+/// Checks targets from `run.next` on: refusals (and, in a dry run, passes) are recorded; the first
+/// target that passes in a real run becomes the next step. `Err` gives the run back when it is over.
+fn advance(session: &Session, mut run: Box<CleanupRun>) -> Result<CleanupStep, Box<CleanupRun>> {
+    while run.stopped.is_none() {
+        if session.revision() != run.revision {
+            // The tree was replaced while an action ran without the session: its ids are not ours.
+            run.stopped = Some("the folder tree changed while the cleanup ran; scan again".to_owned());
+            break;
+        }
+        let Some(t) = run.resolved.targets.get(run.next) else { break };
+        run.next = run.next.saturating_add(1);
+        match check(session, &run.protected, &run.def, t, run.allow_partial) {
+            Err(e) => {
+                let (word, msg) = status_of(&e);
+                run.failed = run.failed.saturating_add(1);
+                run.results.push(result_entry(t, false, word, Some(msg)));
+            }
+            Ok(_) if run.dry_run => run.results.push(result_entry(t, true, "ok", None)),
+            Ok(path) => return Ok(CleanupStep { run, path, platform: session.platform() }),
+        }
+    }
+    Err(run)
+}
+
+/// Prunes what the run removed (once, if the tree is still the planned one) and builds the answer.
+fn finish(session: &mut Session, run: Box<CleanupRun>) -> Value {
+    let current = session.revision() == run.revision;
+    let updated = current && !run.removed.is_empty() && session.forget_nodes(&run.removed);
+    if !current && !run.removed.is_empty() {
+        session.rescan_recommended = true;
+    }
+    report(session, run, updated)
+}
+
+fn report(session: &Session, run: Box<CleanupRun>, updated: bool) -> Value {
+    let CleanupRun { def, dry_run, resolved, results, removed, deleted, failed, deleted_size, stopped, busy, .. } =
+        *run;
+    // The slot is free again once the answer is built.
+    drop(busy);
     let not_attempted = resolved.targets.len().saturating_sub(results.len());
-    let updated = !removed.is_empty() && session.forget_nodes(&removed);
-    Ok(json!({
+    json!({
         "id": def.id,
         "action": def.action,
         "dry_run": dry_run,
@@ -487,7 +621,7 @@ fn run_run(session: &mut Session, params: &Value) -> Result<Value, CommandError>
         "rescan_recommended": !removed.is_empty() && !updated,
         "revision": session.revision(),
         "ids_invalidated": updated,
-    }))
+    })
 }
 
 impl Session {

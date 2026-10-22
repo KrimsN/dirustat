@@ -22,7 +22,8 @@ mod settings;
 mod subtree;
 
 pub use cmd::{
-    CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, fast_path_status, volume_root_of,
+    CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, execute_unlocked, fast_path_status,
+    volume_root_of,
 };
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
 pub use paths::{PathClass, classify_path, is_local_path, is_unc_path, normalize_scan_root};

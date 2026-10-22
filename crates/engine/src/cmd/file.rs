@@ -23,6 +23,7 @@ use crate::journal::{JournalEntry, now_secs};
 use crate::protected::{ProtectedPaths, key_exact, key_of, name_matches};
 use crate::{CommandError, Session, fsops, guard, prune};
 use dirustat_model::{NodeId, NodeKind, SizeMode};
+use dirustat_platform::PlatformServices;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::Path;
@@ -748,12 +749,22 @@ fn remove_on_disk(path: &Path) -> Result<(), CommandError> {
 /// Does one already-checked operation on `path` (recycle, permanent removal or move). The tree and
 /// the journal are not touched.
 fn act(session: &Session, mode: Mode, path: &str, destination: Option<&str>) -> Result<(), CommandError> {
+    act_with(session.platform().as_ref(), mode, path, destination)
+}
+
+/// [`act`] with the platform passed in, for callers that run without the session.
+pub(super) fn act_with(
+    platform: &dyn PlatformServices,
+    mode: Mode,
+    path: &str,
+    destination: Option<&str>,
+) -> Result<(), CommandError> {
     let target = Path::new(path);
     match mode {
-        Mode::Recycle => recycle(session, target),
+        Mode::Recycle => recycle(platform, target),
         Mode::Permanent => remove_on_disk(target),
         Mode::Move => match destination {
-            Some(dest) => session.platform().rename_no_replace(target, Path::new(dest)).map_err(platform_error),
+            Some(dest) => platform.rename_no_replace(target, Path::new(dest)).map_err(platform_error),
             None => Ok(()),
         },
     }
@@ -761,7 +772,7 @@ fn act(session: &Session, mode: Mode, path: &str, destination: Option<&str>) -> 
 
 /// Journals the outcome of an action, success or failure. A failed permanent removal may have
 /// deleted part of a folder: the session is then flagged `rescan_recommended`.
-fn record(
+pub(super) fn record(
     session: &mut Session,
     op: &str,
     mode: Mode,
@@ -785,25 +796,10 @@ fn record(
     });
 }
 
-/// Performs one already-checked operation on `path` (recycle, permanent removal or move) and
-/// journals the outcome, success or failure. The tree is not touched; callers prune afterwards.
-pub(super) fn perform(
-    session: &mut Session,
-    op: &str,
-    mode: Mode,
-    path: &str,
-    destination: Option<&str>,
-    size: u64,
-) -> Result<(), CommandError> {
-    let result = act(session, mode, path, destination);
-    record(session, op, mode, path, destination, size, &result);
-    result
-}
-
 /// Sends `target` to the recycle bin. A platform without a bin for the volume is `unsupported`
 /// with a pointer to `file.delete_permanent`; a "success" that leaves the item in place is an error.
-fn recycle(session: &Session, target: &Path) -> Result<(), CommandError> {
-    session.platform().move_to_recycle_bin(target).map_err(|e| match platform_error(e) {
+fn recycle(platform: &dyn PlatformServices, target: &Path) -> Result<(), CommandError> {
+    platform.move_to_recycle_bin(target).map_err(|e| match platform_error(e) {
         CommandError::Unsupported(what) => CommandError::Unsupported(format!(
             "{what}; the item was not touched (use file.delete_permanent to delete it for good)"
         )),

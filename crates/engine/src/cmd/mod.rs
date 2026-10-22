@@ -21,7 +21,7 @@ mod testing;
 mod tree;
 mod view;
 
-pub use detached::{DetachedJob, JobOutcome, Prepared};
+pub use detached::{DetachedJob, JobOutcome, Prepared, execute_unlocked};
 pub use privileges::{FastPathStatus, fast_path_status, volume_root_of};
 
 use crate::{CommandError, Session, guard};
@@ -126,7 +126,7 @@ pub(crate) fn admit(session: &Session, spec: &CommandSpec, params: &Value) -> Re
     }
     if session.removal_in_progress() && (spec.destructive || spec.id.starts_with("scan.")) {
         return Err(CommandError::NotEnabled(format!(
-            "{}: a permanent deletion is still running; wait for it to finish",
+            "{}: a deletion is still running; wait for it to finish",
             spec.id
         )));
     }

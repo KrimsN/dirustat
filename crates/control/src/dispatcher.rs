@@ -3,7 +3,7 @@
 use crate::bridge::{NullBridge, Region, ScreenshotRequest, UiBridge};
 use crate::error::{self, ControlError};
 use crate::tree::session_tree;
-use dirustat_engine::{PathClass, Prepared, Session, classify_path, is_local_path, is_unc_path};
+use dirustat_engine::{PathClass, Session, classify_path, execute_unlocked, is_local_path, is_unc_path};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::panic::{self, AssertUnwindSafe};
@@ -191,17 +191,11 @@ impl Dispatcher {
                  relative paths are not supported",
             ));
         }
-        // The slow part of `file.delete_permanent` (the removal) and `platform.free_space` (the OS
-        // query) runs with the session unlocked, so one big deletion or a hung drive does not stall
-        // every other request (QA-143, QA-144). Everything else runs under the lock.
-        let prepared = lock_session(&self.session).execute_split(&p.command, &p.params);
-        match prepared {
-            Prepared::Done(result) => Ok(result?),
-            Prepared::Job(job) => {
-                let outcome = job.run();
-                Ok(lock_session(&self.session).finish_job(outcome)?)
-            }
-        }
+        // The slow part of `file.delete_permanent` (the removal), `cleanup.run` (each action) and
+        // `platform.free_space` (the OS query) runs with the session unlocked, so one big deletion
+        // or a hung drive does not stall every other request (QA-143, QA-144, G-062). Everything
+        // else runs under the lock.
+        Ok(execute_unlocked(|| lock_session(&self.session), &p.command, &p.params)?)
     }
 
     fn session_state(&self, params: &Value) -> Result<Value, ControlError> {
