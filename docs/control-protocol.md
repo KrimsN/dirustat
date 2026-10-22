@@ -1,6 +1,6 @@
 # Control protocol and MCP
 
-> Status: 2026-10-19 · revision 7 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
+> Status: 2026-10-23 · revision 8 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
 
 Goal: any action a human can take is available to an agent; the app can be launched, scan a test folder, run commands and take a screenshot without a mouse or keyboard.
 
@@ -35,7 +35,7 @@ Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `
 
 Rules:
 - A programmatic call never opens a dialog; anything that needs a dialog in the UI has a parameterized command variant.
-- `engine.execute` of `file.delete_permanent` and `platform.free_space` runs the slow part (the removal, the OS volume query) with the session unlocked (QA-143, QA-144), so `session.state` and other reads answer meanwhile. While a removal runs, `session.state` has `removal_in_progress: true` and destructive commands and `scan.*` are `not_enabled` ("a permanent deletion is still running"). A volume query that did not return within 3 s keeps one helper thread busy; further `platform.free_space` calls fail at once with `internal` ("an earlier query of a volume has not returned yet") until it finishes.
+- `engine.execute` of `file.delete`, `file.delete_permanent`, `cleanup.run` and `platform.free_space` runs the slow part (the recycle or removal, each cleanup action, the OS volume query) with the session unlocked (QA-143, QA-144, G-062), so `session.state` and other reads answer meanwhile. While a deletion or a non-dry cleanup run is in flight, `session.state` has `removal_in_progress: true` and destructive commands and `scan.*` are `not_enabled` ("a deletion is still running"). A cleanup run stops (`stopped`, `rescan_recommended`) if the tree is replaced between two of its actions. A volume query that did not return within 3 s keeps one helper thread busy; further `platform.free_space` calls fail at once with `internal` ("an earlier query of a volume has not returned yet") until it finishes.
 - `engine.execute` blocks until fast commands finish; long ones (`scan.start`) return at once and progress is read through `session.state`.
 - Responses are size-limited: big trees are returned in pages (`session.tree`). One `session.tree` call examines at most 50 000 nodes; past that the answer has `truncated: true` and `visit_capped: true` (`total_children` is then a lower bound).
 - **Path parameters over control.** In `engine.execute`, every parameter named `path`, `paths`, `destination`, `only_under` or `root` (at any depth, so also `selector.only_under` of `cleanup.save`) must be an absolute local drive path (`X:\...`, `X:/...`, `\\?\X:\...`); UNC and network spellings, device namespaces (`\\.\`, `\\?\GLOBALROOT\`, `\\?\Volume{`, `\??\`), relative and drive-relative paths are `invalid_params` at once, before any I/O (QA-117). Free text (`query`, `exclude` patterns, names) is never inspected, so `\\d+` or `a//b` are fine (QA-122). The CLI and the UI are not restricted by this rule. `scan.start` returns at once: a missing or non-directory root is reported when the scan is polled (`session.poll`/`session.state`) as `invalid_params`.
@@ -93,6 +93,7 @@ Loopback only, mandatory key, request size limit, rate limit; destructive comman
 
 ## Revision history
 
+- 2026-10-23 · r8: G-062: `file.delete` and `cleanup.run` act without the session lock and holds `removal_in_progress` while it runs; the busy refusal now reads "a deletion is still running".
 - 2026-10-19 · r7: M4.10: exact path addressing, `removal_in_progress`, lock-free permanent removal and `platform.free_space`, `skipped_deep`, drive-type classification.
 - 2026-10-13 · r3: documented `session.state` fields `progress.backend`, `progress.fallback_reason`, `last_scan{backend,fallback_reason}` (M3.4). Earlier revisions (r1, r2) predate this section.
 - 2026-10-19 · r6: positive local-path validator for path-typed params, `subtree_changed`, subtree verification, unaddressable names, `budget_exhausted` on cleanup preview/run (M4.8).

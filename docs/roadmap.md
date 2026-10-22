@@ -1,6 +1,6 @@
 # Roadmap
 
-> Status: 2026-10-19 · revision 7 · **Current focus: M4 leftovers, then M5** (cushion shading, export, snapshots). M1, M2 and M4 are done (M4 with known issues, below); M3 code is done but its exit criterion "measured ≤ 3 s per 1M files" is still NOT met (M3.5 / G-052 need an elevated human run on a VHDX). M4 leftovers: G-062 (the UI must use `Session::execute_split`), G-059, G-060.
+> Status: 2026-10-23 · revision 8 · **Current focus: M4 leftovers, then M5** (cushion shading, export, snapshots). M1, M2 and M4 are done (M4 with known issues, below); M3 code is done but its exit criterion "measured ≤ 3 s per 1M files" is still NOT met (M3.5 / G-052 need an elevated human run on a VHDX). M4 leftovers: G-059, G-060, G-016 remainder (G-062 closed 2026-10-23).
 
 | Milestone | Result | Main gaps | Estimate |
 |---|---|---|---|
@@ -8,7 +8,7 @@
 | **M1** Core and first window | Parallel scan → model → treemap + tree + extensions in eframe | G-001…G-007, G-024 | **done 2026-10-13** (leftovers: G-029, G-002 cold cache) |
 | **M2** Commands and control | Command registry, control, CLI, MCP, screenshots, settings | G-008…G-011 | **done 2026-10-13** (leftover UI: G-011; follow-ups G-025…G-028) |
 | **M3** Fast MFT | `dirustat-ntfs`, fallback, administrator rights | G-012, G-013 | **code done 2026-10-13**; measurement (M3.5) pending |
-| **M4** Actions | Recycle bin, file manager, cleanups, search, filters, safe deletion | G-014…G-017 | **done 2026-10-19** with known issues (leftovers G-059, G-060, G-062, G-016 remainder) |
+| **M4** Actions | Recycle bin, file manager, cleanups, search, filters, safe deletion | G-014…G-017 | **done 2026-10-19** with known issues (leftovers G-059, G-060, G-016 remainder; G-062 closed 2026-10-23) |
 | **M5** Visual polish and data | Cushion, export, snapshots, comparison, duplicates | G-018…G-020 | 2-3 weeks |
 | **M6** Cross-platform and release | Linux/macOS, packaging, signed releases | G-021, G-022 | 2 weeks |
 | **M7** Product | Localizations, accessibility, user documentation | G-023 | 2 weeks |
@@ -25,6 +25,7 @@
 
 ## Revision history
 
+- 2026-10-23 · r8: G-062 closed (lock-free deletes and cleanups, UI worker thread).
 - 2026-10-19 · r7: M4 marked done with known issues; current focus moved to M4 leftovers then M5.
 - 2026-10-13 · r1: milestones M0-M7.
 - 2026-10-13 · r2: translated to English.
