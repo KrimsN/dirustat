@@ -11,7 +11,7 @@ use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
 use crate::{cleanups_ui, drive_picker, ext_panel, journal_ui, map_panel, prefs, search_panel, toast, tree_panel};
 use dirustat_control::{SharedSession, lock_session, share};
-use dirustat_engine::{CommandInfo, FastPathStatus, Session};
+use dirustat_engine::{CommandError, CommandInfo, FastPathStatus, Session, execute_unlocked};
 use dirustat_model::SizeMode;
 use dirustat_platform::{PlatformError, PlatformServices};
 use serde_json::{Value, json};
@@ -52,7 +52,14 @@ pub struct DirustatApp {
     browse: Option<Receiver<Result<Option<PathBuf>, PlatformError>>>,
     /// The start screen asked for the folder dialog; started once the session lock is released.
     browse_requested: bool,
+    /// Answer of the confirmed delete-dialog command running on a worker thread (G-062).
+    command_job: Option<CommandJob>,
+    /// Scan root and pending answer of `platform.free_space`, asked on a worker thread.
+    free_job: Option<(String, CommandJob)>,
 }
+
+/// The answer of a command running on a worker thread.
+type CommandJob = Receiver<Result<Value, CommandError>>;
 
 /// Share of the window width the treemap always keeps, and its absolute floor in points.
 const MAP_MIN_FRACTION: f32 = 0.40;
@@ -88,6 +95,10 @@ const EMPTY_PATH_MESSAGE: &str = "Type or paste a folder path first";
 
 /// Status text when a command needs a selected node and there is none.
 const SELECT_FIRST_MESSAGE: &str = "Select a file or folder first";
+
+/// Status text when the window is asked to close while a deletion runs (closing would cut it off
+/// half way).
+const WAIT_TO_QUIT_MESSAGE: &str = "A deletion is still running; close the window when it has finished";
 
 /// Drops the internal `invalid params: ` prefix of an engine error.
 fn strip_prefix(message: &str) -> String {
@@ -151,6 +162,8 @@ impl DirustatApp {
             picker: dirustat_platform::default_platform(),
             browse: None,
             browse_requested: false,
+            command_job: None,
+            free_job: None,
         }
     }
 
@@ -250,6 +263,7 @@ impl DirustatApp {
         }
         if let Some(effect) = commands::run(&mut self.state, id) {
             match effect {
+                UiEffect::Quit if self.command_running() => return Err(WAIT_TO_QUIT_MESSAGE.to_owned()),
                 UiEffect::Quit => self.quit_requested = true,
                 UiEffect::CopyPath => self.copy_selected_path()?,
                 UiEffect::BrowseFolder => self.start_browse()?,
@@ -368,29 +382,103 @@ impl DirustatApp {
         self.state.prefs_error = result.err();
     }
 
-    /// Reloads the drive list and the free space of the scanned volume when they are stale.
+    /// Reloads the drive list when it is stale and asks for the free space of the scanned volume
+    /// on a worker thread (a slow or hung drive must not stall the frame); [`Self::poll_free_space`]
+    /// picks up the answer.
     fn refresh_volumes(&mut self) {
         let mut session = lock_session(&self.session);
         if !self.state.drives_loaded {
             self.state.drives = drive_picker::load(&mut session);
             self.state.drives_loaded = true;
         }
-        if matches!(self.state.scan, ScanStatus::Done { .. }) {
-            let key = (self.state.path_text.trim().to_owned(), session.revision());
-            if self.state.free_key.as_ref() != Some(&key) {
-                self.state.free_space =
-                    session.execute("platform.free_space", &json!({ "path": key.0 })).ok().and_then(|v| {
-                        Some(crate::state::FreeSpace {
-                            path: key.0.clone(),
-                            total: v.get("total")?.as_u64()?,
-                            free: v.get("free")?.as_u64()?,
-                        })
-                    });
-                self.state.free_key = Some(key);
-                // The fill bars of the drive list changed with the scan.
-                self.state.drives_loaded = false;
-            }
+        if !matches!(self.state.scan, ScanStatus::Done { .. }) {
+            return;
         }
+        let key = (self.state.path_text.trim().to_owned(), session.revision());
+        drop(session);
+        if self.state.free_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.state.free_space = None;
+        let job = self.spawn_command("platform.free_space", json!({ "path": key.0 }));
+        self.free_job = Some((key.0.clone(), job));
+        self.state.free_key = Some(key);
+        // The fill bars of the drive list changed with the scan.
+        self.state.drives_loaded = false;
+    }
+
+    /// Applies a finished free-space query, if any, without blocking.
+    fn poll_free_space(&mut self, ctx: &egui::Context) {
+        let Some((path, rx)) = &self.free_job else { return };
+        let answer = match rx.try_recv() {
+            Ok(answer) => answer.ok(),
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(SCAN_REPAINT);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => None,
+        };
+        self.state.free_space = answer.and_then(|v| {
+            Some(crate::state::FreeSpace {
+                path: path.clone(),
+                total: v.get("total")?.as_u64()?,
+                free: v.get("free")?.as_u64()?,
+            })
+        });
+        self.free_job = None;
+        ctx.request_repaint();
+    }
+
+    /// Runs `id` on a worker thread through `execute_unlocked`: the session is locked only for the
+    /// command's checks and bookkeeping, never for its slow part. The answer arrives on the returned
+    /// channel. If no thread can be started the command runs here instead.
+    fn spawn_command(&self, id: &'static str, params: Value) -> CommandJob {
+        let (tx, rx) = mpsc::channel();
+        let fallback = tx.clone();
+        let shared = SharedSession::clone(&self.session);
+        let worker_params = params.clone();
+        let spawned = std::thread::Builder::new().name("command-worker".to_owned()).spawn(move || {
+            // The receiver is gone when the window closed or a newer request replaced this one.
+            let _ = tx.send(execute_unlocked(|| lock_session(&shared), id, &worker_params));
+        });
+        if spawned.is_err() {
+            let _ = fallback.send(execute_unlocked(|| lock_session(&self.session), id, &params));
+        }
+        rx
+    }
+
+    /// Sends the confirmed command of the delete dialog to a worker thread. UI-only: the confirm
+    /// button is the only caller.
+    fn confirm_delete(&mut self) {
+        if self.command_job.is_some() {
+            return;
+        }
+        if let Some((command, params)) = delete_dialog::begin_confirm(&mut self.state) {
+            self.command_job = Some(self.spawn_command(command, params));
+        }
+    }
+
+    /// Hands a finished delete-dialog command to the dialog, if any, without blocking.
+    fn poll_command_job(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.command_job else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(SCAN_REPAINT);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => Err(CommandError::Platform(
+                "the command stopped without an answer; scan again to see what is left".to_owned(),
+            )),
+        };
+        self.command_job = None;
+        delete_dialog::finish_confirm(&mut self.state, result);
+        ctx.request_repaint();
+    }
+
+    /// True while a confirmed delete or cleanup is running on its worker thread.
+    pub fn command_running(&self) -> bool {
+        self.command_job.is_some()
     }
 
     /// Probes the fast path once per scan start (never per frame) and sets the status-bar hint.
@@ -536,6 +624,12 @@ impl DirustatApp {
         }
         self.poll_scan(&ctx);
         self.poll_browse(&ctx);
+        self.poll_command_job(&ctx);
+        self.poll_free_space(&ctx);
+        if self.command_running() && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.state.notice = Some(WAIT_TO_QUIT_MESSAGE.to_owned());
+        }
         if let Some(wait) = self.state.tick_notice(std::time::Instant::now()) {
             ctx.request_repaint_after(wait);
         }
@@ -650,6 +744,8 @@ impl DirustatApp {
         let _ = match request {
             DialogRequest::Recycle => self.run_command("file.delete"),
             DialogRequest::Permanent => self.run_command("file.delete_permanent"),
+            // A running dialog waits for its answer; closing it would lose the outcome.
+            DialogRequest::Close if self.command_running() => Ok(Value::Null),
             DialogRequest::Close => {
                 self.state.delete_dialog = None;
                 Ok(Value::Null)
@@ -692,9 +788,7 @@ impl DirustatApp {
             DialogEvent::None => {}
             DialogEvent::Cancel => self.state.delete_dialog = None,
             DialogEvent::Confirm => {
-                let mut session = lock_session(&self.session);
-                delete_dialog::confirm(&mut session, &mut self.state);
-                drop(session);
+                self.confirm_delete();
                 ctx.request_repaint();
             }
             DialogEvent::Rescan => {

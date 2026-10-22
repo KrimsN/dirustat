@@ -2,10 +2,12 @@
 //!
 //! Nothing here deletes from a click on a menu entry: every destructive action first asks the
 //! engine for a read-only report (`file.delete_preview`, `cleanup.preview`) and shows it in a
-//! modal dialog. The destructive command is sent only by [`confirm`], which the window calls when
-//! the user presses the confirm button; it is not a UI command, so `ui.set_state` and the control
-//! channel can open or close the dialog but never confirm it (agents call the engine commands with
-//! `confirm: true` themselves).
+//! modal dialog. The destructive command is released only by [`begin_confirm`], which the window
+//! calls when the user presses the confirm button; it is not a UI command, so `ui.set_state` and
+//! the control channel can open or close the dialog but never confirm it (agents call the engine
+//! commands with `confirm: true` themselves). The window runs the command on a worker thread with
+//! the session locked only for its checks and bookkeeping, so a big deletion does not freeze it
+//! (G-062); the dialog shows a busy row until [`finish_confirm`] gets the answer.
 //!
 //! * Recycle: "can be restored from the Recycle Bin", a plain confirm button.
 //! * Permanent: a red irreversible warning and a second explicit checkbox
@@ -32,6 +34,7 @@ pub const MAX_STORED_PATHS: usize = 200;
 pub const UNC_REASON: &str =
     "Deleting is disabled on network (UNC) scan roots. Scan a local drive path to delete files.";
 const SCANNING_REASON: &str = "Wait for the scan to finish";
+const BUSY_REASON: &str = "Wait for the running deletion to finish";
 const NO_TREE_REASON: &str = "Scan a folder first";
 /// Why nothing can be deleted in the default demo (its tree has no files behind it).
 pub const DEMO_REASON: &str = "This is synthetic demo data: there are no files on disk to delete. Start with \
@@ -124,6 +127,10 @@ pub struct DeleteDialog {
     /// Checkbox for a partial tree (`i_understand_partial`).
     pub ack_partial: bool,
     pub error: Option<DialogError>,
+    /// The confirmed command is running on a worker thread; the dialog waits for its answer and
+    /// cannot be cancelled or confirmed again (G-062).
+    #[serde(default)]
+    pub running: bool,
     /// Cancel already took the keyboard focus (first frame only).
     #[serde(skip)]
     pub focus_done: bool,
@@ -132,7 +139,8 @@ pub struct DeleteDialog {
 impl DeleteDialog {
     /// The confirm button is live: no error is showing and every needed checkbox is ticked.
     pub fn can_confirm(&self) -> bool {
-        self.error.is_none()
+        !self.running
+            && self.error.is_none()
             && match self.mode {
                 DeleteMode::Recycle => true,
                 DeleteMode::Permanent => self.ack_permanent && (!self.partial_tree || self.ack_partial),
@@ -203,6 +211,7 @@ impl DeleteDialog {
             ack_permanent: false,
             ack_partial: false,
             error: None,
+            running: false,
             focus_done: false,
         }
     }
@@ -212,6 +221,9 @@ impl DeleteDialog {
 pub fn block_reason(session: &Session) -> Option<&'static str> {
     if session.is_scanning() {
         return Some(SCANNING_REASON);
+    }
+    if session.removal_in_progress() {
+        return Some(BUSY_REASON);
     }
     let tree = session.tree();
     if tree.len() <= 1 {
@@ -341,20 +353,25 @@ pub fn switch_to_permanent(session: &mut Session, state: &mut UiState) {
     }
 }
 
-/// Sends the destructive command of the open dialog. UI-only: called when the user presses the
-/// confirm button, never from a command. Does nothing unless [`DeleteDialog::can_confirm`].
+/// Marks the open dialog as running and returns the destructive command to send. UI-only: called
+/// when the user presses the confirm button, never from a command. `None` unless
+/// [`DeleteDialog::can_confirm`]. The caller runs the command off the UI thread and hands the
+/// answer to [`finish_confirm`].
+pub fn begin_confirm(state: &mut UiState) -> Option<(&'static str, Value)> {
+    let dialog = state.delete_dialog.as_mut().filter(|d| d.can_confirm())?;
+    dialog.running = true;
+    Some(dialog.request())
+}
+
+/// Applies the answer of a command started by [`begin_confirm`].
 ///
 /// On success the dialog closes, a toast reports the outcome and the stale views are dropped (the
 /// engine bumped the revision; ids are invalid, the selection is cleared). On failure the dialog
 /// stays open with a friendly message and, where it helps, a follow-up button.
-pub fn confirm(session: &mut Session, state: &mut UiState) {
+pub fn finish_confirm(state: &mut UiState, result: Result<Value, CommandError>) {
     let Some(mut dialog) = state.delete_dialog.take() else { return };
-    if !dialog.can_confirm() {
-        state.delete_dialog = Some(dialog);
-        return;
-    }
-    let (command, params) = dialog.request();
-    match session.execute(command, &params) {
+    dialog.running = false;
+    match result {
         Ok(result) => {
             state.notice = None;
             state.journal.loaded = false;
@@ -437,6 +454,13 @@ pub fn show(ctx: &egui::Context, dialog: &mut DeleteDialog, tokens: &Tokens) -> 
         .inner_margin(egui::Margin::same(16));
     let modal = egui::Modal::new(egui::Id::new("delete_dialog")).frame(frame).show(ctx, |ui| {
         ui.set_width(width);
+        if dialog.running {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(egui::RichText::new(running_text(dialog)).strong());
+            });
+            ui.disable();
+        }
         ui.spacing_mut().item_spacing.y = tokens.spacing;
         let title = egui::RichText::new(dialog.title()).heading().color(if permanent { danger } else { Tokens::color(tokens.text) });
         ui.label(title);
@@ -507,12 +531,24 @@ pub fn show(ctx: &egui::Context, dialog: &mut DeleteDialog, tokens: &Tokens) -> 
             ui.add(egui::Label::new(egui::RichText::new(&error.message).color(danger)).wrap());
         }
         ui.add_space(tokens.spacing);
-        event = buttons(ui, dialog, tokens);
+        if !dialog.running {
+            event = buttons(ui, dialog, tokens);
+        }
     });
-    if event == DialogEvent::None && modal.should_close() {
+    // A running command cannot be called back: Escape and clicks outside do nothing until it ends.
+    if event == DialogEvent::None && !dialog.running && modal.should_close() {
         event = DialogEvent::Cancel;
     }
     event
+}
+
+/// The busy row of a running dialog.
+fn running_text(dialog: &DeleteDialog) -> &'static str {
+    match (&dialog.subject, dialog.mode) {
+        (Subject::Node { .. }, DeleteMode::Recycle) => "Moving to the Recycle Bin...",
+        (Subject::Node { .. }, DeleteMode::Permanent) => "Deleting...",
+        (Subject::Cleanup { .. }, _) => "Running the cleanup...",
+    }
 }
 
 /// The list repeats nothing: a single item whose path is already printed above is not listed again.

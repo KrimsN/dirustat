@@ -99,10 +99,21 @@ impl Rig {
         self.app.state().delete_dialog.clone().expect("a dialog is open")
     }
 
-    /// What the confirm button does (the only code path that sends the destructive command).
+    /// What the confirm button does (the only code path that sends the destructive command), then
+    /// frames until the worker thread has answered.
     fn confirm(&mut self) {
-        let mut session = lock_session(&self.app.session);
-        delete_dialog::confirm(&mut session, &mut self.app.state);
+        self.app.confirm_delete();
+        self.settle();
+    }
+
+    /// Runs frames until no command is running on a worker thread.
+    fn settle(&mut self) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while self.app.command_running() {
+            assert!(Instant::now() < deadline, "the command never answered");
+            self.frames(1, vec![]);
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     fn open(&mut self, name: &str, id: &str) {
@@ -326,6 +337,7 @@ fn literal_dialog(id: usize, revision: u64, mode: DeleteMode) -> DeleteDialog {
         ack_permanent: true,
         ack_partial: true,
         error: None,
+        running: false,
         focus_done: false,
     }
 }
@@ -383,7 +395,7 @@ fn keyboard_can_confirm_a_recycle_only_after_leaving_the_default_focus() {
     r.frames(1, vec![key(egui::Key::Tab, egui::Modifiers::NONE)]);
     r.frames(2, vec![]);
     r.frames(1, vec![key(egui::Key::Enter, egui::Modifiers::NONE)]);
-    r.frames(2, vec![]);
+    r.settle();
     assert!(!exists(&big), "explicit keyboard activation of the confirm button");
     assert_eq!(r.fake.binned().len(), 1);
 }
@@ -620,10 +632,10 @@ fn journal_window_pages_through_the_entries() {
     r.app.state_mut().journal.turn(false);
     r.frames(2, vec![]);
     assert_eq!(r.app.state().journal.offset, 0);
-    // The window follows new actions: a confirmed delete marks it for reload.
+    // The window follows new actions: a confirmed delete marks it for reload (the frames that wait
+    // for the worker thread already reload it).
     r.open("big.bin", "file.delete");
     r.confirm();
-    assert!(!r.app.state().journal.loaded);
     r.frames(2, vec![]);
     assert_eq!(r.app.state().journal.total, 31);
     assert!(r.app.apply_ui_patch(&json!({"journal_open": false, "cleanups_open": true})).is_ok());
@@ -916,4 +928,96 @@ fn a_cleanup_preview_reports_the_time_budget_and_unchecked_items() {
     let texts = drawn_texts(&mut r, 4);
     assert!(texts.iter().any(|t| t.contains("1 unchecked")), "{texts:?}");
     assert!(texts.iter().any(|t| t.contains("ran out of time")), "{texts:?}");
+}
+
+/// A recycle bin that holds every call until it is released, then deletes the item.
+#[derive(Debug, Default)]
+struct GatedBin {
+    gate: std::sync::Mutex<bool>,
+    wake: std::sync::Condvar,
+    entered: std::sync::atomic::AtomicUsize,
+}
+
+impl GatedBin {
+    fn release(&self) {
+        *self.gate.lock().unwrap() = true;
+        self.wake.notify_all();
+    }
+}
+
+impl PlatformServices for GatedBin {
+    fn drives(&self) -> dirustat_platform::Result<Vec<dirustat_platform::DriveInfo>> {
+        Ok(Vec::new())
+    }
+    fn free_space(&self, _path: &Path) -> dirustat_platform::Result<dirustat_platform::SpaceInfo> {
+        Ok(dirustat_platform::SpaceInfo { total: 1, free: 1 })
+    }
+    fn move_to_recycle_bin(&self, path: &Path) -> dirustat_platform::Result<()> {
+        self.entered.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let mut open = self.gate.lock().unwrap();
+        while !*open {
+            open = self.wake.wait(open).unwrap();
+        }
+        std::fs::remove_file(path).map_err(|e| PlatformError::Failed { op: "recycle", message: e.to_string() })
+    }
+    fn reveal_in_file_manager(&self, _path: &Path) -> dirustat_platform::Result<()> {
+        Ok(())
+    }
+    fn show_properties(&self, _path: &Path) -> dirustat_platform::Result<()> {
+        Ok(())
+    }
+}
+
+/// G-062: a confirmed cleanup runs on a worker thread. While its action hangs the frames keep
+/// running with the session free, the dialog shows it is busy and cannot be closed, other
+/// deletions and quitting are refused; the answer lands in the dialog when the action returns.
+#[test]
+fn a_hanging_cleanup_keeps_the_window_live() {
+    let mut r = Rig::new(0, None);
+    let gate = Arc::new(GatedBin::default());
+    r.app.session().set_platform(gate.clone());
+    {
+        let mut session = lock_session(&r.app.session);
+        cleanups_ui::open_run_dialog(&mut session, &mut r.app.state, "temporary-files").unwrap();
+    }
+    r.app.confirm_delete();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while gate.entered.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+        assert!(Instant::now() < deadline, "the worker never reached the recycle bin");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(r.app.session.try_lock().is_ok(), "the session is free while the action runs");
+    let texts = drawn_texts(&mut r, 3);
+    assert!(texts.iter().any(|t| t.contains("Running the cleanup")), "{texts:?}");
+    assert!(r.app.command_running() && r.dialog().running && !r.dialog().can_confirm());
+    assert!(delete_dialog::block_reason(&r.app.session()).is_some_and(|why| why.contains("deletion")));
+    assert!(r.app.run_command("ui.quit").is_err() && !r.app.quit_requested());
+    r.app.state_mut().dialog_request = Some(DialogRequest::Close);
+    r.frames(1, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+    assert!(r.app.state().delete_dialog.is_some(), "a running dialog stays open");
+    assert!(exists(&r.root().join("a.tmp")) || exists(&r.root().join("docs").join("old.temp")));
+    gate.release();
+    r.settle();
+    assert!(r.app.state().delete_dialog.is_none());
+    assert!(!exists(&r.root().join("a.tmp")) && !exists(&r.root().join("docs").join("old.temp")));
+    let run = r.app.state().cleanups.last_run.clone().unwrap();
+    assert_eq!((run.deleted, run.failed), (2, 0));
+    assert_eq!(r.journal_total(), 2);
+    assert!(r.app.run_command("ui.quit").is_ok());
+}
+
+/// G-062: the free space of the scanned volume is asked on a worker thread and reaches the
+/// status bar without the frame waiting for it.
+#[test]
+fn free_space_arrives_from_a_worker_thread() {
+    let mut r = Rig::new(0, None);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while r.app.state().free_space.is_none() {
+        assert!(Instant::now() < deadline, "free space never arrived");
+        r.frames(1, vec![]);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let space = r.app.state().free_space.clone().unwrap();
+    assert_eq!(space.path, r.root().to_string_lossy());
+    assert!(r.app.free_job.is_none());
 }

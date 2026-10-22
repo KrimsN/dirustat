@@ -406,6 +406,7 @@ pub fn open_run_dialog(session: &mut Session, state: &mut UiState, id: &str) -> 
         ack_permanent: false,
         ack_partial: false,
         error: None,
+        running: false,
         focus_done: false,
     });
     Ok(())
