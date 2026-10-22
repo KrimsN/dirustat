@@ -35,10 +35,17 @@ impl PlatformServices for SystemPlatform {
         // `trash::delete` falls back to permanent deletion where there is no bin (network and
         // removable volumes) or the item is larger than the bin allows. Only fixed local disks are
         // trusted, so the engine can report an error and suggest `file.delete_permanent` instead.
-        let root = crate::path::drive_root(text).ok_or(PlatformError::Unsupported(NO_BIN))?;
-        let kind = crate::win32::drive_type(&root).ok_or(PlatformError::Unsupported(NO_BIN))?;
-        if !crate::path::drive_type_has_recycle_bin(kind) {
-            return Err(PlatformError::Unsupported(NO_BIN));
+        // The real location of the parent counts too: a directory symlink on the way can lead from
+        // a fixed disk to a network share (QA-147).
+        let real_parent =
+            path.parent().and_then(|p| std::fs::canonicalize(p).ok()).ok_or(PlatformError::Unsupported(NO_BIN))?;
+        let real_text = real_parent.to_string_lossy();
+        for spelling in [text, real_text.as_ref()] {
+            let root = crate::path::drive_root(spelling).ok_or(PlatformError::Unsupported(NO_BIN))?;
+            let kind = crate::win32::drive_type(&root).ok_or(PlatformError::Unsupported(NO_BIN))?;
+            if !crate::path::drive_type_has_recycle_bin(kind) {
+                return Err(PlatformError::Unsupported(NO_BIN));
+            }
         }
         trash::delete(path).map_err(|err| PlatformError::Failed { op: "recycle", message: err.to_string() })?;
         if path.symlink_metadata().is_ok() {

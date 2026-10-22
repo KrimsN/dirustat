@@ -144,6 +144,20 @@ pub(crate) fn verify_identity(path: &Path, kind: NodeKind) -> Result<(), Command
     if canon.file_name() == Some(want) { Ok(()) } else { Err(alias()) }
 }
 
+/// Refuses a real (canonical) location that is not on a local lettered volume. The lexical path
+/// can name a local drive while a directory symlink on the way leads to a network share
+/// (QA-147): there the shell has no recycle bin and silently deletes for good, and permanent
+/// removal and moves would act over the network.
+pub(crate) fn require_local_real(real: &str, what: &str, is_local: &dyn Fn(&str) -> bool) -> Result<(), CommandError> {
+    if is_local(real) {
+        return Ok(());
+    }
+    Err(CommandError::ProtectedPath(format!(
+        "the real location of the {what} is a network or device path (a link on the way leads off the local \
+         drive); destructive commands only work on local drives"
+    )))
+}
+
 /// Resolves the parent of `path` on disk and checks that it is exactly where the lexical path
 /// says: below the real scan root, with no link or reparse point in between, and that the real
 /// target is not protected. Returns the real (canonical) key of the parent directory.
@@ -164,6 +178,7 @@ pub(crate) fn verify_location(
     let parent = Path::new(path).parent().ok_or_else(outside)?;
     let canon_parent = fs::canonicalize(parent).map_err(|_| stale("the parent directory cannot be resolved"))?;
     let canon_root = fs::canonicalize(root).map_err(|_| stale("the scan root cannot be resolved"))?;
+    require_local_real(&canon_root.to_string_lossy(), "scan root", &crate::is_local_path)?;
     let mut expected = canon_root.clone();
     for comp in rel_parent {
         expected.push(comp);
@@ -242,6 +257,32 @@ pub(crate) fn remove_permanently(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// QA-147: what the real location resolves to decides, whatever the lexical path said.
+    #[test]
+    fn real_locations_off_the_local_drives_are_refused() {
+        let drive = |root: &str| match root.get(..1) {
+            Some("C") => Some(dirustat_platform::DRIVE_TYPE_FIXED),
+            Some("Z") => Some(dirustat_platform::DRIVE_TYPE_REMOTE),
+            _ => None,
+        };
+        let local =
+            |p: &str| dirustat_platform::classify_path_with(p, true, &drive) == dirustat_platform::PathClass::Local;
+        for ok in [r"\\?\C:\data\root", r"C:\data"] {
+            assert!(require_local_real(ok, "scan root", &local).is_ok(), "{ok}");
+        }
+        for bad in [
+            r"\\?\UNC\localhost\Users\me\fixture",
+            r"\\?\UNC\nas\share",
+            r"\\?\Z:\mapped",
+            r"\\?\GLOBALROOT\Device\Mup\nas\share",
+            r"\\?\Volume{01234567-89ab-cdef-0123-456789abcdef}\x",
+        ] {
+            let err = require_local_real(bad, "scan root", &local).unwrap_err();
+            assert_eq!(err.code(), "protected_path", "{bad}");
+            assert!(err.to_string().contains("scan root"), "{err}");
+        }
+    }
 
     #[test]
     fn nested_tree_is_removed() {

@@ -542,6 +542,7 @@ fn check_destination(plan: &Plan, destination: &str) -> Result<(), CommandError>
         return Err(bad("the parent directory does not exist"));
     }
     let real_parent = std::fs::canonicalize(parent).map_err(|_| bad("the parent directory cannot be resolved"))?;
+    fsops::require_local_real(&real_parent.to_string_lossy(), "destination directory", &crate::is_local_path)?;
     protected
         .check(&real_parent.to_string_lossy(), "")
         .map_err(|why| CommandError::ProtectedPath(format!("the real destination directory is {why}")))?;
@@ -1507,6 +1508,74 @@ mod tests {
             .find(|&i| t.node_at(i).and_then(|n| t.get(n)).is_some_and(|n| n.name() == name))
             .map(|i| u64::try_from(i).unwrap())
             .unwrap()
+    }
+
+    /// A directory symlink `link` to the UNC spelling of the local folder `target` (an
+    /// administrative share or the `Users` share of this machine), or `None` where the machine
+    /// allows neither symlinks nor such a share.
+    #[cfg(windows)]
+    fn symlink_to_unc(target: &Path, link: &Path) -> Option<String> {
+        let text = target.to_string_lossy().into_owned();
+        let (drive, rest) = text.split_once(":\\")?;
+        let mut candidates = vec![format!(r"\\localhost\{drive}$\{rest}")];
+        if let Some(under_users) = rest.strip_prefix(r"Users\") {
+            candidates.push(format!(r"\\localhost\Users\{under_users}"));
+        }
+        candidates.into_iter().find(|unc| {
+            let made = std::os::windows::fs::symlink_dir(unc, link).is_ok();
+            let usable = made && std::fs::read_dir(link).is_ok();
+            if made && !usable {
+                let _ = std::fs::remove_dir(link);
+            }
+            usable
+        })
+    }
+
+    /// QA-147: a scan root reached through a directory symlink to a network share is not local,
+    /// whatever its lexical drive letter says: recycle (the shell would delete for good), permanent
+    /// delete and move are refused and nothing is touched; a move whose destination directory leads
+    /// there is refused too. Skipped where no symlink to a share can be made (no developer mode or
+    /// elevation, no share).
+    #[cfg(windows)]
+    #[test]
+    fn a_scan_root_linked_to_a_network_share_is_not_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join("victim")).unwrap();
+        std::fs::write(real.join("victim").join("a.txt"), b"aaaa").unwrap();
+        std::fs::write(real.join("b.txt"), b"bb").unwrap();
+        let link = dir.path().join("link");
+        let Some(unc) = symlink_to_unc(&real, &link) else {
+            eprintln!("skipped: cannot create a directory symlink to a share of this machine");
+            return;
+        };
+        let (mut s, fake) = scanned(&link);
+        let file = link.join("b.txt").to_string_lossy().into_owned();
+        let folder = link.join("victim").to_string_lossy().into_owned();
+        let attempts = [
+            ("file.delete", json!({"path": file, "confirm": true})),
+            ("file.delete_permanent", json!({"path": folder, "confirm": true, "i_understand_permanent": true})),
+            (
+                "file.move",
+                json!({"path": file, "destination": link.join("moved.txt").to_string_lossy(), "confirm": true}),
+            ),
+        ];
+        for (id, params) in attempts {
+            let err = s.execute(id, &params).unwrap_err();
+            assert_eq!(err.code(), "protected_path", "{id} through {unc}: {err}");
+        }
+        assert!(real.join("b.txt").exists() && real.join("victim").join("a.txt").exists());
+        assert!(fake.calls().is_empty());
+        // A local scan whose move destination directory is the linked share.
+        let local = dir.path().join("local");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("c.txt"), b"c").unwrap();
+        let (mut s, fake) = scanned(&local);
+        let to = link.join("c.txt").to_string_lossy().into_owned();
+        let params = json!({"path": local.join("c.txt").to_string_lossy(), "destination": to, "confirm": true});
+        assert_eq!(s.execute("file.move", &params).unwrap_err().code(), "protected_path");
+        assert!(local.join("c.txt").exists() && !real.join("c.txt").exists() && fake.calls().is_empty());
+        std::fs::remove_dir(&link).unwrap();
     }
 
     /// QA-116: `dup` and `dup.` are two files on NTFS but Win32 normalisation maps both paths to `dup`.
