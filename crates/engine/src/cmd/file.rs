@@ -681,10 +681,12 @@ pub(super) enum Begun {
     Job(RemovalJob),
 }
 
-/// A checked permanent removal that owns everything it needs to run without the session.
+/// A checked removal (permanent or to the recycle bin) that owns everything it needs to run
+/// without the session.
 #[derive(Debug)]
 pub(super) struct RemovalJob {
     ready: Box<Ready>,
+    platform: Arc<dyn PlatformServices>,
     busy: BusyGuard,
 }
 
@@ -699,9 +701,9 @@ pub(super) struct RemovalOutcome {
 impl RemovalJob {
     /// Removes the item (the slow part). Needs no session; a panic becomes an error.
     pub(super) fn run(self) -> RemovalOutcome {
-        let path = std::path::PathBuf::from(&self.ready.path);
-        let result = guard::guarded("file.delete_permanent", || remove_on_disk(&path));
-        RemovalOutcome { ready: self.ready, result, busy: self.busy }
+        let Self { ready, platform, busy } = self;
+        let result = guard::guarded(&ready.op, || act_with(platform.as_ref(), ready.mode, &ready.path, None));
+        RemovalOutcome { ready, result, busy }
     }
 }
 
@@ -718,15 +720,32 @@ pub(super) fn finish_removal(session: &mut Session, done: RemovalOutcome) -> Res
 pub(super) fn begin_permanent(session: &Session, params: &Value) -> Result<Begun, CommandError> {
     let p: PermanentParams = parse_params(params)?;
     let (addr, dry_run, allow_partial) = permanent_args(&p)?;
-    match stage(session, "file.delete_permanent", Mode::Permanent, addr, dry_run, None, allow_partial)? {
+    begin_removal(session, "file.delete_permanent", Mode::Permanent, addr, dry_run, allow_partial)
+}
+
+/// `file.delete` (recycle bin) up to the point where the disk is touched; the shell can take long
+/// for a big folder, so it runs without the session too (G-062).
+pub(super) fn begin_recycle(session: &Session, params: &Value) -> Result<Begun, CommandError> {
+    let p: DeleteParams = parse_params(params)?;
+    let addr = Addr { id: p.id, revision: p.revision, path: p.path.as_deref() };
+    begin_removal(session, "file.delete", Mode::Recycle, addr, p.dry_run.unwrap_or(false), false)
+}
+
+fn begin_removal(
+    session: &Session,
+    op: &str,
+    mode: Mode,
+    addr: Addr<'_>,
+    dry_run: bool,
+    allow_partial: bool,
+) -> Result<Begun, CommandError> {
+    match stage(session, op, mode, addr, dry_run, None, allow_partial)? {
         Staged::Report(report) => Ok(Begun::Report(report)),
         Staged::Act(ready) => {
             let busy = BusyGuard::claim(&session.removal_busy).ok_or_else(|| {
-                CommandError::NotEnabled(
-                    "file.delete_permanent: a permanent deletion is still running; wait for it to finish".to_owned(),
-                )
+                CommandError::NotEnabled(format!("{op}: a deletion is still running; wait for it to finish"))
             })?;
-            Ok(Begun::Job(RemovalJob { ready, busy }))
+            Ok(Begun::Job(RemovalJob { ready, platform: session.platform(), busy }))
         }
     }
 }

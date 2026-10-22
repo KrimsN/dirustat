@@ -1021,3 +1021,33 @@ fn free_space_arrives_from_a_worker_thread() {
     assert_eq!(space.path, r.root().to_string_lossy());
     assert!(r.app.free_job.is_none());
 }
+
+/// Review of G-062: a deletion started by a control client (which the window does not track as
+/// its own job) also holds off quitting and the close button, because ending the process would
+/// cut it off half way.
+#[test]
+fn a_deletion_from_a_control_client_holds_off_closing_the_window() {
+    let mut r = Rig::new(0, None);
+    let big = r.root().join("big.bin").to_string_lossy().into_owned();
+    let params = json!({"path": big, "confirm": true, "i_understand_permanent": true});
+    let pending = match r.app.session().execute_split("file.delete_permanent", &params) {
+        dirustat_engine::Prepared::Job(job) => job,
+        dirustat_engine::Prepared::Done(done) => panic!("expected a job, got {done:?}"),
+    };
+    assert!(!r.app.command_running());
+    assert!(r.app.run_command("ui.quit").is_err() && !r.app.quit_requested());
+    let mut input = egui::RawInput { screen_rect: Some(screen()), ..egui::RawInput::default() };
+    input.viewports.entry(egui::ViewportId::ROOT).or_default().events.push(egui::ViewportEvent::Close);
+    let out = r.ctx.run_ui(input, |ui| r.app.show(ui));
+    let cancelled = out
+        .viewport_output
+        .get(&egui::ViewportId::ROOT)
+        .is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose));
+    out.drop_without_applying_deltas();
+    assert!(cancelled, "the close button is held off");
+    assert!(r.app.state().notice.as_deref().is_some_and(|n| n.contains("still running")));
+    let outcome = pending.run();
+    let finished = r.app.session().finish_job(outcome);
+    assert!(matches!(finished, dirustat_engine::Prepared::Done(Ok(_))));
+    assert!(r.app.run_command("ui.quit").is_ok() && r.app.quit_requested());
+}

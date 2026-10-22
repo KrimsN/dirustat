@@ -263,7 +263,7 @@ impl DirustatApp {
         }
         if let Some(effect) = commands::run(&mut self.state, id) {
             match effect {
-                UiEffect::Quit if self.command_running() => return Err(WAIT_TO_QUIT_MESSAGE.to_owned()),
+                UiEffect::Quit if self.deletion_running() => return Err(WAIT_TO_QUIT_MESSAGE.to_owned()),
                 UiEffect::Quit => self.quit_requested = true,
                 UiEffect::CopyPath => self.copy_selected_path()?,
                 UiEffect::BrowseFolder => self.start_browse()?,
@@ -481,6 +481,12 @@ impl DirustatApp {
         self.command_job.is_some()
     }
 
+    /// True while a deletion runs, started here or by a control client: ending the process now
+    /// would cut it off half way.
+    fn deletion_running(&self) -> bool {
+        self.command_running() || lock_session(&self.session).removal_in_progress()
+    }
+
     /// Probes the fast path once per scan start (never per frame) and sets the status-bar hint.
     ///
     /// Opening a raw volume can block, so the probe runs on a short helper thread and its result is
@@ -626,7 +632,7 @@ impl DirustatApp {
         self.poll_browse(&ctx);
         self.poll_command_job(&ctx);
         self.poll_free_space(&ctx);
-        if self.command_running() && ctx.input(|i| i.viewport().close_requested()) {
+        if ctx.input(|i| i.viewport().close_requested()) && self.deletion_running() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.state.notice = Some(WAIT_TO_QUIT_MESSAGE.to_owned());
         }
@@ -745,7 +751,10 @@ impl DirustatApp {
             DialogRequest::Recycle => self.run_command("file.delete"),
             DialogRequest::Permanent => self.run_command("file.delete_permanent"),
             // A running dialog waits for its answer; closing it would lose the outcome.
-            DialogRequest::Close if self.command_running() => Ok(Value::Null),
+            DialogRequest::Close if self.command_running() => {
+                self.state.notice = Some("The dialog closes when the deletion has finished".to_owned());
+                Ok(Value::Null)
+            }
             DialogRequest::Close => {
                 self.state.delete_dialog = None;
                 Ok(Value::Null)

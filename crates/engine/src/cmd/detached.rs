@@ -1,15 +1,15 @@
 //! Commands whose slow part runs **without the session lock** (QA-143, QA-144).
 //!
 //! A host that shares the session behind a mutex (the control server, MCP, the UI) calls
-//! [`Session::execute_split`] under the lock. For `platform.free_space`, `file.delete_permanent`
-//! and `cleanup.run` it returns a [`DetachedJob`] instead of a result: everything that needs the
-//! session (parameters, every safety check, the plan) is already done, and the job owns what the
-//! slow part needs. The host releases the lock, calls [`DetachedJob::run`], re-locks and hands the
+//! [`Session::execute_split`] under the lock. For `platform.free_space`, `file.delete`,
+//! `file.delete_permanent` and `cleanup.run` it returns a [`DetachedJob`] instead of a result:
+//! everything that needs the session (parameters, every safety check, the plan) is already done,
+//! and the job owns what the slow part needs. The host releases the lock, calls [`DetachedJob::run`], re-locks and hands the
 //! outcome to [`Session::finish_job`], which journals and prunes the tree. A cleanup run is a chain
 //! of such jobs (one per action, G-062): `finish_job` hands back the next one until the run is over.
 //! Any other command is simply run. [`execute_unlocked`] is that loop for hosts with a lock function.
 //!
-//! While a permanent deletion or a cleanup run is in flight the session refuses destructive
+//! While a deletion or a cleanup run is in flight the session refuses destructive
 //! commands and `scan.*` (`not_enabled`), so the plan cannot be invalidated by a second deleter;
 //! every other command (state, listings, search) keeps working on the not-yet-pruned tree. If the
 //! tree was replaced anyway (a host called `replace_tree` or `finish_scan` directly) the outcome is
@@ -108,20 +108,16 @@ impl Drop for BusyGuard {
 }
 
 impl Session {
-    /// Like [`Session::execute`], but the slow part of `platform.free_space`,
-    /// `file.delete_permanent` and `cleanup.run` is returned as a [`DetachedJob`] for the caller to
-    /// run without holding the session. All other commands are executed here.
+    /// Like [`Session::execute`], but the slow part of `platform.free_space`, `file.delete`,
+    /// `file.delete_permanent` and `cleanup.run` is returned as a [`DetachedJob`] for the caller
+    /// to run without holding the session. All other commands are executed here.
     pub fn execute_split(&mut self, id: &str, params: &Value) -> Prepared {
         let begun = match id {
             "platform.free_space" => begin(self, id, params, |s, p| {
                 platform::begin_free_space(s, p).map(|job| Ok(DetachedJob(Kind::FreeSpace(job))))
             }),
-            "file.delete_permanent" => begin(self, id, params, |s, p| {
-                file::begin_permanent(s, p).map(|b| match b {
-                    Begun::Report(report) => Err(report),
-                    Begun::Job(job) => Ok(DetachedJob(Kind::Removal(job))),
-                })
-            }),
+            "file.delete_permanent" => begin(self, id, params, |s, p| file::begin_permanent(s, p).map(removal_job)),
+            "file.delete" => begin(self, id, params, |s, p| file::begin_recycle(s, p).map(removal_job)),
             "cleanup.run" => begin(self, id, params, |s, p| cleanup::begin_run(s, p).map(cleanup_job)),
             _ => return Prepared::Done(self.execute(id, params)),
         };
@@ -137,9 +133,7 @@ impl Session {
     pub fn finish_job(&mut self, outcome: JobOutcome) -> Prepared {
         match outcome.0 {
             Done::Value(result) => Prepared::Done(result),
-            Done::Removal(done) => {
-                Prepared::Done(guard::guarded("file.delete_permanent", || file::finish_removal(self, done)))
-            }
+            Done::Removal(done) => Prepared::Done(guard::guarded("file.delete", || file::finish_removal(self, done))),
             Done::Cleanup(done) => {
                 match guard::guarded("cleanup.run", || Ok(cleanup_job(cleanup::finish_step(self, done)))) {
                     Ok(Ok(job)) => Prepared::Job(job),
@@ -155,9 +149,17 @@ impl Session {
         self.volume_query_timeout = timeout;
     }
 
-    /// True while a detached permanent deletion is running.
+    /// True while a detached deletion or cleanup run is in flight.
     pub fn removal_in_progress(&self) -> bool {
         self.removal_busy.load(Ordering::SeqCst)
+    }
+}
+
+/// `Ok(job)` for a checked removal, `Err(report)` for a dry run.
+fn removal_job(begun: Begun) -> Result<DetachedJob, Value> {
+    match begun {
+        Begun::Report(report) => Err(report),
+        Begun::Job(job) => Ok(DetachedJob(Kind::Removal(job))),
     }
 }
 
@@ -432,6 +434,30 @@ mod tests {
         for p in [json!({}), json!({"path": "relative"}), json!({"path": "\\\\server\\share"}), json!({"x": 1})] {
             assert_eq!(done(s.execute_split("platform.free_space", &p)).unwrap_err().code(), "invalid_params");
         }
+    }
+
+    /// G-062: a recycle-bin deletion also runs without the session, holds the removal slot and
+    /// prunes on completion; its dry run finishes at once.
+    #[test]
+    fn recycling_runs_without_holding_the_session() {
+        let (dir, mut s) = fixture();
+        let fake = Arc::new(FakePlatform::new());
+        s.set_platform(fake.clone());
+        let sub = dir.path().join("root").join("sub");
+        let params = json!({"path": sub.to_string_lossy(), "confirm": true});
+        let mut dry = params.clone();
+        dry["dry_run"] = json!(true);
+        assert_eq!(done(s.execute_split("file.delete", &dry)).unwrap()["dry_run"], true);
+        let rev = s.revision();
+        let pending = job(s.execute_split("file.delete", &params));
+        assert!(s.removal_in_progress() && sub.exists() && fake.binned().is_empty());
+        assert_eq!(done(s.execute_split("file.delete", &params)).unwrap_err().code(), "not_enabled");
+        let outcome = std::thread::spawn(move || pending.run()).join().unwrap();
+        assert!(!sub.exists() && fake.binned().len() == 1);
+        let out = done(s.finish_job(outcome)).unwrap();
+        assert_eq!((out["done"].clone(), out["tree_updated"].clone()), (json!(true), json!(true)));
+        assert!(!s.removal_in_progress() && s.revision() > rev);
+        assert_eq!(s.execute("file.journal", &json!({})).unwrap()["entries"][0]["mode"], "recycle");
     }
 
     /// Saves a permanent cleanup of every `*.txt` file and returns its confirmed run params.

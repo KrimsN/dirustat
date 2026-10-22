@@ -108,7 +108,10 @@ pub(super) fn specs() -> Vec<CommandSpec> {
                 budget: only the nodes found so far are processed), deleted, failed, not_attempted, stopped, \
                 results: [{id, path, ok, status, error?}], done, tree_updated, rescan_recommended, revision, \
                 ids_invalidated}. A run stops (stopped: reason) when the platform has no recycle bin or fails 5 \
-                times in a row. After a run node ids are invalid. The reveal action shows only the largest match.",
+                times in a row. After a run node ids are invalid. The reveal action shows only the largest match. \
+                While a run that is not a dry run is in flight, destructive commands and scan.* are not_enabled; \
+                hosts that share the session call it through Session::execute_split (execute_unlocked), which \
+                releases the session for every action and stops the run if the tree is replaced meanwhile.",
             destructive: true,
             enabled: has_tree,
             run: run_run,
@@ -524,13 +527,15 @@ pub(super) fn begin_run(session: &Session, params: &Value) -> Result<Next, Comma
 /// Journals the outcome of one action and checks the targets up to the next one.
 pub(super) fn finish_step(session: &mut Session, outcome: StepOutcome) -> Next {
     let StepOutcome { mut run, path, result } = outcome;
-    let Some(t) = run.next.checked_sub(1).and_then(|i| run.resolved.targets.get(i)) else {
+    let target = run.next.checked_sub(1).and_then(|i| run.resolved.targets.get(i));
+    let mode = mode_of(run.def.action);
+    // Journal first: whatever happens below, an action that ran is never left unrecorded.
+    if let Some(mode) = mode {
+        record(session, OP, mode, &path, None, target.map_or(0, |t| t.size), &result);
+    }
+    let Some(t) = target else {
         return Next::Done(finish(session, run));
     };
-    let mode = mode_of(run.def.action);
-    if let Some(mode) = mode {
-        record(session, OP, mode, &path, None, t.size, &result);
-    }
     match result {
         Ok(()) => {
             run.consecutive = 0;
