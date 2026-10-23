@@ -7,8 +7,8 @@
 
 mod cleanup;
 mod detached;
-mod export;
 mod duplicates;
+mod export;
 mod file;
 mod list;
 mod look;

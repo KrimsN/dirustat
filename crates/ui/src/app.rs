@@ -10,7 +10,8 @@ use crate::screenshot::{Region, SaveOptions, ScreenshotStatus, Screenshots};
 use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
 use crate::{
-    cleanups_ui, drive_picker, duplicates_ui, ext_panel, journal_ui, look_prefs, map_panel, prefs, search_panel, toast, tree_panel,
+    cleanups_ui, drive_picker, duplicates_ui, ext_panel, journal_ui, look_prefs, map_panel, prefs, search_panel, toast,
+    tree_panel,
 };
 use dirustat_control::{SharedSession, lock_session, share};
 use dirustat_engine::{CommandError, CommandInfo, FastPathStatus, Session, execute_unlocked};
@@ -2051,6 +2052,12 @@ mod tests {
         // A pick sets the path and runs the same scan.start command as the Scan button.
         scan_dir(&mut app, &ctx, dir.path());
         assert_eq!(app.state().scan, ScanStatus::Done { errors: 0 });
+        // The reading comes from a worker thread; wait for it instead of counting frames.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while app.state().free_space.is_none() && Instant::now() < deadline {
+            let _ = frame(&mut app, &ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
         let space = app.state().free_space.clone();
         assert_eq!(space.map(|s| (s.total, s.free)), Some((1000, 250)));
         assert!(fake.calls().contains(&dirustat_platform::PlatformCall::FreeSpace(dir.path().to_path_buf())));

@@ -53,6 +53,7 @@ pub fn render_png(tree: &Tree, request: &PngRequest) -> Result<Vec<u8>, String> 
         background: background_rgb(&tokens),
         tiles,
         config: CushionConfig::default(),
+        grid: false,
     };
     let image = render(&input);
     encode_png(&image, None, 1.0).map(|(bytes, _, _)| bytes)

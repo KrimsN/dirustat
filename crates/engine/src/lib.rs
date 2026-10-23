@@ -8,8 +8,8 @@
 pub mod cleanup;
 mod cmd;
 mod drives;
-pub mod export;
 pub mod duplicates;
+pub mod export;
 mod ext;
 mod fsops;
 mod guard;
