@@ -22,11 +22,12 @@ mod protected;
 mod prune;
 pub mod search;
 mod settings;
+pub mod snapshot;
 mod subtree;
 
 pub use cmd::{
-    CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, execute_unlocked, fast_path_status,
-    tree_node_path, volume_root_of,
+    CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, SnapshotView, execute_unlocked,
+    fast_path_status, tree_node_path, volume_root_of,
 };
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
 pub use paths::{PathClass, classify_path, is_local_path, is_unc_path, normalize_scan_root};
@@ -142,6 +143,8 @@ pub struct Session {
     volume_query_timeout: Duration,
     /// Duplicate search job and result (`duplicates.*`), valid for one tree revision.
     dups: cmd::DupState,
+    /// Loaded snapshots and the one being viewed (`snapshot.*`).
+    snapshots: snapshot::Store,
 }
 
 /// Default time `platform.free_space` waits for a volume (short in tests).
@@ -181,6 +184,7 @@ impl Session {
             volume_query_busy: Arc::new(AtomicBool::new(false)),
             volume_query_timeout: DEFAULT_VOLUME_QUERY_TIMEOUT,
             dups: cmd::DupState::default(),
+            snapshots: snapshot::Store::default(),
         }
     }
 

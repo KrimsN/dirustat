@@ -17,7 +17,22 @@ pub enum UiEffect {
     BrowseFolder,
     /// Open the native save dialog; the app runs the matching `export.*` command with the chosen file.
     Export(ExportKind),
+    /// Open the native save or open dialog; the app runs `snapshot.save` or `snapshot.load` with the file.
+    Snapshot(SnapshotKind),
 }
+
+/// What File > Snapshot does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SnapshotKind {
+    Save,
+    /// Load and show the snapshot as the current tree.
+    Open,
+    /// Load the snapshot only to compare it with the current tree (from the comparison window).
+    OpenForCompare,
+}
+
+/// File extension of snapshot files.
+pub const SNAPSHOT_EXTENSION: &str = "dirsnap";
 
 /// What File > Export writes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +164,16 @@ fn export_json(_: &mut UiState) -> UiEffect {
 fn export_png(_: &mut UiState) -> UiEffect {
     UiEffect::Export(ExportKind::Png)
 }
+fn snapshot_save(_: &mut UiState) -> UiEffect {
+    UiEffect::Snapshot(SnapshotKind::Save)
+}
+fn snapshot_open(_: &mut UiState) -> UiEffect {
+    UiEffect::Snapshot(SnapshotKind::Open)
+}
+fn compare(s: &mut UiState) -> UiEffect {
+    s.compare.open = !s.compare.open;
+    UiEffect::None
+}
 fn cleanups(s: &mut UiState) -> UiEffect {
     s.cleanups.open = !s.cleanups.open;
     UiEffect::None
@@ -265,6 +290,34 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params_doc: "none. Opens a save dialog (interactive only), then runs export.png with the chosen file.",
         checked: None,
         run: export_png,
+    },
+    UiCommand {
+        id: "ui.snapshot_save",
+        label: "Save snapshot",
+        menu: "File/Snapshot/Save snapshot…",
+        shortcut: None,
+        params_doc: "none. Opens a save dialog (interactive only), then runs snapshot.save with the chosen file.",
+        checked: None,
+        run: snapshot_save,
+    },
+    UiCommand {
+        id: "ui.snapshot_open",
+        label: "Open snapshot",
+        menu: "File/Snapshot/Open snapshot…",
+        shortcut: None,
+        params_doc: "none. Opens a file dialog (interactive only), then runs snapshot.load with the chosen file: the \
+            snapshot becomes a read-only view of a past scan.",
+        checked: None,
+        run: snapshot_open,
+    },
+    UiCommand {
+        id: "ui.compare",
+        label: "Compare with snapshot",
+        menu: "Tools/Compare with snapshot",
+        shortcut: None,
+        params_doc: "none. Shows or hides the comparison window (snapshot.compare of a loaded snapshot with the current tree).",
+        checked: Some(|s| s.compare.open),
+        run: compare,
     },
     UiCommand {
         id: "ui.quit",

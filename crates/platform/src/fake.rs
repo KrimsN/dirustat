@@ -23,6 +23,8 @@ pub enum PlatformCall {
     PickFolder,
     /// `pick_save_file(suggested_name, extension)`.
     PickSaveFile(String, String),
+    /// `pick_open_file(extension)`.
+    PickOpenFile(String),
 }
 
 static NEXT_BIN: AtomicU64 = AtomicU64::new(0);
@@ -43,6 +45,8 @@ struct State {
     picked: Option<PathBuf>,
     /// Answer of `pick_save_file` (`None` = the dialog was cancelled).
     picked_save: Option<PathBuf>,
+    /// Answer of `pick_open_file` (`None` = the dialog was cancelled).
+    picked_open: Option<PathBuf>,
 }
 
 /// Fake services. Input is validated like the real implementation, then the call is recorded.
@@ -108,6 +112,11 @@ impl FakePlatform {
     /// Fixes the answer of `pick_save_file`: the "chosen" file, or `None` for a cancelled dialog.
     pub fn set_picked_save_file(&self, file: Option<PathBuf>) {
         self.lock().picked_save = file;
+    }
+
+    /// Fixes the answer of `pick_open_file`: the "chosen" file, or `None` for a cancelled dialog.
+    pub fn set_picked_open_file(&self, file: Option<PathBuf>) {
+        self.lock().picked_open = file;
     }
 
     /// Makes `move_to_recycle_bin` fail with `Unsupported` like a volume that has no recycle bin.
@@ -224,6 +233,11 @@ impl PlatformServices for FakePlatform {
     fn pick_save_file(&self, suggested_name: &str, extension: &str) -> Result<Option<PathBuf>> {
         self.begin(PlatformCall::PickSaveFile(suggested_name.to_owned(), extension.to_owned()))?;
         Ok(self.lock().picked_save.clone())
+    }
+
+    fn pick_open_file(&self, extension: &str) -> Result<Option<PathBuf>> {
+        self.begin(PlatformCall::PickOpenFile(extension.to_owned()))?;
+        Ok(self.lock().picked_open.clone())
     }
 }
 

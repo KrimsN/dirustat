@@ -20,6 +20,10 @@
 - Extra guards: the scan root is never selected; a node inside an already selected node is not selected (ancestors only); at most 10000 nodes per run (`truncated`); `only_under` must be an absolute path inside the scan root without `.`/`..`; selectors need at least one real criterion; `empty` folders are re-checked on disk right before acting; a run stops on a missing recycle bin or after 5 consecutive platform failures.
 - The tree is pruned once at the end of a run (one revision bump, ids invalid); if pruning fails `rescan_recommended` is set. Agents test cleanups only on `tempfile` trees with `FakePlatform`.
 
+## Snapshots (`snapshot.*`, G-019)
+
+A loaded snapshot shown as the current tree is a picture of a past scan, not the disk. While it is shown, `admit` refuses every command flagged `destructive` with `not_enabled` (before `confirm` is even looked at) and the UI disables Delete with a reason; a rescan or `snapshot.close` ends the view. Loading never touches the disk beyond reading the one given file; saving writes only the given `.dirsnap` path atomically and refuses to replace a file without `overwrite: true`. A snapshot file is hostile input (see `docs/never-crash.md`): it cannot name paths to act on, its names may not contain separators or NUL, and it is verified in full before it replaces anything.
+
 ## Rules for agents
 
 - **Never** run destructive commands on the user's real directories (`C:\Users\...`, Documents, Desktop, external drives). Test only on directories created by the test in a temp folder (`tempfile`) or by `cargo xtask fixtures`.
@@ -66,6 +70,7 @@ Commands: `file.delete` (recycle bin), `file.delete_permanent` (needs `confirm` 
 
 ## Revision history
 
+- 2026-10-23 · r9: M5.4: destructive commands are refused while a snapshot is the current tree.
 - 2026-10-23 · r8: QA-147: the canonical scan root and move destination must be local; the recycle bin checks the real parent's drive.
 - 2026-10-23 · r7: G-062: lock-free cleanup runs, the app runs confirmed deletes on a worker thread and refuses to quit during one.
 - 2026-10-19 · r6: M4.10 retest fixes (exact path resolution, colliding names in subtree verification, drive-type classification, C0-only name rule, folder times not compared, lock-free permanent removal and volume queries, `skipped_deep`).

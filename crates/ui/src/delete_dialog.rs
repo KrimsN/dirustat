@@ -35,6 +35,7 @@ pub const UNC_REASON: &str =
     "Deleting is disabled on network (UNC) scan roots. Scan a local drive path to delete files.";
 const SCANNING_REASON: &str = "Wait for the scan to finish";
 const BUSY_REASON: &str = "Wait for the running deletion to finish";
+const SNAPSHOT_REASON: &str = "This is a saved snapshot, not the live disk: scan the folder again to delete files";
 const NO_TREE_REASON: &str = "Scan a folder first";
 /// Why nothing can be deleted in the default demo (its tree has no files behind it).
 pub const DEMO_REASON: &str = "This is synthetic demo data: there are no files on disk to delete. Start with \
@@ -224,6 +225,9 @@ pub fn block_reason(session: &Session) -> Option<&'static str> {
     }
     if session.removal_in_progress() {
         return Some(BUSY_REASON);
+    }
+    if session.snapshot_view().is_some() {
+        return Some(SNAPSHOT_REASON);
     }
     let tree = session.tree();
     if tree.len() <= 1 {

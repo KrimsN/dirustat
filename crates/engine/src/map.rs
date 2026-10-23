@@ -218,6 +218,8 @@ impl Session {
         self.map.generation = self.map.generation.wrapping_add(1);
         // Duplicate groups hold node ids of the old tree.
         self.invalidate_duplicates();
+        // Any replacement of the tree ends a snapshot view; `snapshot.load` sets it again afterwards.
+        self.snapshots.viewing = None;
     }
 
     /// Generation of the tiles returned by [`Session::map_view_async`]; changes whenever they change.
