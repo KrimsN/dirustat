@@ -223,3 +223,8 @@ New entries go on top. Format: `docs/progress-docs.md`.
 - Landed: `engine::snapshot` (`.dirsnap` v1: magic, version, BLAKE3 trailer, varint records in arena order; streamed write via temp + rename, validated read with node cap and hostile-input checks), `snapshot.save|load|compare|list|close` as detached jobs, read-only snapshot view (`session.state.snapshot`, `admit` refuses destructive commands with `not_enabled`), path-based compare (added/removed/grown/shrunk, top-N, prefix), `Platform::pick_open_file` (Win32 `GetOpenFileNameW`), File > Snapshot and Tools > Compare window in the UI, `Tree::set_node_data`.
 - Numbers: engine tests +23 (307 total), UI tests +3, platform 23, model 14.
 - Still open: native dialogs and the comparison window not exercised or screenshotted; not measured on 1M nodes; names matched case-sensitively; duplicate sibling names paired in order; compare walk is single-threaded.
+
+## 2026-10-24 · R0.1 · Claude (first alpha release)
+- Landed: version scheme and channel admission rules (`docs/releasing.md`), workspace version `0.1.0-alpha.1`, repository URL fixed to `KrimsN/dirustat`, `CHANGELOG.md`, `.github/workflows/release.yml` (tag `v*` -> Windows zip + sha256 + GitHub pre-release), install section in README.
+- Verified: see the release run of tag `v0.1.0-alpha.1`.
+- Still open: signing and installer (M6), Linux/macOS artifacts, console window next to the GUI, QA pass of M5, retest of QA-147.

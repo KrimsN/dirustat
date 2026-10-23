@@ -4,7 +4,11 @@
 
 A fast disk-space analyzer in pure Rust: "where did my space go?" in the style of WinDirStat, at WizTree speed.
 
-> Status: **M1 and M2 done, M3 (NTFS MFT fast path) code-complete.** Working desktop app (egui/eframe on wgpu): directory tree, treemap, file-type list, scan, logical/allocated size modes, command palette, JSON control channel, CLI and MCP server. Remaining for M3: the 1M-file MFT measurement outlier. Next: M4 (delete to recycle bin, reveal in file manager, cleanups, search, filters). A QA pass found 23 bugs, 20 of them are fixed. Details: [ROADMAP.md](ROADMAP.md), [plan/STATUS.md](plan/STATUS.md).
+> Status: **alpha** ([0.1.0-alpha.1](CHANGELOG.md)). M1, M2, M4 and M5 done, M3 (NTFS MFT fast path) code-complete. Working desktop app (egui/eframe on wgpu): directory tree, treemap with cushion shading, file-type list, scan, search and filters, cleanups, delete to the recycle bin, snapshots, duplicate finder, command palette, JSON control channel, CLI and MCP server. Next: M6 (Linux/macOS, packaging, signed releases). Details: [ROADMAP.md](ROADMAP.md), [plan/STATUS.md](plan/STATUS.md), release rules: [docs/releasing.md](docs/releasing.md).
+
+## Install (alpha, Windows x86_64)
+
+Download `dirustat-<version>-windows-x86_64.zip` from [Releases](https://github.com/KrimsN/dirustat/releases), check it against the `.sha256` file and unpack. The binaries are unsigned, so SmartScreen may warn. Run `dirustat.exe` (add `--demo` to try it on synthetic data); run it elevated to use the fast NTFS MFT scan. This is an alpha: read the "Known issues" of the release before deleting anything.
 
 ![diRUSTat main window: directory tree, treemap and file-type list (synthetic demo data)](docs/img/main-dark.png)
 

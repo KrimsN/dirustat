@@ -25,6 +25,7 @@ The approach is borrowed from [storytold](https://github.com/storytold) (photocr
 | `docs/contributing.md` | Rules: clean-room, tests, layers, style, commits; the "add a command" checklist |
 | `docs/never-crash.md` | The never-crash standard (outranks features) |
 | `docs/safety.md` | Rules for destructive operations (deleting user files) |
+| `docs/releasing.md` | Versioning, release channels (alpha/beta/rc/stable), which defects may ship in which channel, publishing |
 | `docs/engineering.md` | Code conventions: errors, concurrency, dependencies, comments |
 | `docs/testing.md` | Test pyramid, fixtures, fuzzing, property tests |
 | `docs/performance.md` | Budgets, how to measure, hot paths |

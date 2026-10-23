@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: build and publish (windows-x86_64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check tag against Cargo.toml
+        id: ver
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          crate=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$version" != "$crate" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo.toml version $crate" >&2
+            exit 1
+          fi
+          case "$version" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build
+        run: cargo build --release --locked -p dirustat -p dirustat-cli
+
+      - name: Smoke test
+        run: |
+          target/release/dirustat-cli.exe --help
+          mkdir -p smoke/sub
+          echo hello > smoke/sub/a.txt
+          target/release/dirustat-cli.exe scan smoke
+          target/release/dirustat.exe --demo --screenshot smoke.png --exit-after-screenshot
+          test -s smoke.png
+
+      - name: Package
+        id: pack
+        run: |
+          name="dirustat-${{ steps.ver.outputs.version }}-windows-x86_64"
+          mkdir "$name"
+          cp target/release/dirustat.exe target/release/dirustat-cli.exe "$name/"
+          cp LICENSE-MIT LICENSE-APACHE README.md CHANGELOG.md "$name/"
+          7z a "$name.zip" "./$name" > /dev/null
+          sha256sum "$name.zip" > "$name.zip.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Release notes from CHANGELOG
+        run: |
+          awk -v v="${{ steps.ver.outputs.version }}" '
+            /^## \[/ { if (on) exit; on = index($0, "[" v "]") > 0; next }
+            on { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flag=""
+          if [ "${{ steps.ver.outputs.prerelease }}" = "true" ]; then flag="--prerelease"; fi
+          gh release create "$GITHUB_REF_NAME" $flag \
+            --title "diRUSTat ${{ steps.ver.outputs.version }}" \
+            --notes-file notes.md \
+            "${{ steps.pack.outputs.name }}.zip" \
+            "${{ steps.pack.outputs.name }}.zip.sha256"

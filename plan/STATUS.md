@@ -2,7 +2,8 @@
 
 > A snapshot for hand-off between agent sessions. Overwrite at the end of every session (it is not a journal; the journal is `log/devlog.md`).
 
-- **Updated:** 2026-10-23 (M5 done: M5.1-M5.6 landed on `main`)
+- **Updated:** 2026-10-24 (first pre-release `v0.1.0-alpha.1` prepared; rules in `docs/releasing.md`, notes in `CHANGELOG.md`)
+- **Releases:** scheme and admission rules per channel are in `docs/releasing.md`; releases are built by `.github/workflows/release.yml` on a `v*` tag. Next pre-release: bump `Cargo.toml`, add a `CHANGELOG.md` section, tag.
 - **Milestone:** **M5 done** (G-018, G-019, G-020, G-066, G-067 closed). M1, M2 and M4 done (M4 with known issues, see `docs/roadmap.md` exit criteria). M3 is code-complete; its exit criterion (1M-file MFT scan within 3 s) was met in 2 of 3 elevated runs on 2026-10-15, the 3.26 s outlier is G-052 and needs another elevated human run.
 - **Parity:** WinDirStat 12/34 done (18 partial), WizTree 5/12 done (5 partial) (`docs/target-app-parity.md`, the source of truth for totals).
 - **Tests:** see the last `cargo xtask ci`. The wasm32 target is now installed, so `wasm-core` runs locally (`cargo check --target wasm32-unknown-unknown` for `model` and `treemap` was green in M5.6).
