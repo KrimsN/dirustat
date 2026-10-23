@@ -289,14 +289,18 @@ fn bad_targets_are_refused_without_touching_the_disk() {
         (f.out("x.json").to_string_lossy().into_owned(), "other format's extension"),
         (f.out("noext").to_string_lossy().into_owned(), "no extension"),
         (missing_dir.to_string_lossy().into_owned(), "missing directory"),
-        ("\\\\server\\share\\x.csv".to_owned(), "UNC"),
         ("//server/share/x.csv".to_owned(), "UNC slashes"),
-        ("\\\\?\\GLOBALROOT\\Device\\x.csv".to_owned(), "device path"),
         ("x".repeat(40_000) + ".csv", "too long"),
         (inside.join("x.csv").to_string_lossy().into_owned(), "inside the scan"),
         (inside.join("..").join("scan").join("x.csv").to_string_lossy().into_owned(), "inside the scan via .."),
     ];
-    for (path, what) in cases {
+    // Backslash forms are plain relative file names off Windows.
+    let windows_only = [
+        ("\\\\server\\share\\x.csv".to_owned(), "UNC"),
+        ("\\\\?\\GLOBALROOT\\Device\\x.csv".to_owned(), "device path"),
+    ];
+    let windows_only = windows_only.into_iter().filter(|_| cfg!(windows));
+    for (path, what) in cases.into_iter().chain(windows_only) {
         let err = f.session.execute("export.csv", &json!({ "path": path })).unwrap_err();
         assert_eq!(err.code(), "invalid_params", "{what}: {err}");
     }
