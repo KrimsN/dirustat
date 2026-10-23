@@ -1,6 +1,6 @@
 # Roadmap
 
-> Status: 2026-10-23 · revision 8 · **Current focus: M4 leftovers, then M5** (cushion shading, export, snapshots). M1, M2 and M4 are done (M4 with known issues, below); M3 code is done but its exit criterion "measured ≤ 3 s per 1M files" is still NOT met (M3.5 / G-052 need an elevated human run on a VHDX). M4 leftovers: G-059, G-060, G-016 remainder (G-062 closed 2026-10-23).
+> Status: 2026-10-23 · revision 9 · **Current focus: M5** (cushion parameters, export, snapshots, duplicates; M5.1 cushion shading landed 2026-10-23). M1, M2 and M4 are done (M4 with known issues, below); M3 code is done but its exit criterion "measured ≤ 3 s per 1M files" is still NOT met (M3.5 / G-052 need an elevated human run on a VHDX). M4 leftovers (parallel, low priority): G-059, G-060, G-016 remainder.
 
 | Milestone | Result | Main gaps | Estimate |
 |---|---|---|---|
@@ -9,7 +9,7 @@
 | **M2** Commands and control | Command registry, control, CLI, MCP, screenshots, settings | G-008…G-011 | **done 2026-10-13** (leftover UI: G-011; follow-ups G-025…G-028) |
 | **M3** Fast MFT | `dirustat-ntfs`, fallback, administrator rights | G-012, G-013 | **code done 2026-10-13**; measurement (M3.5) pending |
 | **M4** Actions | Recycle bin, file manager, cleanups, search, filters, safe deletion | G-014…G-017 | **done 2026-10-19** with known issues (leftovers G-059, G-060, G-016 remainder; G-062 closed 2026-10-23) |
-| **M5** Visual polish and data | Cushion, export, snapshots, comparison, duplicates | G-018…G-020 | 2-3 weeks |
+| **M5** Visual polish and data | Cushion, export, snapshots, comparison, duplicates | G-018…G-020 | **in progress** (M5.1 done 2026-10-23; M5.2-M5.6 open, see `plan/execution-plan.md`) |
 | **M6** Cross-platform and release | Linux/macOS, packaging, signed releases | G-021, G-022 | 2 weeks |
 | **M7** Product | Localizations, accessibility, user documentation | G-023 | 2 weeks |
 
@@ -19,12 +19,13 @@
 - **M2:** every command is callable from the UI, CLI, control and MCP; the hostile test is green; an agent takes a screenshot through `ui.screenshot`.
 - **M3:** a 1M-file MFT scan takes ≤ 3 s (measured in the devlog); without rights there is a transparent fallback; MFT parser fuzzing finds no crashes.
 - **M4:** destructive commands satisfy `docs/safety.md`, with refusal tests. **Met 2026-10-19 with known issues:** confirmation, protected paths, recycle by default, dry run, stale-tree and real-subtree re-check, local-roots-only, journal and refusal tests exist, and QA-116..QA-146 are fixed with regression tests shown to fail without their fix. The M4.10 fixes (QA-139..QA-146) were not independently retested by QA. Known issues: permanent delete holds the session lock in the UI, CLI and `cleanup.run` (G-062, QA-144 residual); identity is name-based (no file id in the model) and the case fold is ASCII-only; the MFT backend, the real recycle bin, reveal/properties windows and real mapped network drives are unverified.
-- **M5:** cushion shading is within the frame budget; snapshots are saved and compared.
+- **M5:** cushion shading is within the frame budget; snapshots are saved and compared. **Status 2026-10-23:** cushion shading landed (100k nodes at 1080p about 12 ms per layout on a background thread, budget row 25 ms, `enforce = false`); the budget is not yet enforced or measured on 1M nodes (M5.6); export, snapshots and duplicates are open (M5.3-M5.5).
 - **M6:** CI is green on Windows/Linux/macOS and a release builds automatically.
 - **M7:** localizations and an accessibility checklist.
 
 ## Revision history
 
+- 2026-10-23 · r9: M5 started (M5.1 cushion shading done); current focus is M5; M4 leftovers run in parallel.
 - 2026-10-23 · r8: G-062 closed (lock-free deletes and cleanups, UI worker thread).
 - 2026-10-19 · r7: M4 marked done with known issues; current focus moved to M4 leftovers then M5.
 - 2026-10-13 · r1: milestones M0-M7.

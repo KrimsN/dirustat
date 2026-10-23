@@ -39,6 +39,19 @@ M2.1 `CommandSpec` and registry (`engine/src/cmd/*`); M2.2 move M1 actions into 
 
 M3.1 Win32 FFI module (open the volume, read blocks), the only unsafe; M3.2 MFT record parsing (fixups, attributes, data runs) + fuzzing; M3.3 build the tree from parent ids; M3.4 fallback when rights are missing; M3.5 measure on a VHDX with 1M files; M3.6 administrator rights request in the UI.
 
-## M4-M7
+## M4
+
+M4.1-M4.11 are described in `log/devlog.md` (platform services, search and filters, destructive commands, cleanups, UI, QA fixes, lock-free deletes).
+
+## M5: Visual polish and data
+
+- **M5.1** (done 2026-10-23, G-018 first half): cushion shading (van Wijk algorithm, `crates/treemap/src/cushion.rs`), background renderer `crates/ui/src/cushion_view.rs`, command `treemap.cushion` (View > Cushion shading), setting `treemap.cushion`, budget row `treemap_cushion_shading_100k_nodes_1080p` (`enforce = false`).
+- **M5.2** (G-018 remainder): cushion parameters (height, scale, ambient, diffuse, light) in settings, Preferences UI, `treemap.grid`.
+- **M5.3** (G-019): CSV/JSON/PNG export, including the PNG of the shaded treemap reusing `cushion_view::render`.
+- **M5.4** (G-019): scan snapshots save/load and comparison.
+- **M5.5** (G-020): duplicate finder.
+- **M5.6** (G-018): enforce the cushion budget, re-measure on 1M nodes, fill sub-pixel slivers, run the wasm32 check.
+
+## M6-M7
 
 See `docs/roadmap.md` and `docs/gaps.md`; task detail is added to this file when a milestone is entered.
