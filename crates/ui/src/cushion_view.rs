@@ -11,7 +11,9 @@ use dirustat_treemap::{CushionConfig, Rect, Shader};
 use egui::{Color32, ColorImage, TextureHandle, TextureId, TextureOptions};
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 /// Most pixels one cushion image may have (64 MB of RGBA). Larger panels are rendered at a lower
 /// resolution and stretched, so a huge window cannot exhaust memory.
@@ -67,21 +69,42 @@ pub struct CushionInput {
     pub config: CushionConfig,
 }
 
+/// Largest image side used when the backend does not report a texture limit (egui's own default).
+pub const FALLBACK_MAX_SIDE: usize = 2048;
+
 /// Image size and pixel scale for a panel of `bounds_w x bounds_h` points at `pixels_per_point`.
-/// `None` for an empty or non-finite panel. The scale is reduced when the image would exceed
-/// [`MAX_PIXELS`].
-pub fn image_geometry(bounds_w: f32, bounds_h: f32, pixels_per_point: f32) -> Option<([usize; 2], f32)> {
+/// `None` for an empty or non-finite panel. The scale is reduced (keeping the aspect ratio) until the
+/// image has at most [`MAX_PIXELS`] pixels and neither side exceeds `max_side`, the GPU's texture size
+/// limit (`0` means unknown: [`FALLBACK_MAX_SIDE`]); a texture larger than the limit is a backend error.
+pub fn image_geometry(
+    bounds_w: f32,
+    bounds_h: f32,
+    pixels_per_point: f32,
+    max_side: usize,
+) -> Option<([usize; 2], f32)> {
     if !(bounds_w.is_finite() && bounds_h.is_finite() && bounds_w >= 1.0 && bounds_h >= 1.0) {
         return None;
     }
+    let max_side = if max_side == 0 { FALLBACK_MAX_SIDE } else { max_side };
     let mut scale = if pixels_per_point.is_finite() { pixels_per_point } else { 1.0 };
     scale = scale.clamp(SCALE_RANGE.0, SCALE_RANGE.1);
     let area = bounds_w * bounds_h * scale * scale;
     if area > MAX_PIXELS {
         scale *= (MAX_PIXELS / area).sqrt();
     }
-    let side = |points: f32| to_len((points * scale).round().max(1.0));
+    let limit = to_len_f32(max_side);
+    let longest = bounds_w.max(bounds_h) * scale;
+    if longest > limit {
+        scale *= limit / longest;
+    }
+    // Rounding may land one pixel above the limit; the clamp keeps the hard guarantee.
+    let side = |points: f32| to_len((points * scale).round().max(1.0)).min(max_side);
     Some(([side(bounds_w), side(bounds_h)], scale))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn to_len_f32(v: usize) -> f32 {
+    v as f32
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -102,6 +125,11 @@ fn scaled(r: Rect, scale: f32) -> Rect {
 /// Renders the picture: leaf tiles (and remainder tiles) filled with their colour times the cushion
 /// brightness, everything else in the background colour. Pure and deterministic.
 pub fn render(input: &CushionInput) -> ColorImage {
+    render_until(input, &AtomicBool::new(false)).unwrap_or_default()
+}
+
+/// Like [`render`], but gives up (`None`) as soon as `cancel` is set; checked once per tile.
+pub fn render_until(input: &CushionInput, cancel: &AtomicBool) -> Option<ColorImage> {
     let [w, h] = input.size;
     let bg = input.background;
     let mut image = ColorImage::filled([w, h], Color32::from_rgb(bg[0], bg[1], bg[2]));
@@ -124,6 +152,9 @@ pub fn render(input: &CushionInput) -> ColorImage {
     let surfaces = shader.tile_surfaces(&parents, &rects);
     let (iw, ih) = (u32::try_from(w).unwrap_or(u32::MAX), u32::try_from(h).unwrap_or(u32::MAX));
     for ((tile, rect), surface) in input.tiles.iter().zip(&rects).zip(&surfaces) {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         if !tile.leaf {
             continue;
         }
@@ -136,7 +167,18 @@ pub fn render(input: &CushionInput) -> ColorImage {
             }
         });
     }
-    image
+    Some(image)
+}
+
+/// How long the tree revision must stay unchanged before a render job starts. While a scan advances
+/// the revision faster than this, flat tiles are shown instead of burning CPU on pictures that are
+/// outdated before they arrive.
+pub const SETTLE: Duration = Duration::from_millis(300);
+
+/// An outstanding render job: the key it renders and the flag that makes it stop early.
+struct Running {
+    key: CushionKey,
+    cancel: Arc<AtomicBool>,
 }
 
 /// Background-thread state shared with the UI thread.
@@ -147,11 +189,14 @@ struct Slot {
     /// A finished image waiting for upload.
     result: Option<(CushionKey, ColorImage)>,
     /// A job is outstanding.
-    running: Option<CushionKey>,
+    running: Option<Running>,
     /// The last key whose job failed (panic or no thread): not retried until the key changes.
     failed: Option<CushionKey>,
     /// Jobs started so far (tests watch it to prove the cache holds).
     started: u64,
+    /// The revision seen on the last call and when it last changed (`None`: never changed).
+    seen_revision: Option<u64>,
+    changed_at: Option<Instant>,
 }
 
 type Shared = Arc<Mutex<Slot>>;
@@ -176,15 +221,37 @@ fn shared(ctx: &egui::Context) -> Shared {
 /// Returns the texture to paint for `key` (possibly an older picture of the same tree while the right
 /// one renders), or `None` while there is nothing to show yet. When the picture for `key` is missing
 /// and `may_start` is set, a background job is started; `build` copies the tiles and is only called
-/// then (`None` from it marks the key as failed so it is not retried every frame). Never blocks.
+/// then (`None` from it marks the key as failed so it is not retried every frame). A job is also held
+/// back until the tree revision has been stable for [`SETTLE`], and a running job whose picture can no
+/// longer be used (the revision changed) is told to stop. Never blocks.
 pub fn texture_for(
     ctx: &egui::Context,
     key: &CushionKey,
     may_start: bool,
     build: impl FnOnce() -> Option<CushionInput>,
 ) -> Option<TextureId> {
+    texture_for_at(ctx, key, may_start, (Instant::now(), SETTLE), build)
+}
+
+/// [`texture_for`] with an explicit clock and settle time (`(now, settle)`), so the gating is testable.
+fn texture_for_at(
+    ctx: &egui::Context,
+    key: &CushionKey,
+    may_start: bool,
+    (now, settle): (Instant, Duration),
+    build: impl FnOnce() -> Option<CushionInput>,
+) -> Option<TextureId> {
     let slot = shared(ctx);
     let mut guard = lock(&slot);
+    if guard.seen_revision != Some(key.revision) {
+        if guard.seen_revision.is_some() {
+            guard.changed_at = Some(now);
+        }
+        guard.seen_revision = Some(key.revision);
+    }
+    if let Some(run) = guard.running.as_ref().filter(|r| !r.key.can_stand_in_for(key)) {
+        run.cancel.store(true, Ordering::Relaxed);
+    }
     if let Some((k, image)) = guard.result.take()
         && k.can_stand_in_for(key)
     {
@@ -193,25 +260,33 @@ pub fn texture_for(
     }
     let current = guard.texture.as_ref().is_some_and(|(k, _)| k == key);
     if may_start && !current && guard.running.is_none() && guard.failed != Some(*key) {
-        match build() {
-            Some(input) => start_job(ctx, &slot, &mut guard, *key, input),
-            None => guard.failed = Some(*key),
+        let waited = guard.changed_at.map_or(settle, |t| now.saturating_duration_since(t));
+        if waited < settle {
+            // Come back when the revision has had time to settle; nothing else wakes the UI.
+            ctx.request_repaint_after(settle.saturating_sub(waited));
+        } else {
+            match build() {
+                Some(input) => start_job(ctx, &slot, &mut guard, *key, input),
+                None => guard.failed = Some(*key),
+            }
         }
     }
     guard.texture.as_ref().filter(|(k, _)| k.can_stand_in_for(key)).map(|(_, t)| t.id())
 }
 
 fn start_job(ctx: &egui::Context, slot: &Shared, guard: &mut Slot, key: CushionKey, input: CushionInput) {
-    guard.running = Some(key);
+    let cancel = Arc::new(AtomicBool::new(false));
+    guard.running = Some(Running { key, cancel: Arc::clone(&cancel) });
     guard.started = guard.started.saturating_add(1);
     let (job_slot, job_ctx) = (Arc::clone(slot), ctx.clone());
     let spawned = std::thread::Builder::new().name("dirustat-cushion".to_owned()).spawn(move || {
-        let image = catch_unwind(AssertUnwindSafe(|| render(&input))).ok();
+        let outcome = catch_unwind(AssertUnwindSafe(|| render_until(&input, &cancel)));
         let mut g = lock(&job_slot);
         g.running = None;
-        match image {
-            Some(image) => g.result = Some((key, image)),
-            None => g.failed = Some(key),
+        match outcome {
+            Ok(Some(image)) => g.result = Some((key, image)),
+            Ok(None) => {} // superseded: the next frame starts a job for the current key
+            Err(_) => g.failed = Some(key),
         }
         drop(g);
         job_ctx.request_repaint();
@@ -222,10 +297,13 @@ fn start_job(ctx: &egui::Context, slot: &Shared, guard: &mut Slot, key: CushionK
     }
 }
 
-/// Drops the texture (the flat painter is in use, so the memory goes back).
+/// Drops the texture (the flat painter is in use, so the memory goes back) and stops a running job.
 pub fn release(ctx: &egui::Context) {
     let slot = shared(ctx);
     let mut guard = lock(&slot);
+    if let Some(run) = &guard.running {
+        run.cancel.store(true, Ordering::Relaxed);
+    }
     guard.texture = None;
     guard.result = None;
 }
@@ -338,15 +416,50 @@ mod tests {
 
     #[test]
     fn image_geometry_scales_caps_and_rejects_garbage() {
-        assert_eq!(image_geometry(800.0, 600.0, 1.0), Some(([800, 600], 1.0)));
-        assert_eq!(image_geometry(800.0, 600.0, 2.0), Some(([1600, 1200], 2.0)));
-        assert_eq!(image_geometry(800.0, 600.0, f32::NAN), Some(([800, 600], 1.0)));
-        assert_eq!(image_geometry(800.0, 600.0, 100.0), Some(([3200, 2400], 4.0)));
-        let (size, scale) = image_geometry(8000.0, 6000.0, 2.0).unwrap_or(([0, 0], 0.0));
+        let g = |w, h, ppp| image_geometry(w, h, ppp, 8192);
+        assert_eq!(g(800.0, 600.0, 1.0), Some(([800, 600], 1.0)));
+        assert_eq!(g(800.0, 600.0, 2.0), Some(([1600, 1200], 2.0)));
+        assert_eq!(g(800.0, 600.0, f32::NAN), Some(([800, 600], 1.0)));
+        assert_eq!(g(800.0, 600.0, 100.0), Some(([3200, 2400], 4.0)));
+        let (size, scale) = g(8000.0, 6000.0, 2.0).unwrap_or(([0, 0], 0.0));
         assert!(size[0] * size[1] <= 16_100_000 && scale < 2.0, "{size:?} {scale}");
         for bad in [(0.0, 10.0), (10.0, 0.5), (f32::NAN, 10.0), (f32::INFINITY, 10.0), (-5.0, 10.0)] {
-            assert_eq!(image_geometry(bad.0, bad.1, 1.0), None, "{bad:?}");
+            assert_eq!(g(bad.0, bad.1, 1.0), None, "{bad:?}");
         }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn f32_len(v: usize) -> f32 {
+        v as f32
+    }
+
+    #[test]
+    fn image_sides_never_exceed_the_texture_limit_and_keep_the_aspect() {
+        // Wide and tall panels well inside the pixel cap but beyond one side limit.
+        for (w, h, ppp, limit) in [
+            (12_000.0_f32, 1000.0_f32, 1.0_f32, 8192_usize),
+            (1000.0, 12_000.0, 1.0, 8192),
+            (12_000.0, 12_000.0, 1.0, 8192),
+            (3000.0, 400.0, 2.0, 2048),
+            (400.0, 3000.0, 1.0, 2048),
+            (5000.0, 5000.0, 4.0, 16_384),
+            (4097.0, 10.0, 1.0, 4096),
+            (800.0, 600.0, 1.0, 100),
+        ] {
+            let Some((size, scale)) = image_geometry(w, h, ppp, limit) else {
+                panic!("{w}x{h} must have a geometry");
+            };
+            assert!(size[0] <= limit && size[1] <= limit, "{w}x{h} at {ppp} (limit {limit}) gave {size:?}");
+            assert!(size[0] >= 1 && size[1] >= 1 && scale > 0.0 && scale <= ppp);
+            // One scale for both axes: the aspect ratio survives up to pixel rounding.
+            let (ex, ey) = (w * scale, h * scale);
+            let off = (f32_len(size[0]) - ex).abs().max((f32_len(size[1]) - ey).abs());
+            assert!(off <= 1.0, "{size:?} vs {ex}x{ey}");
+        }
+        assert_eq!(image_geometry(12_000.0, 1000.0, 1.0, 8192).map(|g| g.0[0]), Some(8192));
+        // An unknown limit (0) falls back to a safe constant.
+        let fallback = image_geometry(12_000.0, 1000.0, 1.0, 0).map(|g| g.0);
+        assert!(fallback.is_some_and(|s| s[0] <= FALLBACK_MAX_SIDE && s[1] <= FALLBACK_MAX_SIDE));
     }
 
     fn key(revision: u64, generation: u64) -> CushionKey {
@@ -361,11 +474,21 @@ mod tests {
     }
 
     fn wait_rendered(ctx: &egui::Context) {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = Instant::now() + Duration::from_secs(10);
         while is_rendering(ctx) {
-            assert!(std::time::Instant::now() < deadline, "render job never finished");
-            std::thread::sleep(std::time::Duration::from_millis(2));
+            assert!(Instant::now() < deadline, "render job never finished");
+            std::thread::sleep(Duration::from_millis(2));
         }
+    }
+
+    /// `texture_for` without the revision-settle delay.
+    fn ask_now(
+        ctx: &egui::Context,
+        k: &CushionKey,
+        may_start: bool,
+        build: impl FnOnce() -> Option<CushionInput>,
+    ) -> Option<TextureId> {
+        texture_for_at(ctx, k, may_start, (Instant::now(), Duration::ZERO), build)
     }
 
     #[test]
@@ -374,7 +497,7 @@ mod tests {
         let k1 = key(1, 1);
         let builds = std::cell::Cell::new(0);
         let ask = |k: &CushionKey| {
-            texture_for(&ctx, k, true, || {
+            ask_now(&ctx, k, true, || {
                 builds.set(builds.get() + 1);
                 Some(input())
             })
@@ -405,9 +528,9 @@ mod tests {
     fn no_job_starts_while_the_layout_is_outstanding() {
         let ctx = egui::Context::default();
         let k = key(1, 1);
-        assert_eq!(texture_for(&ctx, &k, false, || Some(input())), None);
+        assert_eq!(ask_now(&ctx, &k, false, || Some(input())), None);
         assert_eq!(jobs_started(&ctx), 0);
-        assert_eq!(texture_for(&ctx, &k, true, || Some(input())), None);
+        assert_eq!(ask_now(&ctx, &k, true, || Some(input())), None);
         assert_eq!(jobs_started(&ctx), 1);
     }
 
@@ -418,7 +541,7 @@ mod tests {
         let mut calls = 0;
         for _ in 0..5 {
             assert_eq!(
-                texture_for(&ctx, &k, true, || {
+                ask_now(&ctx, &k, true, || {
                     calls += 1;
                     None
                 }),
@@ -427,5 +550,59 @@ mod tests {
         }
         assert_eq!(calls, 1);
         assert_eq!(jobs_started(&ctx), 0);
+    }
+
+    #[test]
+    fn a_revision_that_keeps_changing_never_starts_a_job_until_it_settles() {
+        // A scan advances the revision faster than a picture renders: no job, flat tiles meanwhile.
+        let ctx = egui::Context::default();
+        let t0 = Instant::now();
+        let at = |ms: u64| (t0 + Duration::from_millis(ms), SETTLE);
+        let builds = std::cell::Cell::new(0);
+        let ask = |rev: u64, ms: u64| {
+            texture_for_at(&ctx, &key(rev, rev), true, at(ms), || {
+                builds.set(builds.get() + 1);
+                Some(input())
+            })
+        };
+        assert_eq!(ask(1, 0), None);
+        assert_eq!(jobs_started(&ctx), 1, "the first sight of a tree is not delayed");
+        wait_rendered(&ctx);
+        assert!(ask(1, 10).is_some());
+        // The revision changes every 100 ms for a second: nothing is built or started.
+        for step in 1..=10_u64 {
+            assert_eq!(ask(1 + step, 10 + 100 * step), None, "step {step}");
+        }
+        assert_eq!((builds.get(), jobs_started(&ctx)), (1, 1));
+        // Stable at revision 11 for less than SETTLE: still held back; then it starts.
+        assert_eq!(ask(11, 1010 + 250), None);
+        assert_eq!(jobs_started(&ctx), 1);
+        assert_eq!(ask(11, 1010 + 300), None);
+        assert_eq!(jobs_started(&ctx), 2);
+        assert_eq!(builds.get(), 2);
+    }
+
+    #[test]
+    fn a_job_whose_revision_is_gone_is_cancelled_but_a_resize_does_not_cancel() {
+        let ctx = egui::Context::default();
+        let flag = Arc::new(AtomicBool::new(false));
+        lock(&shared(&ctx)).running = Some(Running { key: key(1, 1), cancel: Arc::clone(&flag) });
+        let _ = ask_now(&ctx, &key(1, 2), false, || None);
+        assert!(!flag.load(Ordering::Relaxed), "same tree, new layout generation: keep rendering");
+        let _ = ask_now(&ctx, &key(2, 3), false, || None);
+        assert!(flag.load(Ordering::Relaxed), "another revision: the picture would be useless");
+        // Switching the effect off also stops it.
+        let off = Arc::new(AtomicBool::new(false));
+        lock(&shared(&ctx)).running = Some(Running { key: key(2, 3), cancel: Arc::clone(&off) });
+        release(&ctx);
+        assert!(off.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn render_stops_early_when_cancelled() {
+        let stop = AtomicBool::new(true);
+        assert!(render_until(&input(), &stop).is_none());
+        stop.store(false, Ordering::Relaxed);
+        assert_eq!(render_until(&input(), &stop).map(|i| i.pixels), Some(render(&input()).pixels));
     }
 }

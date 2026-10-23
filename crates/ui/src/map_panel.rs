@@ -105,7 +105,8 @@ fn cushion_texture(
     may_start: bool,
 ) -> Option<egui::TextureId> {
     let (revision, generation, bounds_bits, allocated) = key;
-    let (size, scale) = cushion_view::image_geometry(bounds.w, bounds.h, ctx.pixels_per_point())?;
+    let max_side = ctx.input(|i| i.max_texture_side);
+    let (size, scale) = cushion_view::image_geometry(bounds.w, bounds.h, ctx.pixels_per_point(), max_side)?;
     let cushion_key = cushion_view::CushionKey {
         revision,
         generation,
@@ -236,7 +237,9 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
             continue;
         }
         if cushion.is_some() {
-            continue; // the texture carries fills, hierarchy and outlines
+            // The texture carries the fills and the hierarchy (the cushion ridges show directory
+            // nesting), so there are deliberately no leaf outlines or directory frames in this mode.
+            continue;
         }
         let screen = to_screen(origin, r);
         if tile.leaf {
