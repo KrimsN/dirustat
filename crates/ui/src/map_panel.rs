@@ -243,10 +243,12 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     let mut hovered_rect = None;
     for (tile, color) in tiles.iter().zip(colors.iter()) {
         let r = tile.rect;
-        if Some(tile.node) == selected {
+        // A remainder tile carries its parent's id but is only a sliver of undrawable children; the
+        // outline belongs to the folder's own tile (G-072, QA-250).
+        if Some(tile.node) == selected && !tile.remainder {
             selected_rect = Some(to_screen(origin, r));
         }
-        if Some(tile.node) == hovered_node {
+        if Some(tile.node) == hovered_node && !tile.remainder {
             hovered_rect = Some((to_screen(origin, r), tile.leaf));
         }
         if r.w < MIN_TILE_PX || r.h < MIN_TILE_PX {
@@ -731,6 +733,86 @@ mod tests {
         let grid = alpha_of_leaf_strokes(&ctx, &mut s, &mut st);
         assert!(plain.contains(&70) && !plain.contains(&170), "{plain:?}");
         assert!(grid.contains(&170) && !grid.contains(&70), "{grid:?}");
+    }
+
+    /// A folder with two big files and many tiny ones (its tiny children merge into a remainder
+    /// tile that carries the folder's id), next to a plain folder.
+    fn remainder_session() -> (Session, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let big = dir.path().join("big");
+        std::fs::create_dir(&big).unwrap();
+        for f in 0..2 {
+            std::fs::write(big.join(format!("f{f}.bin")), vec![1u8; 1_000_000]).unwrap();
+        }
+        for f in 0..300 {
+            std::fs::write(big.join(format!("t{f}.txt")), [1u8]).unwrap();
+        }
+        std::fs::create_dir(dir.path().join("other")).unwrap();
+        std::fs::write(dir.path().join("other").join("o.bin"), vec![1u8; 1_500_000]).unwrap();
+        let handle = dirustat_scan::start(dir.path(), dirustat_scan::ScanOptions::default()).unwrap();
+        let mut s = Session::new();
+        assert_eq!(s.finish_scan(handle), Ok(true));
+        // Allocated sizes would give each tiny file a whole cluster.
+        s.set_map_size_mode(SizeMode::Logical);
+        (s, dir)
+    }
+
+    /// Screen rects of the 2 px accent selection outline in one frame at `size`.
+    fn selection_outlines(ctx: &egui::Context, s: &mut Session, st: &mut UiState, size: (f32, f32)) -> Vec<egui::Rect> {
+        let accent = Tokens::color(Tokens::for_kind(st.theme).accent);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(size.0, size.1))),
+            ..egui::RawInput::default()
+        };
+        let out = ctx.run_ui(input, |ui| show(ui, s, st));
+        let rects = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Rect(r) if r.stroke.width == 2.0 && r.stroke.color == accent => Some(r.rect),
+                _ => None,
+            })
+            .collect();
+        out.drop_without_applying_deltas();
+        rects
+    }
+
+    /// G-072 (QA-250): the outline of a folder was drawn around its remainder sliver (a tile with
+    /// the folder's id, painted later) instead of around the folder, in some window sizes only.
+    #[test]
+    fn a_selected_folder_is_outlined_around_its_own_tile_at_every_size() {
+        for size in [(760.0, 560.0), (1000.0, 300.0), (1920.0, 1080.0)] {
+            let (mut s, _dir) = remainder_session();
+            let (mut st, ctx) = (UiState::default(), egui::Context::default());
+            let bounds = bounds_for_size(size.0, size.1);
+            let _ = selection_outlines(&ctx, &mut s, &mut st, size);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while s.map_poll(bounds) {
+                assert!(std::time::Instant::now() < deadline, "background layout never finished");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            let big = s
+                .tree()
+                .children(s.tree().root())
+                .find(|&c| s.tree().get(c).is_some_and(|n| n.name() == "big"))
+                .unwrap();
+            assert!(s.select_node(big));
+            let tiles = s.map_ready_view().1.tiles().to_vec();
+            let own = tiles.iter().find(|t| t.node == big && !t.remainder).unwrap().rect;
+            assert!(
+                tiles.iter().any(|t| t.node == big && t.remainder),
+                "{size:?}: the fixture must produce a remainder tile for the folder"
+            );
+            let outlines = selection_outlines(&ctx, &mut s, &mut st, size);
+            assert_eq!(outlines.len(), 1, "{size:?}: exactly one selection outline");
+            let r = outlines[0];
+            assert!(r.width() > 20.0 && r.height() > 20.0, "{size:?}: outline {r:?} is a sliver");
+            // The outline is the folder's tile (panel-local rect shifted by the panel origin).
+            assert!(
+                (r.width() - own.w).abs() < 0.01 && (r.height() - own.h).abs() < 0.01,
+                "{size:?}: {r:?} vs {own:?}"
+            );
+        }
     }
 
     #[test]

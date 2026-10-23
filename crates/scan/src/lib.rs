@@ -8,8 +8,8 @@
 //!
 //! # Size policy (the two backends)
 //!
-//! Logical size is the data size on both backends. Hardlinks are charged once (to the first name in
-//! traversal order) on both: via `st_dev`/`st_ino` on Unix and `GetFileInformationByHandle` through
+//! Logical size is the data size on both backends. Hardlinks are charged once (portable walk: to the name with the smallest path; MFT: to the first name in
+//! link-table order) on both: via `st_dev`/`st_ino` on Unix and `GetFileInformationByHandle` through
 //! `dirustat_ntfs::file_identity` on Windows.
 //!
 //! Allocated size ("size on disk") is an estimate on the portable path and exact on the MFT path:
@@ -32,7 +32,7 @@
 //! says which path produced the tree (`ScanOutcome::backend`) and why the fast path was abandoned
 //! (`ScanOutcome::fallback_reason`). Sub-folders of a volume always use the portable walk.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io;
@@ -423,7 +423,7 @@ fn run(
     counters.dirs.fetch_add(1, Ordering::Relaxed);
     spawn(tree.root(), root.to_path_buf(), &mut pending);
 
-    let mut seen_links = HashSet::new();
+    let mut seen_links = LinkOwners::new();
     while pending > 0 {
         let Ok(listing) = rx.recv() else { break };
         pending -= 1;
@@ -438,10 +438,29 @@ fn run(
     ScanOutcome::new(tree, cancel.load(Ordering::Relaxed), ScanBackend::Portable)
 }
 
+/// The name of a multi-link file that currently carries its size.
+#[derive(Debug)]
+struct LinkOwner {
+    path: PathBuf,
+    node: NodeId,
+    /// The node payload with the real size (the node itself is rewritten when it loses ownership).
+    data: NodeData,
+}
+
+type LinkOwners = HashMap<(u64, u64), LinkOwner>;
+
+/// The payload of a further name of a multi-link file: no size, flagged.
+fn as_hardlink_duplicate(mut data: NodeData) -> NodeData {
+    data.logical_size = 0;
+    data.allocated_size = 0;
+    data.attributes |= dirustat_model::ATTR_HARDLINK_DUPLICATE;
+    data
+}
+
 /// Adds the entries of a listing to the tree; returns the sub-directories still to be read.
 fn apply(
     tree: &mut Tree,
-    seen_links: &mut HashSet<(u64, u64)>,
+    seen_links: &mut LinkOwners,
     listing: Listing,
     counters: &Counters,
 ) -> Vec<(NodeId, PathBuf)> {
@@ -452,17 +471,33 @@ fn apply(
     }
     for entry in listing.entries {
         let mut data = entry.data;
-        // A hardlinked file is counted once: later names of the same file keep a node but no size.
-        if entry.link_id.is_some_and(|id| !seen_links.insert(id)) {
-            data.logical_size = 0;
-            data.allocated_size = 0;
-            data.attributes |= dirustat_model::ATTR_HARDLINK_DUPLICATE;
+        // A hardlinked file is counted once: the name with the smallest path keeps the size (G-070,
+        // independent of the order in which workers report directories), the other names keep a
+        // node but no size.
+        let mut displaced = None;
+        let mut link_key = None;
+        if let Some(link) = entry.link_id {
+            let path = listing.path.join(&entry.name);
+            match seen_links.get(&link) {
+                Some(owner) if owner.path <= path => data = as_hardlink_duplicate(data),
+                Some(owner) => displaced = Some((owner.node, owner.data)),
+                None => {}
+            }
+            link_key = Some((link, path));
         }
         let Ok(id) = tree.add_node(listing.dir, &entry.name, entry.kind, data) else {
             // Node limit reached: stop adding, the rest of the disk is not representable.
             counters.errors.fetch_add(1, Ordering::Relaxed);
             break;
         };
+        if let Some((link, path)) = link_key
+            && data.attributes & dirustat_model::ATTR_HARDLINK_DUPLICATE == 0
+        {
+            if let Some((old, old_data)) = displaced {
+                let _ = tree.set_node_data(old, as_hardlink_duplicate(old_data));
+            }
+            seen_links.insert(link, LinkOwner { path, node: id, data });
+        }
         if data.error {
             counters.errors.fetch_add(1, Ordering::Relaxed);
         }
@@ -795,7 +830,7 @@ mod tests {
     #[test]
     fn hardlinked_file_is_counted_once() {
         let mut tree = Tree::new("r");
-        let mut seen = HashSet::new();
+        let mut seen = LinkOwners::new();
         let mk = |name: &str| Entry {
             name: name.to_owned(),
             kind: NodeKind::File,
@@ -816,10 +851,75 @@ mod tests {
         assert_eq!(root.file_count(), 3);
     }
 
+    /// G-070 (QA-151): the owner of a multi-link file is the smallest path, whatever the order in
+    /// which the directory listings arrive.
+    #[test]
+    fn hardlink_owner_does_not_depend_on_listing_order() {
+        for order in [[0usize, 1, 2], [2, 1, 0], [1, 2, 0], [1, 0, 2]] {
+            let mut tree = Tree::new("r");
+            let mut seen = LinkOwners::new();
+            let dirs: Vec<(NodeId, &str)> = ["a", "b", "c"]
+                .iter()
+                .map(|n| (tree.add_child(tree.root(), n, NodeKind::Dir, 0).unwrap(), *n))
+                .collect();
+            for &i in &order {
+                let (dir, name) = dirs[i];
+                let entry = Entry {
+                    name: "f".to_owned(),
+                    kind: NodeKind::File,
+                    data: NodeData::with_size(100),
+                    link_id: Some((1, 7)),
+                    raw_name: None,
+                };
+                let listing = Listing { dir, path: PathBuf::from("r").join(name), entries: vec![entry], error: false };
+                apply(&mut tree, &mut seen, listing, &Counters::default());
+            }
+            tree.aggregate();
+            let sizes: Vec<u64> =
+                dirs.iter().map(|(d, _)| tree.get(*d).unwrap().total_size(SizeMode::Logical)).collect();
+            assert_eq!(sizes, [100, 0, 0], "order {order:?}");
+            assert_eq!(tree.get(tree.root()).unwrap().total_size(SizeMode::Logical), 100);
+        }
+    }
+
+    #[test]
+    fn rescans_of_cross_directory_hardlinks_are_identical() {
+        let tmp = tempfile::tempdir().unwrap();
+        for d in ["a", "b", "c", "m/n", "z"] {
+            fs::create_dir_all(tmp.path().join(d)).unwrap();
+        }
+        write(&tmp.path().join("m/n/orig.bin"), 5000);
+        for link in ["a/l1", "b/l2", "c/l3", "z/l4"] {
+            if fs::hard_link(tmp.path().join("m/n/orig.bin"), tmp.path().join(link)).is_err() {
+                return; // hardlinks unavailable on this file system
+            }
+        }
+        let dump = |t: &Tree| -> Vec<(String, u64, u64)> {
+            let mut v = Vec::new();
+            let mut stack = vec![(t.root(), String::new())];
+            while let Some((id, path)) = stack.pop() {
+                for c in t.children(id) {
+                    if let Some(n) = t.get(c) {
+                        let p = format!("{path}/{}", n.name());
+                        v.push((p.clone(), n.data().logical_size, n.total_size(SizeMode::Logical)));
+                        stack.push((c, p));
+                    }
+                }
+            }
+            v.sort();
+            v
+        };
+        let first = dump(&scan(tmp.path()).tree);
+        assert!(first.contains(&("/a/l1".to_owned(), 5000, 5000)), "smallest path owns the size: {first:?}");
+        for _ in 0..50 {
+            assert_eq!(dump(&scan(tmp.path()).tree), first);
+        }
+    }
+
     #[test]
     fn unreadable_directory_is_flagged_and_walk_continues() {
         let mut tree = Tree::new("r");
-        let mut seen = HashSet::new();
+        let mut seen = LinkOwners::new();
         let dir = tree.add_child(tree.root(), "locked", NodeKind::Dir, 0).unwrap();
         let counters = Counters::default();
         let bad = Listing { dir, path: PathBuf::from("r/locked"), entries: Vec::new(), error: true };

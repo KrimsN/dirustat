@@ -45,7 +45,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             params_doc: "{\"path\": string (the .csv file to write; a local drive, in an existing directory), \
                 \"overwrite\"?: bool (default false: an existing file is refused), \"allow_inside_scan\"?: bool \
                 (default false: a target inside the scanned folder is refused), \"node\"?: u64 (subtree root, \
-                default the scan root), \"max_depth\"?: u32 (levels below the root, default all), \"kind\"?: \
+                default the scan root), \"revision\"?: u64 (the revision \"node\" was read at; any other current \
+                revision is stale_tree and nothing is written), \"max_depth\"?: u32 (levels below the root, default all), \"kind\"?: \
                 \"all\" (default) | \"files\" (files and links) | \"dirs\", \"max_nodes\"?: 1..=20000000 (default \
                 1000000), \"max_bytes\"?: 1..=17179869184 (default 1073741824; the writer stops after the row \
                 that reaches it), \"bom\"?: bool (UTF-8 byte order mark for Excel, default false)}. Writes \
@@ -78,7 +79,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             menu: "",
             shortcut: None,
             params_doc: "{\"path\": string (the .png file to write), \"overwrite\"?: bool, \"allow_inside_scan\"?: \
-                bool (as export.csv), \"node\"?: u64 (subtree to draw, default the scan root), \"width\"?: \
+                bool (as export.csv), \"node\"?: u64 (subtree to draw, default the scan root), \"revision\"?: u64 (as export.csv), \"width\"?: \
                 16..=8192 (default 1600), \"height\"?: 16..=8192 (default 1000; width x height <= 16000000), \
                 \"theme\"?: \"dark\" (default) | \"light\", \"size_mode\"?: \"logical\" | \"allocated\" (default: \
                 session mode)}. Renders a fresh cushion-shaded treemap of that size (not a window capture). \
@@ -106,6 +107,7 @@ struct TableParams {
     overwrite: Option<bool>,
     allow_inside_scan: Option<bool>,
     node: Option<u64>,
+    revision: Option<u64>,
     max_depth: Option<u32>,
     kind: Option<KindName>,
     max_nodes: Option<u64>,
@@ -127,6 +129,7 @@ struct PngParams {
     overwrite: Option<bool>,
     allow_inside_scan: Option<bool>,
     node: Option<u64>,
+    revision: Option<u64>,
     width: Option<u32>,
     height: Option<u32>,
     theme: Option<ThemeName>,
@@ -151,7 +154,15 @@ pub(super) struct ExportJob {
     work: Work,
 }
 
-fn resolve_root(session: &Session, node: Option<u64>) -> Result<NodeId, CommandError> {
+fn resolve_root(session: &Session, node: Option<u64>, revision: Option<u64>) -> Result<NodeId, CommandError> {
+    if let Some(rev) = revision
+        && rev != session.revision()
+    {
+        return Err(CommandError::StaleTree(format!(
+            "node ids were read at revision {rev} but the tree is at revision {}; re-read the ids",
+            session.revision()
+        )));
+    }
     match node {
         None => Ok(session.tree().root()),
         Some(index) => node_by_index(session.tree(), index)
@@ -189,7 +200,7 @@ pub(super) fn begin_table(session: &Session, params: &Value, format: Format) -> 
     if p.bom.is_some() && format != Format::Csv {
         return Err(CommandError::InvalidParams("bom applies to CSV only".to_owned()));
     }
-    let root = resolve_root(session, p.node)?;
+    let root = resolve_root(session, p.node, p.revision)?;
     let sel = Selection {
         root,
         max_depth: p.max_depth,
@@ -226,7 +237,7 @@ pub(super) fn begin_png(session: &Session, params: &Value) -> Result<ExportJob, 
         )));
     }
     let request = PngRequest {
-        root: resolve_root(session, p.node)?,
+        root: resolve_root(session, p.node, p.revision)?,
         width,
         height,
         mode: p.size_mode.map_or_else(|| session.map_size_mode(), SizeModeName::mode),

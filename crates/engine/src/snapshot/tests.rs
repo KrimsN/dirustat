@@ -437,3 +437,28 @@ fn deep_chain_compare_is_fast_and_bounded() {
     }
     assert!(r.changes.iter().any(|c| c.path.starts_with(".../")), "an over-long path is cut");
 }
+
+/// G-070 (QA-151): the name that carries the size of a cross-directory hardlink must not depend
+/// on the parallel walk order, so two scans of an unchanged tree compare as identical.
+#[test]
+fn rescans_of_a_hardlinked_tree_compare_identical() {
+    let tmp = tempfile::tempdir().unwrap();
+    for d in ["a", "b", "c", "d/e"] {
+        std::fs::create_dir_all(tmp.path().join(d)).unwrap();
+    }
+    std::fs::File::create(tmp.path().join("d/e/orig.bin")).unwrap().set_len(5000).unwrap();
+    for (i, link) in ["a/l1", "b/l2", "c/l3", "d/l4"].iter().enumerate() {
+        if std::fs::hard_link(tmp.path().join("d/e/orig.bin"), tmp.path().join(link)).is_err() {
+            return; // hardlinks unavailable on this file system
+        }
+        std::fs::write(tmp.path().join(format!("a/solo{i}")), [0u8; 10]).unwrap();
+    }
+    let scan = || dirustat_scan::start(tmp.path(), dirustat_scan::ScanOptions::default()).unwrap().join().unwrap().tree;
+    let base = scan();
+    for _ in 0..30 {
+        let other = scan();
+        let r = compare::compare(&base, &other, &opts(SizeMode::Logical));
+        assert!(r.identical, "{:?}", r.counts);
+        assert_eq!(r.base_total, r.other_total);
+    }
+}

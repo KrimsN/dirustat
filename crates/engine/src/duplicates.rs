@@ -451,7 +451,15 @@ fn size_candidates(ctx: &Ctx<'_>, params: &Params) -> Option<Vec<Item>> {
     // Directories to visit; the folded path is only tracked when a prefix restricts the walk.
     let root = tree.root();
     let root_path = prefix.as_ref().map(|_| fold(tree.get(root).map_or("", |n| n.name())));
-    let mut stack: Vec<(NodeId, Option<String>, bool)> = vec![(root, root_path, prefix.is_none())];
+    // The root directory is subject to the prefix like any other directory.
+    let root_relation = match (prefix.as_deref(), root_path.as_deref()) {
+        (Some(prefix), Some(root_path)) => relation(root_path, prefix),
+        _ => Relation::Inside,
+    };
+    let mut stack: Vec<(NodeId, Option<String>, bool)> = Vec::new();
+    if root_relation != Relation::Outside {
+        stack.push((root, root_path, root_relation == Relation::Inside));
+    }
     let mut visited = 0u64;
     while let Some((dir, path, inside)) = stack.pop() {
         visited += 1;

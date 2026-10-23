@@ -625,6 +625,38 @@ mod tests {
         assert_eq!(status["summary"]["candidates"], 0);
     }
 
+    /// QA-150: files directly in the scan root are inside a prefix that equals or contains the root.
+    #[test]
+    fn path_prefix_covering_the_root_keeps_files_in_the_root_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "big1.bin", &bytes(3000, 1));
+        write(dir.path(), "sub/big2.bin", &bytes(3000, 1));
+        write(dir.path(), "sub/deep/big3.bin", &bytes(3000, 1));
+        write(dir.path(), "sub/s1", &bytes(2000, 2));
+        write(dir.path(), "sub/s2", &bytes(2000, 2));
+        let mut s = scanned(dir.path());
+        let root = s.node_path(s.tree().root()).unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let baseline = find(&mut s, &json!({}));
+        let base_files = baseline["summary"]["total_files"].clone();
+        assert_eq!(base_files, 5, "{baseline}");
+        let parent = std::path::Path::new(&root).parent().unwrap().to_string_lossy().into_owned();
+        for prefix in [root.clone(), format!("{root}{sep}"), parent] {
+            let status = find(&mut s, &json!({"path_prefix": prefix}));
+            assert_eq!(status["summary"]["total_files"], base_files, "prefix {prefix}: {status}");
+            assert_eq!(status["summary"]["wasted_bytes"], baseline["summary"]["wasted_bytes"], "prefix {prefix}");
+            assert!(names(&groups(&mut s)[0]).contains(&"big1.bin".to_owned()), "prefix {prefix}");
+        }
+        // A sub directory excludes the root file.
+        let status = find(&mut s, &json!({"path_prefix": format!("{root}{sep}sub")}));
+        assert_eq!(status["summary"]["total_files"], 4, "{status}");
+        let found = groups(&mut s).iter().flat_map(names).collect::<Vec<_>>();
+        assert!(!found.contains(&"big1.bin".to_owned()), "{found:?}");
+        // A sibling of the root contains nothing.
+        let status = find(&mut s, &json!({"path_prefix": format!("{root}-sibling")}));
+        assert_eq!(status["summary"]["total_files"], 0, "{status}");
+    }
+
     #[test]
     fn groups_are_ordered_by_wasted_space_and_limited() {
         let dir = tempfile::tempdir().unwrap();

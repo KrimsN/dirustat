@@ -187,6 +187,36 @@ fn limits_subtree_depth_and_kind_select_rows() {
     assert!(!f.out("bad.json").exists());
 }
 
+/// QA-152: `node` may carry the revision it was read at; a stale one is `stale_tree`.
+#[test]
+fn node_with_a_stale_revision_is_refused_and_nothing_is_written() {
+    let mut f = Fixture::new();
+    let docs = f.session.tree().children(f.session.tree().root()).next().unwrap().index();
+    let rev = f.session.revision();
+    for (id, name) in [("export.csv", "a.csv"), ("export.json", "a.json")] {
+        let ok = f.run(id, name, json!({"node": docs, "revision": rev})).unwrap();
+        assert_eq!(ok["rows"], 5, "matching revision exports the subtree");
+        // Without a revision the call keeps working.
+        let bare = f.run(id, &format!("bare-{name}"), json!({"node": docs})).unwrap();
+        assert_eq!(bare["rows"], 5);
+        let stale = f.run(id, &format!("stale-{name}"), json!({"node": docs, "revision": rev + 1})).unwrap_err();
+        assert_eq!(stale.code(), "stale_tree", "{stale}");
+        assert!(!f.out(&format!("stale-{name}")).exists());
+    }
+    // The tree changes: the old revision no longer matches, even without `node`.
+    let mut t = Tree::new(f.session.tree().get(f.session.tree().root()).unwrap().name());
+    t.add_node(t.root(), "only.bin", NodeKind::File, data(1, None)).unwrap();
+    t.aggregate();
+    f.session.replace_tree(t);
+    for params in [json!({"node": docs, "revision": rev}), json!({"revision": rev})] {
+        let err = f.run("export.csv", "after.csv", params).unwrap_err();
+        assert_eq!(err.code(), "stale_tree");
+    }
+    assert!(!f.out("after.csv").exists());
+    let now = f.session.revision();
+    assert_eq!(f.run("export.csv", "now.csv", json!({"revision": now})).unwrap()["rows"], 2);
+}
+
 #[test]
 fn deep_chains_stream_without_recursion() {
     let mut t = Tree::new("r");
