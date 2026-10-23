@@ -62,7 +62,7 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 
 ## C. Beyond parity (not counted in percentages)
 
-Duplicate file finder (size → partial hash → full hash), change history between snapshots with a chart, dark/high-contrast themes, a command palette, agent control (control/MCP), CLI export, cleanup templates, "what can be deleted" hints (caches, temp files).
+Duplicate file finder (`duplicates.find`; size → partial hash → full hash → optional byte compare; Tools > Duplicate files; landed 2026-10-23, M5.5, fixtures and headless UI tests, window not yet screenshotted), change history between snapshots with a chart, dark/high-contrast themes, a command palette, agent control (control/MCP), CLI export, cleanup templates, "what can be deleted" hints (caches, temp files).
 
 ## D. Metrics
 
@@ -74,6 +74,7 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 
 ## Revision history
 
+- 2026-10-23 · r12: M5.5 duplicate finder (G-020) landed. It is a "beyond parity" feature (section C), so no row and no total changes: WinDirStat done 11/34 (partial 16), WizTree done 2/12 (partial 4) as before.
 - 2026-10-13 · r1: initial matrix.
 - 2026-10-13 · r2: translated to English.
 - 2026-10-13 · r3: after M1.7-M1.11, rows A1, A3, A4, A5, A7-A10, A13, A17, A18, A20-A23, B11 moved to `partial`; none is `done` because there is no screenshot verification (`ui.screenshot` arrives in M2.5), the actions are not commands yet (M2.2), and cushion shading, keyboard navigation and some columns are missing.

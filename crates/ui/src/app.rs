@@ -10,7 +10,7 @@ use crate::screenshot::{Region, SaveOptions, ScreenshotStatus, Screenshots};
 use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
 use crate::{
-    cleanups_ui, drive_picker, ext_panel, journal_ui, look_prefs, map_panel, prefs, search_panel, toast, tree_panel,
+    cleanups_ui, drive_picker, duplicates_ui, ext_panel, journal_ui, look_prefs, map_panel, prefs, search_panel, toast, tree_panel,
 };
 use dirustat_control::{SharedSession, lock_session, share};
 use dirustat_engine::{CommandError, CommandInfo, FastPathStatus, Session, execute_unlocked};
@@ -814,6 +814,7 @@ impl DirustatApp {
         self.elevation_help_window(&ctx);
         self.cleanups_window(&ctx);
         self.journal_window(&ctx);
+        self.duplicates_window(&ctx);
         self.delete_dialog_window(&ctx);
         toast::show(&ctx, &mut self.state, &self.tokens);
         let entries = Self::palette_entries(&infos);
@@ -1032,6 +1033,27 @@ impl DirustatApp {
         };
         if let Err(message) = result {
             toast::push(state, toast::ToastKind::Error, message);
+        }
+    }
+
+    /// Tools > Duplicate files. Keeps polling while a search runs, also with the window closed.
+    fn duplicates_window(&mut self, ctx: &egui::Context) {
+        if !self.state.duplicates.open && !self.state.duplicates.is_running() {
+            return;
+        }
+        let selected = {
+            let mut session = lock_session(&self.session);
+            duplicates_ui::refresh(&mut session, &mut self.state.duplicates);
+            session.selection().map(|n| n.index())
+        };
+        if self.state.duplicates.is_running() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if !self.state.duplicates.open {
+            return;
+        }
+        if let Some(action) = duplicates_ui::show(ctx, &mut self.state.duplicates, selected, &self.tokens) {
+            duplicates_ui::apply(&mut lock_session(&self.session), &mut self.state.duplicates, action);
         }
     }
 

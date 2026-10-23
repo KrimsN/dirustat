@@ -11,6 +11,7 @@ pub mod delete_dialog;
 pub mod demo;
 pub mod drive_picker;
 pub mod export_png;
+pub mod duplicates_ui;
 pub mod ext_colors;
 pub mod ext_panel;
 pub mod fonts;

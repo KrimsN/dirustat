@@ -8,6 +8,7 @@
 mod cleanup;
 mod detached;
 mod export;
+mod duplicates;
 mod file;
 mod list;
 mod look;
@@ -25,6 +26,7 @@ mod treemap;
 mod view;
 
 pub use detached::{DetachedJob, JobOutcome, Prepared, execute_unlocked};
+pub(crate) use duplicates::DupState;
 pub use privileges::{FastPathStatus, fast_path_status, volume_root_of};
 pub use tree::tree_node_path;
 
@@ -90,6 +92,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(file::specs());
         all.extend(cleanup::specs());
         all.extend(export::specs());
+        all.extend(duplicates::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all

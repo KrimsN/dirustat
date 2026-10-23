@@ -216,6 +216,8 @@ impl Session {
         // A layout still being computed belongs to the old tree: its result is dropped.
         self.map.inflight = None;
         self.map.generation = self.map.generation.wrapping_add(1);
+        // Duplicate groups hold node ids of the old tree.
+        self.invalidate_duplicates();
     }
 
     /// Generation of the tiles returned by [`Session::map_view_async`]; changes whenever they change.
