@@ -46,11 +46,13 @@ M4.1-M4.11 are described in `log/devlog.md` (platform services, search and filte
 ## M5: Visual polish and data
 
 - **M5.1** (done 2026-10-23, G-018 first half): cushion shading (van Wijk algorithm, `crates/treemap/src/cushion.rs`), background renderer `crates/ui/src/cushion_view.rs`, command `treemap.cushion` (View > Cushion shading), setting `treemap.cushion`, budget row `treemap_cushion_shading_100k_nodes_1080p` (`enforce = false`).
-- **M5.2** (G-018 remainder): cushion parameters (height, scale, ambient, diffuse, light) in settings, Preferences UI, `treemap.grid`.
-- **M5.3** (G-019): CSV/JSON/PNG export, including the PNG of the shaded treemap reusing `cushion_view::render`.
-- **M5.4** (G-019): scan snapshots save/load and comparison.
-- **M5.5** (G-020): duplicate finder.
-- **M5.6** (G-018): enforce the cushion budget, re-measure on 1M nodes, fill sub-pixel slivers, run the wasm32 check.
+- **M5.2** (done 2026-10-23, G-018 remainder): cushion parameters (height, scale, ambient, diffuse, light) in settings, Preferences UI, `treemap.grid`.
+- **M5.3** (done 2026-10-23, G-019): CSV/JSON/PNG export, including the PNG of the shaded treemap reusing `cushion_view::render`.
+- **M5.4** (done 2026-10-23, G-019): scan snapshots save/load and comparison.
+- **M5.5** (done 2026-10-23, G-020): duplicate finder.
+- **M5.6** (done 2026-10-23, G-018): enforce the cushion budget, re-measure on 1M nodes, close gap pixels, free-space band, run the wasm32 check.
+
+M5 is done; leftovers are listed in `plan/STATUS.md`.
 
 ## M6-M7
 

@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-23 · revision 15 · WinDirStat done 12/34 (partial 18), WizTree done 5/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-23 · revision 16 · WinDirStat done 12/34 (partial 18), WizTree done 5/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -74,6 +74,7 @@ Duplicate file finder (`duplicates.find`; size → partial hash → full hash �
 
 ## Revision history
 
+- 2026-10-23 · r16: no row changes; verified that the totals match `ROADMAP.md` (WinDirStat 12/34, partial 18; WizTree 5/12, partial 5) after M5 closed.
 - 2026-10-23 · r15: M5.6: row 12 (free space) missing -> partial, row 14 (cushion shading) partial -> done; WinDirStat done 12/34 (partial 18), WizTree unchanged.
 - 2026-10-23 · r12: M5.5 duplicate finder (G-020) landed. It is a "beyond parity" feature (section C), so no row and no total changes: WinDirStat done 11/34 (partial 16), WizTree done 2/12 (partial 4) as before.
 - 2026-10-13 · r1: initial matrix.
