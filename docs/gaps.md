@@ -1,6 +1,6 @@
 # Gaps: the ranked work list
 
-> Status: 2026-10-23 · revision 27 (G-018 closed, M5.6; G-019 closed: snapshots and comparison, M5.4; G-020 closed: duplicate finder, M5.5; M5.2: G-066 and G-067 closed, G-018 remainder shrunk; M5 in progress: M5.1 cushion shading landed, G-018 partial; closed G-064, G-065, G-053, G-054; new G-066, G-067, G-068; open M4 leftovers G-059, G-060, G-016 remainder) · M4 code complete: G-014, G-015, G-017, G-062, G-063 closed · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048), G-042 closed later; G-040, G-045 partial; G-052 (MFT outlier, renumbered) and G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
+> Status: 2026-10-23 · revision 30 (G-070, G-072 closed; G-069, G-071 closed; M5 QA: G-069..G-072 added; G-018 closed, M5.6; G-019 closed: snapshots and comparison, M5.4; G-020 closed: duplicate finder, M5.5; M5.2: G-066 and G-067 closed, G-018 remainder shrunk; M5 in progress: M5.1 cushion shading landed, G-018 partial; closed G-064, G-065, G-053, G-054; new G-066, G-067, G-068; open M4 leftovers G-059, G-060, G-016 remainder) · M4 code complete: G-014, G-015, G-017, G-062, G-063 closed · QA fixes landed: 8 QA gaps closed (G-038, G-039, G-041, G-043, G-044, G-046, G-047, G-048), G-042 closed later; G-040, G-045 partial; G-052 (MFT outlier, renumbered) and G-055 open; M3 code landed (G-012 and G-013 reduced to real-volume verification, measurement and extras; G-031-G-037 added from the M3 review). Take items top to bottom within the current milestone (`plan/STATUS.md`). When you close one, move it to "Closed" with a date and update the parity documents.
 
 Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** remaining parity, **P3** beyond parity.
 
@@ -44,6 +44,10 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 
 | ID | Date | What |
 |---|---|---|
+| G-069 | 2026-10-23 | QA-150: `size_candidates` now evaluates the `path_prefix` relation for the root directory (inside, ancestor or outside) instead of treating it as outside, so files directly in the scan root are kept for a prefix equal to, or an ancestor of, the root; regression test `path_prefix_covering_the_root_keeps_files_in_the_root_directory`. |
+| G-071 | 2026-10-23 | QA-152/QA-153: `export.csv`, `export.json` and `export.png` take an optional `revision` with `node` (any other current revision is `stale_tree`, nothing written); `docs/control-protocol.md` export section aligned with the implementation (param names, columns, `kind` values, `max_bytes`). Tests in `cmd/export/tests.rs`. |
+| G-070 | 2026-10-23 | QA-151: the portable walk now charges a multi-link file to the name with the smallest path (order independent), whatever order the parallel workers report directories in; a name that loses ownership later is rewritten to size 0 plus `ATTR_HARDLINK_DUPLICATE`. Tests: `hardlink_owner_does_not_depend_on_listing_order`, `rescans_of_cross_directory_hardlinks_are_identical` (50 scans, scan crate), `rescans_of_a_hardlinked_tree_compare_identical` (30 scan + compare runs, engine). The MFT backend was reviewed and is deterministic (owner is the first link in the sorted link table, see the devlog). |
+| G-072 | 2026-10-23 | QA-250: root cause was not the window size but the remainder tile: a folder whose tiny children merge into a sliver tile has two tiles with its node id, and the panel kept the last one for the selection (and hover) outline, so the outline became a 1-2 px sliver whenever the folder had such a tile at that size. The outline and hover rect now come from the folder's own (non-remainder) tile; test `a_selected_folder_is_outlined_around_its_own_tile_at_every_size` at 760x560, 1000x300 and 1920x1080 (fails without the fix), screenshot verified at 760x560 after a resize. |
 | G-000 | 2026-10-13 | M0: workspace, lints, xtask layers/ci, documentation, CI |
 | G-042 | 2026-10-18 | QA-102: `Session::map_poll` / `map_ready_view` / `map_view_async` compute the hierarchical layout on one background thread (`Arc<Tree>` shared with it); a resize or a new size step keeps showing the previous layout rescaled to the new bounds with a "Laying out..." hint, a replaced tree drops the outstanding result. Not yet measured in the real window on `1m-seed1` |
 | G-001 | 2026-10-13 | M1.1: model with logical/allocated sizes (`SizeMode`), `NodeData`, file/dir/error counters, mtime, attributes |
@@ -85,6 +89,9 @@ Priority: **P0** infrastructure and reliability, **P1** core parity, **P2** rema
 
 ## Revision history
 
+- 2026-10-23 · r30: M5 QA fixes (scan, ui): G-070 and G-072 moved to Closed.
+- 2026-10-23 · r29: M5 QA fixes (engine): G-069 and G-071 moved to Closed.
+- 2026-10-23 · r28: M5 QA pass (`docs/qa/reports/2026-10-23-m5-summary.md`): S3 bugs QA-150, QA-151, QA-152, QA-250 added as G-069..G-072; verdict GO with known issues.
 - 2026-10-23 · r27: M5.4: G-019 closed (snapshots and comparison).
 - 2026-10-23 · r26: M5.6: G-018 moved to Closed (budgets enforced, gap pixels closed, `show_free_space` real, wasm check run).
 - 2026-10-23 · r25: M5.5 merged: G-020 closed (duplicate finder).

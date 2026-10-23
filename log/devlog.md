@@ -2,6 +2,17 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-23 · M5 QA fixes (scan, ui) · Claude
+- Landed: G-070 (QA-151): the portable walk charges a multi-link file to the name with the smallest path (`LinkOwner` map in `apply`, a displaced owner is rewritten to size 0 plus `ATTR_HARDLINK_DUPLICATE`), so the result no longer depends on the order in which parallel workers report directories. G-072 (QA-250): not a window-size bug; a folder with a remainder tile (undrawable tiny children merged, tile carries the folder id) had its selection/hover outline taken from that sliver because the panel kept the last tile with the node id; the panel now ignores remainder tiles for both rects (found by logging the selected rect in the real app and confirming it was a 58x1.8 px rect).
+- Numbers: scan lib tests 74 (3 new), ui 205 (1 new), engine 326 (1 new); regression tests fail without the fixes (checked for the outline test; the listing-order test cannot compile against the old API, its old behaviour is order dependent by construction). 100k fixture portable scan, release, warm cache, runs 2-5: 1.07-1.13 s after vs 1.05-1.12 s before (noise; the hardlink map costs a path join only per multi-link name). The MFT backend was reviewed: the owner is the first link in the link table order (`attach`, sorted by the MFT), which is a function of the volume only, so it is deterministic across scans of an unchanged volume (it may differ from the portable choice; not changed).
+- Verified: screenshot of the real app (debug build, control channel) at 760x560 after a resize from 900x650 shows the 2 px outline around the folder; before the fix it did not. The same run at 1000x300 (984x261 window) shows the outline too.
+- Still open: G-040 (cost of the hardlink identity query, unchanged); the MFT and portable backends may pick different owners for the same multi-link file; remainder-tile ids still resolve hit-tests and search rings to the parent folder (intended).
+
+## 2026-10-23 · M5 QA fixes (engine) · Claude
+- Landed: `size_candidates` evaluates the `path_prefix` relation for the root directory too, so `duplicates.find` with a prefix equal to or above the scan root keeps files directly in the root (QA-150, G-069); `export.csv|json|png` accept `revision` with `node` and answer `stale_tree` for any other current revision (QA-152, G-071); the export section of `docs/control-protocol.md` now matches `params_doc` (QA-153).
+- Numbers: engine lib tests 326 (2 new regression tests, both fail without the fixes).
+- Still open: QA-154, QA-155 (S4) and QA-157 details; `export.*` `node` still has no path addressing.
+
 ## 2026-10-23 · M5 review fixes · Claude
 - Landed: snapshot load refuses `.`/`..`/`:` names (Windows), roots that are not local drive paths (UNC, device, relative) and nesting beyond 4096 levels; `duplicates.find` and `platform.reveal|properties {id}` are `not_enabled` under a snapshot view and id-derived paths in `platform.*` go through `require_local`; `snapshot.compare` keeps ids in the top-N heap and builds paths only for the final entries (capped at 32 000 bytes); `"live"` is refused in compare while a snapshot is shown; in-flight loads reserve a slot against `MAX_LOADED`; `write_atomic` removes its temp file through a drop guard (also on panic); `free_space_split` shows no band for a shown snapshot; duplicate finder workers reuse one buffer and files lost to a dead worker are counted in `problems`.
 - Numbers: engine lib tests 323 (13 new regression tests).

@@ -1,6 +1,6 @@
 # Control protocol and MCP
 
-> Status: 2026-10-23 · revision 10 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
+> Status: 2026-10-23 · revision 13 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
 
 Goal: any action a human can take is available to an agent; the app can be launched, scan a test folder, run commands and take a screenshot without a mouse or keyboard.
 
@@ -92,10 +92,10 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 
 ## Export (`export.*`, G-019)
 
-- `export.csv {path, overwrite?, subtree?, kind?, max_nodes?, max_bytes?, max_depth?, bom?, allow_inside_scan?}` and `export.json {...same}` write the tree (or the subtree under `subtree`, a node id with `revision`, or an exact path) to `path`. Fields per row: `path`, `name`, `kind`, `size` (logical), `allocated`, `files`, `mtime` (Unix seconds), `extension`. Unknown fields: `invalid_params`.
+- `export.csv {path, overwrite?, node?, revision?, kind?, max_nodes?, max_bytes?, max_depth?, bom?, allow_inside_scan?}` and `export.json {...same without bom}` write the tree (or the subtree under `node`, a node id) to `path`. `node` is an id only (no path addressing); with `revision` (the revision the id was read at) any other current revision is `stale_tree` and nothing is written; without it the id is taken as is. `kind` is `all` (default), `files` (files and links) or `dirs`. Columns per row: `path`, `name`, `kind`, `depth`, `logical_size`, `allocated_size`, `file_count`, `mtime` (Unix seconds, empty or null when unknown), `extension`, `error`, `name_lossy`; the root row's `name` is the full root path. Unknown fields: `invalid_params`.
 - CSV is RFC 4180 (CRLF, quoting); a cell starting with `=`, `+`, `-`, `@`, TAB or CR gets a leading `'` (formula-injection guard) and control characters become U+FFFD. JSON is streamed as `{schema: "dirustat.export.v1", scan_root, root, nodes: [...], rows, truncated, truncated_reason}` and keeps exact names (lossy for non-UTF-8).
-- Limits: `max_nodes` (default 1 000 000, hard 20 000 000), `max_bytes` (default 1 GiB, hard 16 GiB), `max_depth`; the result reports `truncated` and the reason instead of failing.
-- `export.png {path, overwrite?, subtree?, width?, height?, theme?, size_mode?, allow_inside_scan?}` renders the cushion-shaded treemap (16..=8192 px per side, at most 16M pixels). It needs the desktop app (the renderer is registered by the UI layer); headless hosts answer `unsupported`. It uses the default cushion look, not the session's settings.
+- Limits: `max_nodes` (default 1 000 000, hard 20 000 000), `max_bytes` (default 1 GiB, hard 16 GiB; the writer stops after the row that reaches it, so the file can exceed it by one row), `max_depth`; the result reports `truncated` and the reason instead of failing.
+- `export.png {path, overwrite?, node?, revision?, width?, height?, theme?, size_mode?, allow_inside_scan?}` renders the cushion-shaded treemap (16..=8192 px per side, at most 16M pixels). It needs the desktop app (the renderer is registered by the UI layer); headless hosts answer `unsupported`. It uses the default cushion look, not the session's settings.
 - Writes are safe: `path` must be a local absolute path with the right extension, in an existing directory, outside system folders and (unless `allow_inside_scan: true`) outside the scanned folder; an existing file is refused unless `overwrite: true`; the file is written to a temporary name and renamed, so a failure never leaves a partial file. Result: `{path, format, rows, bytes, truncated, ...}`.
 - `ui.export_csv`, `ui.export_json`, `ui.export_png` (File > Export) are shell commands: from the UI they open a native save dialog and then run the matching `export.*` command; they are not part of the programmatic surface.
 
@@ -115,6 +115,7 @@ Loopback only, mandatory key, request size limit, rate limit; destructive comman
 
 ## Revision history
 
+- 2026-10-23 · r13: `export.csv|json|png` accept `revision` with `node` (`stale_tree` when stale); export section aligned with the implementation (QA-152, QA-153).
 - 2026-10-23 · r12: M5 review fixes: `platform.reveal|properties {id}` and `duplicates.find` answer `not_enabled` while a snapshot is shown; stricter snapshot load; compare path cap.
 - 2026-10-23 · r11: M5.4: `snapshot.save|load|compare|list|close`, `session.state.snapshot`, shell commands `ui.snapshot_save`, `ui.snapshot_open`, `ui.compare` (G-019 second half).
 - 2026-10-23 · r10: M5.6: `treemap.free_space {enabled?}` (G-018).
