@@ -22,7 +22,7 @@
 
 ## Snapshots (`snapshot.*`, G-019)
 
-A loaded snapshot shown as the current tree is a picture of a past scan, not the disk. While it is shown, `admit` refuses every command flagged `destructive` with `not_enabled` (before `confirm` is even looked at) and the UI disables Delete with a reason; a rescan or `snapshot.close` ends the view. Loading never touches the disk beyond reading the one given file; saving writes only the given `.dirsnap` path atomically and refuses to replace a file without `overwrite: true`. A snapshot file is hostile input (see `docs/never-crash.md`): it cannot name paths to act on, its names may not contain separators or NUL, and it is verified in full before it replaces anything.
+A loaded snapshot shown as the current tree is a picture of a past scan, not the disk. While it is shown, `admit` refuses every command flagged `destructive` with `not_enabled` (before `confirm` is even looked at) and the UI disables Delete with a reason; a rescan or `snapshot.close` ends the view. Loading never touches the disk beyond reading the one given file; saving writes only the given `.dirsnap` path atomically and refuses to replace a file without `overwrite: true`. A snapshot file is hostile input (see `docs/never-crash.md`): it cannot name paths to act on, its names may not contain separators, NUL, `.`/`..` (or `:` on Windows), its root must be a local drive path (a network share or device root is refused at load), nesting is capped at 4096 levels, and it is verified in full before it replaces anything. While a snapshot is shown, commands that turn node ids into real paths (`duplicates.find`, `platform.reveal`/`platform.properties` with an `id`) answer `not_enabled`, and id-derived paths must be local too. Loads in flight count against the cap of 4 snapshots.
 
 ## Rules for agents
 
@@ -70,6 +70,7 @@ Commands: `file.delete` (recycle bin), `file.delete_permanent` (needs `confirm` 
 
 ## Revision history
 
+- 2026-10-23 · r10: M5 review fixes: hostile snapshot names and roots, id-derived path commands refused under a snapshot view.
 - 2026-10-23 · r9: M5.4: destructive commands are refused while a snapshot is the current tree.
 - 2026-10-23 · r8: QA-147: the canonical scan root and move destination must be local; the recycle bin checks the real parent's drive.
 - 2026-10-23 · r7: G-062: lock-free cleanup runs, the app runs confirmed deletes on a worker thread and refuses to quit during one.

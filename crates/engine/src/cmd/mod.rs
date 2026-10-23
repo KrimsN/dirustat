@@ -131,6 +131,17 @@ pub(crate) fn execute_in(
     })
 }
 
+/// Refuses a command that turns node ids into real disk paths while a snapshot is shown: the
+/// tree is a saved file (possibly from another machine or hostile), not the live disk.
+pub(crate) fn refuse_on_snapshot(session: &Session, id: &str) -> Result<(), CommandError> {
+    if session.snapshot_view().is_some() {
+        return Err(CommandError::NotEnabled(format!(
+            "{id}: the tree is a saved snapshot, not the live disk; scan the folder again or close the snapshot"
+        )));
+    }
+    Ok(())
+}
+
 /// The checks every command passes before `run`: `enabled`, the busy gate (no destructive command
 /// and no scan while a detached permanent deletion runs), and `confirm` for destructive commands.
 /// Returns the params `run` gets (`null` becomes `{}`, `confirm` is stripped).

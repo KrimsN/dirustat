@@ -90,11 +90,18 @@ pub struct Report {
     pub changes: Vec<Change>,
 }
 
+/// A top-N candidate. It carries ids, not a path: paths are built only for the final N entries.
+/// Ties on the size change are broken by arena order (deterministic for the same inputs).
 struct Cand(Change);
 
 impl Cand {
-    fn key(&self) -> (u64, Reverse<&str>) {
-        (self.0.delta.unsigned_abs(), Reverse(self.0.path.as_str()))
+    fn key(&self) -> (u64, Reverse<(usize, bool)>) {
+        let at = match (self.0.new_id, self.0.old_id) {
+            (Some(n), _) => (n.index(), true),
+            (None, Some(o)) => (o.index(), false),
+            (None, None) => (0, false),
+        };
+        (self.0.delta.unsigned_abs(), Reverse(at))
     }
 }
 impl PartialEq for Cand {
@@ -122,15 +129,26 @@ fn descend(tree: &Tree, segments: &[String]) -> Option<NodeId> {
     segments.iter().try_fold(tree.root(), |at, seg| find_child(tree, at, seg))
 }
 
-/// Names from `node` up to (not including) `base`, joined with `/`.
+/// Longest path string reported for one change, in bytes. A longer path keeps its tail (the part
+/// nearest the entry) behind a `.../` marker.
+pub const MAX_PATH_BYTES: usize = 32_000;
+
+/// Names from `node` up to (not including) `base`, joined with `/`, at most [`MAX_PATH_BYTES`].
 fn relative_path(tree: &Tree, node: NodeId, base: NodeId) -> String {
     let mut names: Vec<&str> = Vec::new();
+    let mut bytes = 0_usize;
+    let mut cut = false;
     let mut cur = node;
     for _ in 0..=tree.len() {
         if cur == base {
             break;
         }
         let Some(n) = tree.get(cur) else { break };
+        bytes = bytes.saturating_add(n.name().len()).saturating_add(1);
+        if bytes > MAX_PATH_BYTES && !names.is_empty() {
+            cut = true;
+            break;
+        }
         names.push(n.name());
         match n.parent() {
             Some(p) => cur = p,
@@ -138,7 +156,8 @@ fn relative_path(tree: &Tree, node: NodeId, base: NodeId) -> String {
         }
     }
     names.reverse();
-    names.join("/")
+    let joined = names.join("/");
+    if cut { format!(".../{joined}") } else { joined }
 }
 
 pub(crate) fn saturating_delta(old: u64, new: u64) -> i64 {
@@ -192,10 +211,9 @@ impl<'t> Walker<'t> {
         if full && self.heap.peek().is_some_and(|Reverse(least)| abs < least.0.delta.unsigned_abs()) {
             return;
         }
-        let path = self.path_of(ids.0, ids.1);
         self.heap.push(Reverse(Cand(Change {
             kind,
-            path,
+            path: String::new(),
             node_kind,
             old_size,
             new_size,
@@ -315,7 +333,14 @@ pub fn compare(base: &Tree, other: &Tree, opts: &Options) -> Report {
     w.run();
     let c = w.counts;
     let identical = c.added == 0 && c.removed == 0 && c.grown == 0 && c.shrunk == 0;
-    let mut changes: Vec<Change> = w.heap.into_iter().map(|Reverse(Cand(c))| c).collect();
+    let heap = std::mem::take(&mut w.heap);
+    let mut changes: Vec<Change> = heap
+        .into_iter()
+        .map(|Reverse(Cand(mut ch))| {
+            ch.path = w.path_of(ch.old_id, ch.new_id);
+            ch
+        })
+        .collect();
     changes.sort_by(|p, q| q.delta.unsigned_abs().cmp(&p.delta.unsigned_abs()).then_with(|| p.path.cmp(&q.path)));
     Report { base_total, other_total, counts: c, identical, matching: w.matching, changes }
 }

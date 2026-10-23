@@ -283,3 +283,100 @@ fn a_snapshot_of_a_snapshot_view_can_be_saved_again() {
     let (a, b) = (std::fs::read(f.out("a.dirsnap")).unwrap(), std::fs::read(f.out("b.dirsnap")).unwrap());
     assert_eq!(a.len(), b.len());
 }
+
+// ------------------------------------------------------------------------------ M5 review fixes
+
+/// Writes a snapshot file whose root is named `root` (bypassing `snapshot.save`'s checks).
+fn write_with_root(f: &Fixture, name: &str, root: &str) {
+    let mut t = sample();
+    t.set_node_name(t.root(), root).unwrap();
+    let file = std::fs::File::create(f.out(name)).unwrap();
+    format::write(file, &t, false, 0).unwrap();
+}
+
+#[test]
+fn a_hostile_root_is_refused_at_load() {
+    let mut f = Fixture::new();
+    for (i, root) in [r"\host\share", "//host/share", r"\?\UNC\host\share", r"\.\PhysicalDrive0", "relative", ""]
+        .into_iter()
+        .enumerate()
+    {
+        let name = format!("h{i}.dirsnap");
+        write_with_root(&f, &name, root);
+        let err = f.load(&name, json!({})).unwrap_err();
+        assert_eq!(err.code(), "invalid_params", "{root:?}: {err}");
+    }
+    assert!(f.session.snapshot_view().is_none());
+    assert_eq!(f.session.execute("snapshot.list", &json!({})).unwrap()["snapshots"], json!([]));
+}
+
+#[test]
+fn id_derived_paths_are_refused_under_a_snapshot_view() {
+    let mut f = Fixture::new();
+    f.save("a.dirsnap").unwrap();
+    f.load("a.dirsnap", json!({})).unwrap();
+    for (id, params) in [
+        ("platform.reveal", json!({ "id": 1 })),
+        ("platform.properties", json!({ "id": 1 })),
+        ("duplicates.find", json!({})),
+    ] {
+        let err = f.session.execute(id, &params).unwrap_err();
+        assert_eq!(err.code(), "not_enabled", "{id}: {err}");
+        assert!(err.to_string().contains("snapshot"), "{id}: {err}");
+    }
+}
+
+#[test]
+fn compare_with_live_is_refused_while_a_snapshot_is_shown() {
+    let mut f = Fixture::new();
+    f.save("a.dirsnap").unwrap();
+    let id = f.load("a.dirsnap", json!({ "show": false })).unwrap()["id"].as_u64().unwrap();
+    assert!(f.session.execute("snapshot.compare", &json!({ "base": id })).is_ok(), "fine while live is live");
+    f.load("a.dirsnap", json!({})).unwrap();
+    for params in
+        [json!({ "base": id }), json!({ "base": "live", "other": id }), json!({ "base": id, "other": "live" })]
+    {
+        let err = f.session.execute("snapshot.compare", &params).unwrap_err();
+        assert_eq!(err.code(), "invalid_params", "{params}: {err}");
+        assert!(err.to_string().contains("live"), "{err}");
+    }
+    let two = f.session.execute("snapshot.list", &json!({})).unwrap()["snapshots"][0]["id"].as_u64().unwrap();
+    assert!(f.session.execute("snapshot.compare", &json!({ "base": id, "other": two })).is_ok());
+}
+
+#[test]
+fn loads_in_flight_count_against_the_cap() {
+    let mut f = Fixture::new();
+    f.save("a.dirsnap").unwrap();
+    let params = json!({ "path": f.out("a.dirsnap").to_string_lossy(), "show": false });
+    let mut jobs = Vec::new();
+    for _ in 0..MAX_LOADED {
+        match f.session.execute_split("snapshot.load", &params) {
+            Prepared::Job(job) => jobs.push(job),
+            other => panic!("{other:?}"),
+        }
+    }
+    match f.session.execute_split("snapshot.load", &params) {
+        Prepared::Done(Err(e)) => assert_eq!(e.code(), "invalid_params", "{e}"),
+        other => panic!("a load beyond the cap must be refused at begin: {other:?}"),
+    }
+    // Finishing the jobs stores them; none was lost or double counted.
+    for job in jobs {
+        let out = job.run();
+        match f.session.finish_job(out) {
+            Prepared::Done(Ok(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert_eq!(
+        f.session.execute("snapshot.list", &json!({})).unwrap()["snapshots"].as_array().unwrap().len(),
+        MAX_LOADED
+    );
+    // Dropped (never run) jobs free their slots again.
+    f.session.execute("snapshot.close", &json!({ "id": 1 })).unwrap();
+    match f.session.execute_split("snapshot.load", &params) {
+        Prepared::Job(job) => drop(job),
+        other => panic!("{other:?}"),
+    }
+    assert!(f.load("a.dirsnap", json!({ "show": false })).is_ok());
+}

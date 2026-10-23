@@ -18,7 +18,9 @@
 //! The reader treats the file as hostile: sizes are checked against the real file length before
 //! anything is allocated, a parent reference must point at an earlier directory (so cycles and
 //! out-of-range ids cannot be expressed), names are validated, counts are capped, and the checksum
-//! and the end of the file are verified. Nothing here panics.
+//! and the end of the file are verified. A node name is a single plain path component (never `.`,
+//! `..` or, on Windows, one with `:`) and the nesting depth is capped, so an id-derived path cannot
+//! leave the saved root; the command layer additionally requires the root to be a local path. Nothing here panics.
 
 use dirustat_model::{ModelError, NodeData, NodeKind, Tree};
 use std::fmt;
@@ -44,6 +46,8 @@ const TAG_LOSSY: u8 = 1 << 3;
 const TAG_MTIME: u8 = 1 << 4;
 const TAG_RESERVED: u8 = 0xe0;
 const BUF_BYTES: usize = 64 * 1024;
+/// Deepest nesting a snapshot may hold (a hostile file could otherwise build a chain of millions).
+pub const MAX_DEPTH: u16 = 4096;
 
 /// What the header says about a snapshot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -337,6 +341,8 @@ pub fn read<R: Read>(input: R, file_len: u64, max_nodes: u64) -> Result<Loaded, 
 
     let mut tree: Option<Tree> = None;
     let mut name_buf: Vec<u8> = Vec::new();
+    // Nesting depth of every node read so far (index = arena index).
+    let mut depths: Vec<u16> = Vec::new();
     for index in 0..count {
         let parent = if index == 0 { None } else { Some(src.varint()?) };
         let tag = src.u8()?;
@@ -377,6 +383,7 @@ pub fn read<R: Read>(input: R, file_len: u64, max_nodes: u64) -> Result<Loaded, 
                 if kind != NodeKind::Dir {
                     return Err(SnapshotError::Corrupt("the root is not a directory"));
                 }
+                depths.push(0);
                 let mut root = Tree::new(name);
                 let root_id = root.root();
                 root.set_node_data(root_id, data).map_err(model_error)?;
@@ -389,6 +396,16 @@ pub fn read<R: Read>(input: R, file_len: u64, max_nodes: u64) -> Result<Loaded, 
                 if name.is_empty() || name.contains(['/', '\\']) {
                     return Err(SnapshotError::Corrupt("a node name is empty or contains a path separator"));
                 }
+                if name == "." || name == ".." || (cfg!(windows) && name.contains(':')) {
+                    return Err(SnapshotError::Corrupt("a node name is a dot entry or contains a colon"));
+                }
+                let depth = usize::try_from(parent)
+                    .ok()
+                    .and_then(|p| depths.get(p))
+                    .and_then(|d| d.checked_add(1))
+                    .filter(|d| *d <= MAX_DEPTH)
+                    .ok_or(SnapshotError::TooLarge("the tree is nested too deeply"))?;
+                depths.push(depth);
                 let parent_id = usize::try_from(parent)
                     .ok()
                     .and_then(|p| tree.node_at(p))

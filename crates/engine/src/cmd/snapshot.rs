@@ -12,7 +12,7 @@ use super::{CommandSpec, always, parse_params};
 use crate::export::{self, HARD_MAX_NODES};
 use crate::snapshot::compare::{self, ChangeKind, Options};
 use crate::snapshot::format::{self, DEFAULT_LOAD_NODES, SnapshotError};
-use crate::snapshot::{EXTENSION, MAX_LOADED, Meta};
+use crate::snapshot::{EXTENSION, LoadSlot, MAX_LOADED, Meta};
 use crate::{CommandError, Session, SizeModeName, guard, is_local_path, is_unc_path, normalize_scan_root};
 use dirustat_model::{NodeKind, SizeMode, Tree};
 use dirustat_platform::PlatformServices;
@@ -188,6 +188,8 @@ pub(super) struct LoadJob {
     path: PathBuf,
     max_nodes: u64,
     show: bool,
+    /// Keeps a place in the session's snapshot budget while the file is read.
+    slot: LoadSlot,
 }
 
 #[derive(Debug)]
@@ -204,7 +206,18 @@ pub(super) struct CompareJob {
 #[derive(Debug)]
 pub(super) enum Output {
     Done(Result<Value, CommandError>),
-    Loaded { path: String, show: bool, loaded: Result<format::Loaded, CommandError> },
+    Loaded { path: String, show: bool, loaded: Result<format::Loaded, CommandError>, slot: Option<LoadSlot> },
+}
+
+/// A snapshot root is the path of the scanned folder; it must be a local path, because commands
+/// derive real paths from it (a hostile file could name a network share).
+fn require_local_root(tree: &Tree) -> Result<(), CommandError> {
+    let root = tree.get(tree.root()).map(|n| n.name()).unwrap_or_default();
+    if is_local_path(root) && !is_unc_path(root) {
+        Ok(())
+    } else {
+        Err(CommandError::InvalidParams("the snapshot root is not a local drive path; refusing to load it".to_owned()))
+    }
 }
 
 fn from_snapshot_error(path: &Path, e: SnapshotError) -> CommandError {
@@ -232,7 +245,7 @@ impl SnapshotJob {
         };
         match guard::guarded("snapshot", || Ok(self.run_inner())) {
             Ok(out) => out,
-            Err(e) if is_load => Output::Loaded { path, show, loaded: Err(e) },
+            Err(e) if is_load => Output::Loaded { path, show, loaded: Err(e), slot: None },
             Err(e) => Output::Done(Err(e)),
         }
     }
@@ -244,7 +257,8 @@ impl SnapshotJob {
             Self::Load(job) => {
                 let path = job.path.to_string_lossy().into_owned();
                 let show = job.show;
-                Output::Loaded { path, show, loaded: job.run() }
+                let (loaded, slot) = job.run();
+                Output::Loaded { path, show, loaded, slot: Some(slot) }
             }
         }
     }
@@ -270,14 +284,21 @@ impl SaveJob {
 }
 
 impl LoadJob {
-    fn run(self) -> Result<format::Loaded, CommandError> {
+    fn run(self) -> (Result<format::Loaded, CommandError>, LoadSlot) {
+        let loaded = self.read();
+        (loaded, self.slot)
+    }
+
+    fn read(&self) -> Result<format::Loaded, CommandError> {
         let io_err = |e: std::io::Error| CommandError::Platform(format!("cannot read {}: {e}", self.path.display()));
         let file = std::fs::File::open(&self.path).map_err(io_err)?;
         let meta = file.metadata().map_err(io_err)?;
         if !meta.is_file() {
             return Err(CommandError::InvalidParams(format!("{} is not a plain file", self.path.display())));
         }
-        format::read(file, meta.len(), self.max_nodes).map_err(|e| from_snapshot_error(&self.path, e))
+        let loaded = format::read(file, meta.len(), self.max_nodes).map_err(|e| from_snapshot_error(&self.path, e))?;
+        require_local_root(&loaded.tree)?;
+        Ok(loaded)
     }
 }
 
@@ -381,9 +402,9 @@ pub(super) fn begin_load(session: &Session, params: &Value) -> Result<SnapshotJo
     if show {
         check_can_show(session)?;
     }
-    if session.snapshots.items.len() >= MAX_LOADED {
-        return Err(invalid(format!("{MAX_LOADED} snapshots are loaded; close one with snapshot.close first")));
-    }
+    let slot = session.snapshots.reserve().ok_or_else(|| {
+        invalid(format!("{MAX_LOADED} snapshots are loaded or being loaded; close one with snapshot.close first"))
+    })?;
     let max_nodes = match p.max_nodes {
         None => DEFAULT_LOAD_NODES,
         Some(n) if (1..=HARD_MAX_NODES).contains(&n) => n,
@@ -397,7 +418,7 @@ pub(super) fn begin_load(session: &Session, params: &Value) -> Result<SnapshotJo
     if is_unc_path(&text) || !is_local_path(&text) {
         return Err(invalid("snapshots are read from a local drive (no network or device paths)"));
     }
-    Ok(SnapshotJob::Load(LoadJob { path: PathBuf::from(text), max_nodes, show }))
+    Ok(SnapshotJob::Load(LoadJob { path: PathBuf::from(text), max_nodes, show, slot }))
 }
 
 struct Resolved {
@@ -407,15 +428,23 @@ struct Resolved {
 
 fn resolve_source(session: &Session, source: &SourceParam) -> Result<Resolved, CommandError> {
     match source {
-        SourceParam::Name(name) if name == "live" => Ok(Resolved {
-            tree: session.tree_arc(),
-            info: json!({
-                "source": "live",
-                "revision": session.revision(),
-                "root": scan_root_name(session),
-                "snapshot": session.snapshots.viewing,
-            }),
-        }),
+        SourceParam::Name(name) if name == "live" => {
+            if session.snapshot_view().is_some() {
+                return Err(invalid(
+                    "\"live\" is not available while a snapshot is shown (the current tree is not the live disk); \
+                     pass the snapshot id or scan again",
+                ));
+            }
+            Ok(Resolved {
+                tree: session.tree_arc(),
+                info: json!({
+                    "source": "live",
+                    "revision": session.revision(),
+                    "root": scan_root_name(session),
+                    "snapshot": session.snapshots.viewing,
+                }),
+            })
+        }
         SourceParam::Name(other) => Err(invalid(format!("unknown source {other:?}: use \"live\" or a snapshot id"))),
         SourceParam::Id(id) => {
             let snap = session.snapshots.get(*id).ok_or_else(|| invalid(format!("no loaded snapshot with id {id}")))?;
@@ -491,7 +520,7 @@ pub(super) fn begin_compare(session: &Session, params: &Value) -> Result<Snapsho
 pub(super) fn finish(session: &mut Session, output: Output) -> Result<Value, CommandError> {
     match output {
         Output::Done(result) => result,
-        Output::Loaded { path, show, loaded } => {
+        Output::Loaded { path, show, loaded, slot: _slot } => {
             let loaded = loaded?;
             if session.snapshots.items.len() >= MAX_LOADED {
                 return Err(invalid(format!("{MAX_LOADED} snapshots are loaded; close one first")));

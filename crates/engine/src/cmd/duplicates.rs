@@ -131,6 +131,7 @@ struct Finished {
 }
 
 fn run_find(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
+    super::refuse_on_snapshot(session, "duplicates.find")?;
     let p: FindParams = parse_params(params)?;
     if let Some(prefix) = &p.path_prefix
         && (prefix.is_empty() || prefix.contains('\0') || prefix.chars().count() > MAX_PREFIX_CHARS)

@@ -186,6 +186,50 @@ fn forged_files_with_valid_checksums_are_still_checked() {
 }
 
 #[test]
+fn dot_entries_and_colon_names_are_rejected() {
+    let root = rec(None, 0, "R", [0, 0, 0]);
+    let child = |name: &str| forge(2, &[root.clone(), rec(Some(&[0]), 1, name, [1, 1, 0])].concat());
+    for name in [".", ".."] {
+        assert!(decode(&child(name)).is_err(), "{name:?} must be rejected");
+    }
+    assert!(decode(&child("...")).is_ok(), "three dots is an ordinary name");
+    if cfg!(windows) {
+        for name in ["C:evil", "a:b", "x:stream"] {
+            assert!(decode(&child(name)).is_err(), "{name:?} must be rejected on Windows");
+        }
+    }
+}
+
+fn varint(mut v: u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let low = u8::try_from(v & 0x7f).unwrap();
+        v >>= 7;
+        if v == 0 {
+            out.push(low);
+            return out;
+        }
+        out.push(low | 0x80);
+    }
+}
+
+/// A chain of `depth` nested directories below the root.
+fn chain(depth: u64) -> Vec<u8> {
+    let mut records = rec(None, 0, "R", [0, 0, 0]);
+    for i in 1..=depth {
+        records.extend(rec(Some(&varint(i - 1)), 0, "d", [0, 0, 0]));
+    }
+    forge(depth + 1, &records)
+}
+
+#[test]
+fn nesting_beyond_the_depth_cap_is_refused() {
+    let max = u64::from(format::MAX_DEPTH);
+    assert!(decode(&chain(max)).is_ok());
+    assert!(matches!(decode(&chain(max + 1)), Err(SnapshotError::TooLarge(_))));
+}
+
+#[test]
 fn limits_apply_before_allocation() {
     let bytes = encode(&sample(), false);
     let len = bytes.len() as u64;
@@ -202,7 +246,7 @@ fn limits_apply_before_allocation() {
 fn deep_chain_and_wide_tree_round_trip() {
     let mut t = Tree::new("deep");
     let mut at = t.root();
-    for i in 0..30_000 {
+    for i in 0..4000 {
         at = t.add_child(at, &format!("d{i}"), NodeKind::Dir, 0).unwrap();
     }
     for i in 0..2000 {
@@ -363,4 +407,33 @@ fn duplicate_sibling_names_pair_in_order() {
     b.aggregate();
     let r = compare::compare(&a, &b, &opts(SizeMode::Logical));
     assert_eq!((r.counts.removed, r.counts.added, r.counts.unchanged), (1, 0, 1));
+}
+
+/// `depth` nested directories named `name`, with one file of `size` bytes at the bottom.
+fn deep(name: &str, depth: usize, size: u64) -> Tree {
+    let mut t = Tree::new("R");
+    let mut at = t.root();
+    for _ in 0..depth {
+        at = t.add_child(at, name, NodeKind::Dir, 0).unwrap();
+    }
+    t.add_child(at, "f", NodeKind::File, size).unwrap();
+    t.aggregate();
+    t
+}
+
+#[test]
+fn deep_chain_compare_is_fast_and_bounded() {
+    let depth = usize::from(format::MAX_DEPTH) - 1;
+    let long = "n".repeat(200);
+    let (a, b) = (deep(&long, depth, 1), deep(&long, depth, 1000));
+    let mut o = opts(SizeMode::Logical);
+    o.limit = 10;
+    let start = std::time::Instant::now();
+    let r = compare::compare(&a, &b, &o);
+    assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+    assert_eq!((r.changes.len(), r.matching), (1, 1));
+    for ch in &r.changes {
+        assert!(ch.path.len() <= compare::MAX_PATH_BYTES + 8, "path of {} bytes", ch.path.len());
+    }
+    assert!(r.changes.iter().any(|c| c.path.starts_with(".../")), "an over-long path is cut");
 }

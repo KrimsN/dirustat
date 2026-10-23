@@ -103,7 +103,8 @@ impl Session {
     /// the OS. Free space and the scanned size follow the current size mode.
     pub fn free_space_split(&mut self, bounds: Rect) -> FreeSplit {
         let plain = FreeSplit { tree: bounds, band: None, pending: false };
-        if !self.settings.treemap.show_free_space {
+        // A shown snapshot is a past scan: the volume's free space says nothing about it.
+        if !self.settings.treemap.show_free_space || self.snapshot_view().is_some() {
             return plain;
         }
         if self.volume.revision != self.revision {
@@ -241,6 +242,20 @@ mod tests {
         assert_eq!(s.volume_space(), Some(SpaceInfo { total: 1000, free: 50 }));
         s.execute("treemap.free_space", &serde_json::json!({"enabled": false})).unwrap();
         assert_eq!(s.free_space_split(bounds()).band, None);
+    }
+
+    #[test]
+    fn a_shown_snapshot_has_no_free_space_band() {
+        let (_dir, mut s, _fake) = session_with_space(50);
+        s.execute("treemap.free_space", &serde_json::json!({"enabled": true})).unwrap();
+        assert!(settle(&mut s).band.is_some(), "the live tree has a band");
+        let out = tempfile::tempdir().unwrap();
+        let file = out.path().join("a.dirsnap").to_string_lossy().into_owned();
+        s.execute("snapshot.save", &serde_json::json!({ "path": file, "allow_inside_scan": true })).unwrap();
+        s.execute("snapshot.load", &serde_json::json!({ "path": file })).unwrap();
+        assert!(s.snapshot_view().is_some());
+        let split = s.free_space_split(bounds());
+        assert_eq!((split.tree, split.band, split.pending), (bounds(), None, false));
     }
 
     #[test]

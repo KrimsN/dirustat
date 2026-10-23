@@ -25,7 +25,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             menu: "",
             shortcut: None,
             params_doc: "{\"id\": u64} arena index of a node, or {\"path\": string} an absolute path (exactly one). \
-                Opens the OS file manager with the item selected; launches an external window, returns at once. \
+                Opens the OS file manager with the item selected (an id is refused while a snapshot is shown); launches an external window, returns at once. \
                 Returns {path}.",
             destructive: false,
             enabled: always,
@@ -37,7 +37,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             menu: "",
             shortcut: None,
             params_doc: "{\"id\": u64} arena index of a node, or {\"path\": string} an absolute path (exactly one). \
-                Opens the OS properties window of the item; launches a system window, returns at once. \
+                Opens the OS properties window of the item (an id is refused while a snapshot is shown); launches a system window, returns at once. \
                 Returns {path}.",
             destructive: false,
             enabled: always,
@@ -85,13 +85,16 @@ struct PathParams {
 }
 
 /// Resolves `{id | path}` (exactly one) to a path string; an id goes through the tree.
-fn resolve_target(session: &Session, params: &Value) -> Result<String, CommandError> {
+fn resolve_target(session: &Session, id: &str, params: &Value) -> Result<String, CommandError> {
     let p: TargetParams = parse_params(params)?;
     match (p.id, p.path) {
         (Some(index), None) => {
+            super::refuse_on_snapshot(session, id)?;
             let node = super::select::node_by_index(session.tree(), index)
                 .ok_or_else(|| CommandError::InvalidParams(format!("no node with id {index}")))?;
-            session.node_path(node).ok_or_else(|| CommandError::InvalidParams("node has no path".to_owned()))
+            let path =
+                session.node_path(node).ok_or_else(|| CommandError::InvalidParams("node has no path".to_owned()))?;
+            require_local(&path).map(|()| path)
         }
         (None, Some(path)) => require_local(&path).map(|()| path),
         _ => Err(CommandError::InvalidParams("give exactly one of `id` or `path`".to_owned())),
@@ -99,20 +102,20 @@ fn resolve_target(session: &Session, params: &Value) -> Result<String, CommandEr
 }
 
 fn run_reveal(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
-    let path = resolve_target(session, params)?;
+    let path = resolve_target(session, "platform.reveal", params)?;
     session.platform().reveal_in_file_manager(Path::new(&path)).map_err(platform_error)?;
     Ok(json!({ "path": path }))
 }
 
 fn run_properties(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
-    let path = resolve_target(session, params)?;
+    let path = resolve_target(session, "platform.properties", params)?;
     session.platform().show_properties(Path::new(&path)).map_err(platform_error)?;
     Ok(json!({ "path": path }))
 }
 
 /// An explicit `path` parameter must be a local lettered path (`X:\...`): a network or device
 /// namespace can block on the network and would leak credentials to the named host (QA-117).
-/// Paths that come from a node id were produced by a scan and are not re-checked here.
+/// Paths derived from a node id are checked the same way (a loaded snapshot could name anything).
 fn require_local(path: &str) -> Result<(), CommandError> {
     if crate::is_local_path(path) {
         Ok(())

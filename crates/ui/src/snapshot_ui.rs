@@ -326,7 +326,8 @@ mod tests {
     use dirustat_model::{NodeKind, Tree};
 
     fn tree(extra: bool) -> Tree {
-        let mut t = Tree::new("R");
+        // A snapshot root must be a local path.
+        let mut t = Tree::new(&std::env::temp_dir().join("dirustat-demo-root").to_string_lossy());
         t.add_child(t.root(), "a.bin", NodeKind::File, 100).unwrap();
         if extra {
             t.add_child(t.root(), "b.bin", NodeKind::File, 900).unwrap();

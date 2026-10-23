@@ -2142,7 +2142,12 @@ mod tests {
         app.set_folder_picker(fake.clone());
         let ctx = egui::Context::default();
         assert!(app.run_command("ui.snapshot_save").is_err(), "nothing scanned yet");
-        with_small_tree(&app);
+        // A snapshot root must be a local path.
+        let local = std::env::temp_dir().join("dirustat-demo-root").to_string_lossy().into_owned();
+        let mut t = dirustat_model::Tree::new(&local);
+        t.add_child(t.root(), "a.txt", dirustat_model::NodeKind::File, 10).unwrap();
+        t.aggregate();
+        lock_session(&app.session).replace_tree(t);
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("s.dirsnap");
         fake.set_picked_save_file(Some(file.clone()));

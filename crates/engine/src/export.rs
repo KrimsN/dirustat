@@ -462,16 +462,38 @@ pub(crate) fn write_atomic<R>(
 ) -> Result<R, CommandError> {
     let dir = target.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
     let (tmp, mut file) = create_temp(dir).map_err(|e| write_error(target, &e))?;
+    let cleanup = TempGuard(Some(tmp));
     let filled = fill(&mut file).and_then(|r| file.sync_all().map(|()| r));
     drop(file);
     let result = match filled {
-        Ok(r) => finish_move(&tmp, target, overwrite, platform).map(|()| r),
+        Ok(r) => finish_move(cleanup.path(), target, overwrite, platform).map(|()| r),
         Err(e) => Err(write_error(target, &e)),
     };
-    if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+    if result.is_ok() {
+        cleanup.disarm();
     }
     result
+}
+
+/// Removes the temp file on drop unless disarmed, so even a panic in `fill` leaves nothing behind.
+struct TempGuard(Option<PathBuf>);
+
+impl TempGuard {
+    fn path(&self) -> &Path {
+        self.0.as_deref().unwrap_or_else(|| Path::new(""))
+    }
+
+    fn disarm(mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        if let Some(tmp) = self.0.take() {
+            let _ = std::fs::remove_file(tmp);
+        }
+    }
 }
 
 fn finish_move(
@@ -502,6 +524,18 @@ fn finish_move(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_panicking_fill_leaves_no_temp_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("out.bin");
+        let platform = dirustat_platform::FakePlatform::default();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = write_atomic::<()>(&target, false, &platform, |_| panic!("boom"));
+        }));
+        assert!(caught.is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0, "temp file left behind");
+    }
 
     fn cell(text: &str) -> String {
         let mut out = Vec::new();

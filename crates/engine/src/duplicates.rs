@@ -272,7 +272,8 @@ pub fn find(tree: &Tree, params: &Params, cancel: &AtomicBool, progress: &Progre
 
     // Stage 2: partial hashes.
     progress.enter(Stage::PartialHash, items.len());
-    let partials = run_parallel(&ctx, &items, partial_hash);
+    let (partials, lost) = run_parallel(&ctx, &items, partial_hash);
+    problems.add_lost(&ctx, lost);
     if ctx.cancelled() {
         return cancelled(&problems);
     }
@@ -290,7 +291,8 @@ pub fn find(tree: &Tree, params: &Params, cancel: &AtomicBool, progress: &Progre
     let (complete, open): (Vec<_>, Vec<_>) = narrowed.into_iter().partition(|(_, _, complete)| *complete);
     let open_items: Vec<Item> = open.iter().map(|(_, item, _)| *item).collect();
     progress.enter(Stage::FullHash, open_items.len());
-    let fulls = run_parallel(&ctx, &open_items, full_hash);
+    let (fulls, lost) = run_parallel(&ctx, &open_items, full_hash);
+    problems.add_lost(&ctx, lost);
     if ctx.cancelled() {
         return cancelled(&problems);
     }
@@ -324,6 +326,9 @@ pub fn find(tree: &Tree, params: &Params, cancel: &AtomicBool, progress: &Progre
     assemble(groups, params.keep, candidates, collapsed, &ctx, problems)
 }
 
+/// Per-worker scratch buffer for hashing, allocated once per worker and reused for every file.
+type Scratch = Vec<u8>;
+
 /// Problem counting with bounded samples.
 #[derive(Default)]
 struct Problems {
@@ -332,6 +337,18 @@ struct Problems {
 }
 
 impl Problems {
+    /// Files whose result was lost because their worker thread died.
+    fn add_lost(&mut self, ctx: &Ctx<'_>, lost: u64) {
+        if lost == 0 {
+            return;
+        }
+        self.count = self.count.saturating_add(lost);
+        ctx.progress.problems.fetch_add(lost, Ordering::Relaxed);
+        if self.samples.len() < MAX_PROBLEM_SAMPLES {
+            self.samples.push(format!("{lost} file(s) were not checked: a worker thread failed"));
+        }
+    }
+
     fn add(&mut self, ctx: &Ctx<'_>, item: Item, why: &str) {
         self.count = self.count.saturating_add(1);
         ctx.progress.problems.fetch_add(1, Ordering::Relaxed);
@@ -528,27 +545,30 @@ fn worker_count(items: usize) -> usize {
 }
 
 /// Runs `f` for every item on a few worker threads. The result at index `i` belongs to `items[i]`;
-/// `None` when the item was not processed (cancel) or its worker died.
+/// `None` when the item was not processed (cancel) or its worker died. Each worker owns one scratch
+/// buffer. The second value counts the items that were started but lost to a dead worker.
 fn run_parallel<R: Send>(
     ctx: &Ctx<'_>,
     items: &[Item],
-    f: impl Fn(&Ctx<'_>, Item) -> Result<R, Fail> + Sync,
-) -> Vec<Option<Result<R, Fail>>> {
+    f: impl Fn(&Ctx<'_>, Item, &mut Scratch) -> Result<R, Fail> + Sync,
+) -> (Vec<Option<Result<R, Fail>>>, u64) {
     let next = AtomicU64::new(0);
     let mut results: Vec<Option<Result<R, Fail>>> = Vec::new();
     results.resize_with(items.len(), || None);
+    let mut worker_died = false;
     std::thread::scope(|scope| {
         let handles: Vec<_> = (0..worker_count(items.len()))
             .map(|_| {
                 scope.spawn(|| {
                     let mut local: Vec<(usize, Result<R, Fail>)> = Vec::new();
+                    let mut scratch = Scratch::new();
                     loop {
                         if ctx.cancelled() {
                             break;
                         }
                         let i = usize::try_from(next.fetch_add(1, Ordering::Relaxed)).unwrap_or(usize::MAX);
                         let Some(&item) = items.get(i) else { break };
-                        let r = f(ctx, item);
+                        let r = f(ctx, item, &mut scratch);
                         ctx.progress.done.fetch_add(1, Ordering::Relaxed);
                         local.push((i, r));
                     }
@@ -557,14 +577,26 @@ fn run_parallel<R: Send>(
             })
             .collect();
         for handle in handles {
-            for (i, r) in handle.join().unwrap_or_default() {
-                if let Some(slot) = results.get_mut(i) {
-                    *slot = Some(r);
+            match handle.join() {
+                Ok(done) => {
+                    for (i, r) in done {
+                        if let Some(slot) = results.get_mut(i) {
+                            *slot = Some(r);
+                        }
+                    }
                 }
+                Err(_) => worker_died = true,
             }
         }
     });
-    results
+    let lost = if worker_died {
+        let started = usize::try_from(next.load(Ordering::Relaxed)).unwrap_or(usize::MAX).min(items.len());
+        let missing = results.iter().take(started).filter(|r| r.is_none()).count();
+        u64::try_from(missing).unwrap_or(u64::MAX)
+    } else {
+        0
+    };
+    (results, lost)
 }
 
 // ---------------------------------------------------------------- file access
@@ -651,29 +683,29 @@ fn confirm_unchanged(file: &mut File, expected: u64) -> Result<(), Fail> {
     }
 }
 
-fn partial_hash(ctx: &Ctx<'_>, item: Item) -> Result<Partial, Fail> {
+fn partial_hash(ctx: &Ctx<'_>, item: Item, buf: &mut Scratch) -> Result<Partial, Fail> {
     let path = ctx.path(item.id)?;
     let mut file = open_regular(&path, item.size)?;
-    let mut buf = vec![0u8; BUF_LEN];
+    buf.resize(BUF_LEN, 0);
     let mut hasher = blake3::Hasher::new();
     if item.size <= WHOLE_FILE_MAX {
-        feed(ctx, &mut file, item.size, &mut buf, &mut hasher)?;
+        feed(ctx, &mut file, item.size, buf, &mut hasher)?;
         confirm_unchanged(&mut file, item.size)?;
         return Ok(Partial { hash: *hasher.finalize().as_bytes(), complete: true });
     }
-    feed(ctx, &mut file, CHUNK, &mut buf, &mut hasher)?;
+    feed(ctx, &mut file, CHUNK, buf, &mut hasher)?;
     file.seek(SeekFrom::Start(item.size.saturating_sub(CHUNK))).map_err(|e| Fail::Bad(describe(&e)))?;
-    feed(ctx, &mut file, CHUNK, &mut buf, &mut hasher)?;
+    feed(ctx, &mut file, CHUNK, buf, &mut hasher)?;
     confirm_unchanged(&mut file, item.size)?;
     Ok(Partial { hash: *hasher.finalize().as_bytes(), complete: false })
 }
 
-fn full_hash(ctx: &Ctx<'_>, item: Item) -> Result<Digest, Fail> {
+fn full_hash(ctx: &Ctx<'_>, item: Item, buf: &mut Scratch) -> Result<Digest, Fail> {
     let path = ctx.path(item.id)?;
     let mut file = open_regular(&path, item.size)?;
-    let mut buf = vec![0u8; BUF_LEN];
+    buf.resize(BUF_LEN, 0);
     let mut hasher = blake3::Hasher::new();
-    feed(ctx, &mut file, item.size, &mut buf, &mut hasher)?;
+    feed(ctx, &mut file, item.size, buf, &mut hasher)?;
     confirm_unchanged(&mut file, item.size)?;
     Ok(*hasher.finalize().as_bytes())
 }
@@ -810,4 +842,57 @@ fn collapse_identities(
         out.push(kept);
     }
     Some((out, collapsed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn items(n: usize) -> (Tree, Vec<Item>) {
+        let mut tree = Tree::new("R");
+        let mut items = Vec::new();
+        for i in 0..n {
+            if let Ok(id) = tree.add_child(tree.root(), &format!("f{i}"), dirustat_model::NodeKind::File, 1) {
+                items.push(Item { id, size: 1 });
+            }
+        }
+        (tree, items)
+    }
+
+    #[test]
+    fn a_dead_worker_is_counted_not_swallowed() {
+        let (tree, items) = items(40);
+        let cancel = AtomicBool::new(false);
+        let progress = Progress::default();
+        let ctx = Ctx { tree: &tree, cancel: &cancel, progress: &progress };
+        let victim = items.get(7).map(|i| i.id);
+        let (results, lost) = run_parallel(&ctx, &items, |_, item, _| {
+            assert!(Some(item.id) != victim, "simulated worker crash");
+            Ok(())
+        });
+        assert!(lost >= 1, "the files of the dead worker must be reported, got {lost}");
+        let missing = results.iter().filter(|r| r.is_none()).count();
+        assert_eq!(u64::try_from(missing).unwrap(), lost);
+        let mut problems = Problems::default();
+        problems.add_lost(&ctx, lost);
+        assert_eq!(problems.count, lost);
+        assert_eq!(progress.snapshot().problems, lost);
+    }
+
+    #[test]
+    fn workers_reuse_one_buffer() {
+        let (tree, items) = items(30);
+        let cancel = AtomicBool::new(false);
+        let progress = Progress::default();
+        let ctx = Ctx { tree: &tree, cancel: &cancel, progress: &progress };
+        let (results, lost) = run_parallel(&ctx, &items, |_, _, buf| {
+            // The buffer persists across files of one worker: grow it once, keep its capacity.
+            let first = buf.is_empty();
+            buf.resize(BUF_LEN, 0);
+            Ok(first)
+        });
+        assert_eq!(lost, 0);
+        let fresh = results.iter().flatten().filter(|r| matches!(r, Ok(true))).count();
+        assert!(fresh <= worker_count(items.len()), "{fresh} fresh buffers for {} workers", worker_count(items.len()));
+    }
 }
