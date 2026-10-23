@@ -46,7 +46,13 @@ pub(crate) struct LoadSlot(Arc<AtomicUsize>);
 
 impl Drop for LoadSlot {
     fn drop(&mut self) {
-        let _ = self.0.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| Some(n.saturating_sub(1)));
+        // A compare-exchange loop instead of `fetch_update`/`try_update`, whose name depends on the toolchain.
+        let mut current = self.0.load(Ordering::SeqCst);
+        while let Err(seen) =
+            self.0.compare_exchange_weak(current, current.saturating_sub(1), Ordering::SeqCst, Ordering::SeqCst)
+        {
+            current = seen;
+        }
     }
 }
 
