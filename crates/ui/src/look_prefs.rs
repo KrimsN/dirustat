@@ -23,6 +23,7 @@ const FALLBACK_AZIMUTH_DEG: f32 = 225.0;
 pub enum LookAction {
     Cushion(bool),
     Grid(bool),
+    FreeSpace(bool),
     Height(f32),
     Scale(f32),
     Ambient(f32),
@@ -61,6 +62,7 @@ pub fn command_for(action: LookAction, current: &CushionLook) -> (&'static str, 
     match action {
         LookAction::Cushion(on) => ("treemap.cushion", json!({ "enabled": on })),
         LookAction::Grid(on) => ("treemap.grid", json!({ "enabled": on })),
+        LookAction::FreeSpace(on) => ("treemap.free_space", json!({ "enabled": on })),
         LookAction::Height(v) => look(json!({ "height": v })),
         LookAction::Scale(v) => look(json!({ "scale": v })),
         LookAction::Ambient(v) => look(json!({ "ambient": v })),
@@ -91,6 +93,10 @@ pub fn show(ui: &mut egui::Ui, treemap: &TreemapSettings, tokens: &Tokens) -> Op
     let mut grid = treemap.grid;
     if ui.checkbox(&mut grid, "Grid lines").changed() {
         action = Some(LookAction::Grid(grid));
+    }
+    let mut free = treemap.show_free_space;
+    if ui.checkbox(&mut free, "Free space band").changed() {
+        action = Some(LookAction::FreeSpace(free));
     }
     ui.add_enabled_ui(treemap.cushion, |ui| {
         let look = treemap.look.sanitized();
@@ -162,6 +168,7 @@ mod tests {
             LookAction::Cushion(false),
             LookAction::Cushion(true),
             LookAction::Grid(true),
+            LookAction::FreeSpace(true),
             LookAction::Height(0.7),
             LookAction::Scale(0.5),
             LookAction::Ambient(0.3),

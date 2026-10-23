@@ -1,6 +1,6 @@
 # UI design
 
-> Status: 2026-10-23 · revision 4 · draft (implementation in M1/M5).
+> Status: 2026-10-23 · revision 5 · draft (implementation in M1/M5).
 
 ## Layout
 
@@ -31,7 +31,7 @@ Additional surfaces (M4.4): the **search bar** (`ui.toggle_search`, Ctrl+F) unde
 
 ## Treemap
 
-- Squarified layout (`dirustat-treemap`), cushion shading (van Wijk) rendered into one cached texture (`ui::cushion_view`) with user-settable parameters: ridge height, scale per level, ambient and diffuse light, light direction (`treemap.look`), and grid lines (`treemap.grid`). Preferences has a **Treemap** section (checkboxes for cushion and grid, six sliders, "Reset cushion look"); every edit is a command and the treemap behind the window repaints while a slider moves. The texture key contains the theme, the look and the grid flag; a picture with another look stands in until the new one is rendered. Tile colours are cached per `MapKey` (revision, layout generation, size, size mode, theme). A selection that does not survive a rescan is announced once in an info toast.
+- Squarified layout (`dirustat-treemap`), cushion shading (van Wijk) rendered into one cached texture (`ui::cushion_view`) with user-settable parameters: ridge height, scale per level, ambient and diffuse light, light direction (`treemap.look`), and grid lines (`treemap.grid`). Preferences has a **Treemap** section (checkboxes for cushion and grid, six sliders, "Reset cushion look"); every edit is a command and the treemap behind the window repaints while a slider moves. The texture key contains the theme, the look and the grid flag; a picture with another look stands in until the new one is rendered. Tile colours are cached per `MapKey` (revision, layout generation, size, size mode, theme). A selection that does not survive a rescan is announced once in an info toast. The renderer closes one-pixel gaps between neighbouring tiles (their shared edge is computed twice and can differ by float rounding), so no background pixel shows inside the tree. **Free space band** (`treemap.free_space`, View > Free space, Preferences checkbox): the panel is split, the tree (layout, pointer mapping, cushion image) gets the left part and the band the right part, painted with the panel colour and diagonal border-coloured stripes, a label when at least 80 px wide, a tooltip with free, total and scanned bytes; width `free / (scanned + free)` of the panel clamped to 6 px..50 %. Screenshot `docs/img/m56-free-space.png`.
 - Nodes smaller than a threshold (about 2 px) are not laid out. Click selects a node; double click zooms; the tooltip shows path, size and percentage of the parent.
 - Selection is synchronized between the tree, the treemap and the extension list.
 

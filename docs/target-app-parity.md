@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-23 · revision 14 · WinDirStat done 11/34 (partial 18), WizTree done 3/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-23 · revision 15 · WinDirStat done 12/34 (partial 18), WizTree done 3/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -19,9 +19,9 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 9 | Columns: name, share (bar), %, size, items, files, folders, modified, attributes | `tree.columns` | M1 | partial (name, size, % of parent, files, mtime; no share bar, items, folders, attributes) |
 | 10 | Selection sync tree ↔ treemap ↔ extensions | `select.node` | M1 | done 2026-10-13 (registered `select.node` / `select.clear`; tree, map and extension list synced; screenshot `docs/img/m1-main.png`) |
 | 11 | Size mode: logical / on disk | `view.size_mode` | M1 | done 2026-10-13 (registered command, toggle in the UI, `--size-mode` launch flag, persisted in settings; tests) |
-| 12 | "Free space" and "unknown" items | `view.free_space` | M2 | missing |
+| 12 | "Free space" and "unknown" items | `treemap.free_space` | M5 | partial 2026-10-23 (M5.6: free space of the scanned volume as a striped band at the right edge of the treemap, width proportional to free / (scanned + free), tooltip, View > Free space and a Preferences checkbox; asked in the background through the platform layer, tests with a fake platform; screenshot `docs/img/m56-free-space.png`; no "unknown space" item and the free space is a band, not a tile of the hierarchy; G-018) |
 | 13 | Squarified treemap | `treemap.render` | M1 | done 2026-10-13 (layout invariants + extension-coloured rendering, hover tooltip; flat, cushion is row 14; screenshot `docs/img/m1-main.png`) |
-| 14 | Cushion shading | `treemap.cushion` | M5 | partial 2026-10-23 (M5.1: van Wijk cushion shading in `crates/treemap/src/cushion.rs`, background renderer `crates/ui/src/cushion_view.rs` cached by revision/size/theme, command `treemap.cushion` / View > Cushion shading, setting `treemap.cushion` default on; treemap tests 10 -> 22; 100k nodes at 1080p about 12 ms per layout on a background thread, 4K 43.5 ms; checked on the synthetic demo screenshot only; budget `treemap_cushion_shading_100k_nodes_1080p` 25 ms not enforced, not re-measured on 1M nodes, about 12 of 2.07M pixels at 1080p show the background colour, wasm32 check not run locally; G-018) |
+| 14 | Cushion shading | `treemap.cushion` | M5 | done 2026-10-23 (M5.1 and M5.6: M5.1: van Wijk cushion shading in `crates/treemap/src/cushion.rs`, background renderer `crates/ui/src/cushion_view.rs` cached by revision/size/theme, command `treemap.cushion` / View > Cushion shading, setting `treemap.cushion` default on; treemap tests 10 -> 22; 100k nodes at 1080p about 12 ms per layout on a background thread, 4K 43.5 ms; checked on the synthetic demo screenshot only; budget `treemap_cushion_shading_100k_nodes_1080p` 25 ms not enforced, not re-measured on 1M nodes, about 12 of 2.07M pixels at 1080p show the background colour, wasm32 check not run locally; G-018; M5.6: budget rows for 100k and 1M nodes measured (about 12 ms shading at 1080p) and enforced, isolated background pixels between tiles closed, wasm check run; synthetic demo screenshots only, no independent QA pass) |
 | 15 | Treemap options (grid, brightness, height, scale, light) | `treemap.look`, `treemap.grid` | M5 | partial 2026-10-23 (M5.2: `treemap.look` sets height, scale, ambient, diffuse and light direction (validated, persisted as `treemap.look`), `treemap.grid` draws tile edge lines, Preferences "Treemap" section with live sliders and View > Grid lines; engine tests +8, ui tests +14; checked on the synthetic demo screenshots `docs/img/m52-prefs-*.png` only; no separate brightness setting, `show_free_space` is still a placeholder; G-018) |
 | 16 | Zoom into/out of a directory | `view.zoom_in` / `view.zoom_out` | M2 | missing |
 | 17 | Highlight the selection on the treemap | `treemap.highlight` | M1 | partial (selection synced to the map; not visually verified) |
@@ -74,6 +74,7 @@ Duplicate file finder (`duplicates.find`; size → partial hash → full hash �
 
 ## Revision history
 
+- 2026-10-23 · r15: M5.6: row 12 (free space) missing -> partial, row 14 (cushion shading) partial -> done; WinDirStat done 12/34 (partial 18), WizTree unchanged.
 - 2026-10-23 · r12: M5.5 duplicate finder (G-020) landed. It is a "beyond parity" feature (section C), so no row and no total changes: WinDirStat done 11/34 (partial 16), WizTree done 2/12 (partial 4) as before.
 - 2026-10-13 · r1: initial matrix.
 - 2026-10-13 · r2: translated to English.

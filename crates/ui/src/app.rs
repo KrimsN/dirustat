@@ -656,7 +656,7 @@ impl DirustatApp {
                 let next = if session.map_size_mode() == SizeMode::Allocated { "logical" } else { "allocated" };
                 Some(json!({ "mode": next }))
             }
-            "treemap.cushion" | "treemap.grid" => Some(json!({})),
+            "treemap.cushion" | "treemap.grid" | "treemap.free_space" => Some(json!({})),
             "platform.reveal" | "platform.properties" => session.selection().map(|n| json!({ "id": n.index() })),
             _ => {
                 let info = infos.iter().find(|i| i.id == id)?;
@@ -683,6 +683,7 @@ impl DirustatApp {
                 | "view.size_mode"
                 | "treemap.cushion"
                 | "treemap.grid"
+                | "treemap.free_space"
                 | "platform.reveal"
                 | "platform.properties"
                 | "file.delete"
@@ -1183,7 +1184,9 @@ impl DirustatApp {
                 label,
                 shortcut: Self::shortcut_of(i),
                 enabled: i.enabled && satisfied,
-                checked: (i.id == "treemap.cushion" && treemap.cushion) || (i.id == "treemap.grid" && treemap.grid),
+                checked: (i.id == "treemap.cushion" && treemap.cushion)
+                    || (i.id == "treemap.grid" && treemap.grid)
+                    || (i.id == "treemap.free_space" && treemap.show_free_space),
                 disabled_reason: if needs == Needs::Deletable && has_selection { delete_block } else { None },
             };
             add(menu, item);
@@ -2178,6 +2181,7 @@ mod tests {
         for edit in [
             LookAction::Cushion(false),
             LookAction::Grid(true),
+            LookAction::FreeSpace(true),
             LookAction::Height(0.8),
             LookAction::Scale(0.5),
             LookAction::Ambient(0.2),
@@ -2214,6 +2218,35 @@ mod tests {
         assert!(app.run_command("treemap.grid").is_ok());
         assert!(app.session().settings().treemap.grid);
         assert_eq!(item_checked(&app), Some((true, true)));
+    }
+
+    #[test]
+    fn the_free_space_band_narrows_the_tree_and_goes_away_when_switched_off() {
+        let Some(dir) = fixture_dir() else { return };
+        let (mut app, fake) = app_with_fake();
+        fake.set_space(dirustat_platform::SpaceInfo { total: 1_000_000, free: 20_000 });
+        let ctx = egui::Context::default();
+        scan_dir(&mut app, &ctx, dir.path());
+        let root_width = |app: &DirustatApp| app.session().map_ready_view().1.tiles().first().map(|t| t.rect.w);
+        // Runs frames until the root tile's width satisfies `want` (the layout runs in the background).
+        let wait_width = |app: &mut DirustatApp, want: &dyn Fn(f32) -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let _ = frame(app, &ctx);
+                let width = root_width(app);
+                if width.is_some_and(want) || Instant::now() > deadline {
+                    return width;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let full = wait_width(&mut app, &|w| w > 0.0).expect("a layout");
+        assert!(app.run_command("treemap.free_space").is_ok());
+        let narrow = wait_width(&mut app, &|w| w < full).expect("a layout");
+        assert!(narrow < full, "the tree gives way to the band: {narrow} < {full}");
+        assert_eq!(app.session().volume_space().map(|v| v.free), Some(20_000));
+        assert!(app.run_command("treemap.free_space").is_ok());
+        assert_eq!(wait_width(&mut app, &|w| w >= full), Some(full), "band off: the whole panel again");
     }
 
     #[test]

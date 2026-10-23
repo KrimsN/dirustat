@@ -77,7 +77,8 @@ impl Default for SortSetting {
 
 /// Treemap display options, read by the shell's painter. `cushion` is the `treemap.cushion` command,
 /// `grid` the `treemap.grid` command (1-pixel lines along the tile edges), `look` the cushion
-/// constants (`treemap.look`). `show_free_space` is still a placeholder.
+/// constants (`treemap.look`), `show_free_space` the `treemap.free_space` command (a band for the free
+/// space of the scanned volume).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TreemapSettings {

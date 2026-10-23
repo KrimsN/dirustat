@@ -1,6 +1,6 @@
 # Control protocol and MCP
 
-> Status: 2026-10-23 · revision 9 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
+> Status: 2026-10-23 · revision 10 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
 
 Goal: any action a human can take is available to an agent; the app can be launched, scan a test folder, run commands and take a screenshot without a mouse or keyboard.
 
@@ -64,7 +64,7 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 
 ## Command conventions
 
-- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; `duplicates.find`, `duplicates.status`, `duplicates.results`, `duplicates.cancel`, `duplicates.clear`; `treemap.cushion`, `treemap.grid`, `treemap.look`; `cleanup.list`, `cleanup.save`, `cleanup.remove`, `cleanup.preview`, `cleanup.run`; `export.csv`, `export.json`, `export.png`; shell only: `ui.export_csv`, `ui.export_json`, `ui.export_png`).
+- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; `duplicates.find`, `duplicates.status`, `duplicates.results`, `duplicates.cancel`, `duplicates.clear`; `treemap.cushion`, `treemap.grid`, `treemap.free_space`, `treemap.look`; `cleanup.list`, `cleanup.save`, `cleanup.remove`, `cleanup.preview`, `cleanup.run`; `export.csv`, `export.json`, `export.png`; shell only: `ui.export_csv`, `ui.export_json`, `ui.export_png`).
 - Groups: `scan`, `view`, `select`, `tree`, `treemap`, `ext`, `file`, `cleanup`, `search`, `filter`, `export`, `snapshot`, `settings`, `ui` (shell only).
 - Parameters are a JSON object; every field is documented in `params_doc`; unknown fields are an `invalid_params` error.
 
@@ -105,6 +105,7 @@ Loopback only, mandatory key, request size limit, rate limit; destructive comman
 
 ## Revision history
 
+- 2026-10-23 · r10: M5.6: `treemap.free_space {enabled?}` (G-018).
 - 2026-10-23 · r9: M5.5: `duplicates.find|status|results|cancel|clear` (G-020), UI command `ui.duplicates`.
 - 2026-10-23 · r9: M5.3: `export.csv`, `export.json`, `export.png` and the shell commands `ui.export_*` (G-019 first half).
 - 2026-10-23 · r8: G-062: `file.delete` and `cleanup.run` act without the session lock and holds `removal_in_progress` while it runs; the busy refusal now reads "a deletion is still running".
@@ -116,5 +117,5 @@ Loopback only, mandatory key, request size limit, rate limit; destructive comman
 
 ## Treemap appearance
 
-- `treemap.cushion {enabled?}` and `treemap.grid {enabled?}` toggle (omitted = toggle) and return `{enabled}`.
+- `treemap.cushion {enabled?}`, `treemap.grid {enabled?}` and `treemap.free_space {enabled?}` toggle (omitted = toggle) and return `{enabled}`. `treemap.free_space` (setting `treemap.show_free_space`, default off) makes the map show the free space of the scanned volume as a band; the volume is asked in the background and nothing is shown for a root that is not on a local drive or when the query fails; selection and `tile_count` do not include the band.
 - `treemap.look {height?, scale?, ambient?, diffuse?, light?, reset?}` changes the cushion constants and returns `{look}`. Ranges: `height` 0..=4 (default 0.22), `scale` 0..=1 (0.85), `ambient` 0..=1 (0.4), `diffuse` 0..=1 (0.6), `light` `[x, y, z]` direction towards the light (x right, y down, z towards the viewer; `|x|,|y| <= 100`, `z` in 0..=100, length at least 0.001; default `[-1, -1, 2.5]`), `reset` restores the defaults first. A value out of range (or a NaN/infinite one) is `invalid_params` and nothing changes. The same patch is accepted by `settings.set` with key `treemap.look`. A settings file is clamped instead of rejected, so a hand-edited file never produces an unusable look.

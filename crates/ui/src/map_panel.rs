@@ -16,6 +16,10 @@ use std::sync::Arc;
 const MIN_TILE_PX: f32 = 1.0;
 /// Directory frames and leaf outlines are drawn only for tiles at least this large.
 const MIN_OUTLINE_PX: f32 = 5.0;
+/// Distance between the diagonal stripes of the free-space band.
+const FREE_STRIPE_PX: f32 = 10.0;
+/// The free-space band gets a text label when it is at least this wide.
+const FREE_LABEL_MIN_PX: f32 = 80.0;
 /// Width of each of the two rings drawn around a search hit.
 const HIT_RING_PX: f32 = 2.0;
 /// Tiles smaller than this get a single ring.
@@ -146,12 +150,19 @@ fn cushion_texture(
 pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     let tokens = Tokens::for_kind(state.theme);
     let avail = ui.available_size();
-    let bounds = bounds_for_size(avail.x, avail.y);
-    if bounds.w < MIN_TILE_PX || bounds.h < MIN_TILE_PX {
+    let full = bounds_for_size(avail.x, avail.y);
+    if full.w < MIN_TILE_PX || full.h < MIN_TILE_PX {
         return;
     }
-    let (response, painter) = ui.allocate_painter(egui::vec2(bounds.w, bounds.h), Sense::click());
+    let (response, painter) = ui.allocate_painter(egui::vec2(full.w, full.h), Sense::click());
     let origin = response.rect.min;
+    // With the free-space band on, the tree gets the left part of the panel; everything below (layout,
+    // pointer mapping, the cushion image) works on that part, the band is painted separately.
+    let split = session.free_space_split(full);
+    let bounds = split.tree;
+    if split.pending {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    }
     // The layout is computed on a background thread; until it arrives the previous one is shown.
     let layout_pending = session.map_poll(bounds);
     let key = cache_key(session, bounds, state.theme);
@@ -223,7 +234,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     };
     if let Some(texture) = cushion {
         let uv = egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-        painter.image(texture, response.rect, uv, Color32::WHITE);
+        painter.image(texture, to_screen(origin, bounds), uv, Color32::WHITE);
     }
     let frame_stroke = Stroke::new(1.0, Tokens::color(tokens.border));
     // With the grid on, the flat tiles get a clearly visible outline instead of the faint default.
@@ -298,6 +309,21 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     if let Some(screen) = selected_rect {
         painter.rect_stroke(screen, 0.0, Stroke::new(2.0, Tokens::color(tokens.accent)), StrokeKind::Inside);
     }
+    if let Some((band, numbers)) = split.band {
+        paint_free_band(&painter, &tokens, to_screen(origin, band), numbers);
+        let over_band = response.hover_pos().is_some_and(|p| to_screen(origin, band).contains(p));
+        if over_band {
+            response.clone().on_hover_ui_at_pointer(|ui| {
+                ui.strong("Free space");
+                ui.label(format!(
+                    "{} free of {} on the volume",
+                    crate::app::human_size(numbers.free),
+                    crate::app::human_size(numbers.total)
+                ));
+                ui.weak(format!("Scanned: {}", crate::app::human_size(numbers.used)));
+            });
+        }
+    }
     if layout_pending {
         painter.text(
             response.rect.left_top() + egui::vec2(8.0, 6.0),
@@ -333,6 +359,34 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
         }
     }
     context_menu(ui, &response, session, state, (origin, bounds));
+}
+
+/// Paints the free-space band: a muted panel colour with diagonal stripes (so it cannot be mistaken
+/// for a file tile) and, when it is wide enough, a label.
+fn paint_free_band(painter: &egui::Painter, tokens: &Tokens, band: egui::Rect, numbers: dirustat_engine::FreeSpace) {
+    let clip = painter.with_clip_rect(band);
+    clip.rect_filled(band, 0.0, Tokens::color(tokens.panel));
+    let stripe = Stroke::new(1.0, Tokens::color(tokens.border));
+    let mut x = band.left() - band.height();
+    while x < band.right() {
+        clip.line_segment([Pos2::new(x, band.bottom()), Pos2::new(x + band.height(), band.top())], stripe);
+        x += FREE_STRIPE_PX;
+    }
+    clip.rect_stroke(band, 0.0, Stroke::new(1.0, Tokens::color(tokens.border)), StrokeKind::Inside);
+    if band.width() >= FREE_LABEL_MIN_PX {
+        let font = egui::FontId::proportional(12.0);
+        let color = Tokens::color(tokens.text);
+        let backdrop = Tokens::color(tokens.panel);
+        let text = format!(
+            "Free space
+{}",
+            crate::app::human_size(numbers.free)
+        );
+        let galley = painter.layout_no_wrap(text, font, color);
+        let at = band.center() - galley.size() / 2.0;
+        clip.rect_filled(egui::Rect::from_min_size(at, galley.size()).expand(3.0), 2.0, backdrop);
+        clip.galley(at, galley, color);
+    }
 }
 
 /// Right click: selects the tile under the pointer and offers the node context menu for it.

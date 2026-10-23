@@ -149,9 +149,17 @@ pub fn render(input: &CushionInput) -> ColorImage {
 
 /// Like [`render`], but gives up (`None`) as soon as `cancel` is set; checked once per tile.
 pub fn render_until(input: &CushionInput, cancel: &AtomicBool) -> Option<ColorImage> {
+    render_counted(input, cancel).map(|(image, _)| image)
+}
+
+/// [`render_until`] that also reports how many rounding gaps between tiles were closed (see
+/// [`close_gaps`]).
+fn render_counted(input: &CushionInput, cancel: &AtomicBool) -> Option<(ColorImage, usize)> {
     let [w, h] = input.size;
     let bg = input.background;
-    let mut image = ColorImage::filled([w, h], Color32::from_rgb(bg[0], bg[1], bg[2]));
+    // Unpainted pixels start transparent so `close_gaps` can tell them from painted ones; the final pass
+    // makes every pixel opaque.
+    let mut image = ColorImage::filled([w, h], Color32::from_rgba_premultiplied(bg[0], bg[1], bg[2], 0));
     let shader = Shader::new(input.config);
     // Parent links: a tile hangs off the tile of its parent node; a remainder tile off the tile of its
     // own node (it has its parent's id).
@@ -189,7 +197,47 @@ pub fn render_until(input: &CushionInput, cancel: &AtomicBool) -> Option<ColorIm
             draw_grid(&mut image, *rect);
         }
     }
-    Some(image)
+    let closed = close_gaps(&mut image, bg);
+    Some((image, closed))
+}
+
+/// Makes every pixel opaque. A pixel no tile painted whose horizontal or vertical neighbours both were
+/// painted is a rounding gap on an edge shared by two tiles (their edges are computed independently and
+/// can differ by a few float ulps, so a pixel centre can fall between them): it takes the colour of its
+/// left (or upper) neighbour. Other unpainted pixels are real background. Returns the number of gaps
+/// closed. Runs of unpainted pixels longer than one are never bridged.
+fn close_gaps(image: &mut ColorImage, background: [u8; 3]) -> usize {
+    let [w, h] = image.size;
+    let painted = |p: Option<&Color32>| p.is_some_and(|c| c.a() != 0);
+    let mut closed = 0;
+    for row in 0..h {
+        for col in 0..w {
+            let at = row * w + col;
+            if painted(image.pixels.get(at)) {
+                continue;
+            }
+            let left = col.checked_sub(1).and_then(|c| image.pixels.get(row * w + c));
+            let right = (col + 1 < w).then(|| image.pixels.get(at + 1)).flatten();
+            let up = row.checked_sub(1).and_then(|r| image.pixels.get(r * w + col));
+            let down = (row + 1 < h).then(|| image.pixels.get(at + w)).flatten();
+            let fill = if painted(left) && painted(right) {
+                left.copied()
+            } else if painted(up) && painted(down) {
+                up.copied()
+            } else {
+                None
+            };
+            if let (Some(c), Some(slot)) = (fill, image.pixels.get_mut(at)) {
+                *slot = c;
+                closed += 1;
+            }
+        }
+    }
+    let background = Color32::from_rgb(background[0], background[1], background[2]);
+    for p in image.pixels.iter_mut().filter(|p| p.a() == 0) {
+        *p = background;
+    }
+    closed
 }
 
 /// Fraction of its brightness a pixel keeps on a grid line.
@@ -214,7 +262,7 @@ fn draw_grid(image: &mut ColorImage, rect: Rect) {
         return;
     }
     let mut darken = |col: usize, row: usize| {
-        if let Some(p) = image.pixels.get_mut(row.saturating_mul(w).saturating_add(col)) {
+        if let Some(p) = image.pixels.get_mut(row.saturating_mul(w).saturating_add(col)).filter(|p| p.a() != 0) {
             *p = Color32::from_rgb(channel(p.r(), GRID_KEEP), channel(p.g(), GRID_KEEP), channel(p.b(), GRID_KEEP));
         }
     };
@@ -736,5 +784,96 @@ mod tests {
         assert!(render_until(&input(), &stop).is_none());
         stop.store(false, Ordering::Relaxed);
         assert_eq!(render_until(&input(), &stop).map(|i| i.pixels), Some(render(&input()).pixels));
+    }
+
+    /// Dense-id synthetic tree: 100 directories, 100 subdirectories each, 9 files each (100,101 nodes).
+    fn synthetic_children(id: usize, out: &mut Vec<(usize, u64)>) {
+        const DIRS: usize = 100;
+        const SUBDIRS: usize = 100;
+        const FILES: usize = 9;
+        let first_file = 1 + DIRS + DIRS * SUBDIRS;
+        let weight = |k: usize| 1 + u64::try_from(k.wrapping_mul(2_654_435_761) % 1000).unwrap_or(1).pow(2);
+        if id == 0 {
+            out.extend((1..=DIRS).map(|d| (d, weight(d) * 50)));
+        } else if id <= DIRS {
+            let first = 1 + DIRS + (id - 1) * SUBDIRS;
+            out.extend((0..SUBDIRS).map(|s| (first + s, weight(first + s) * 5)));
+        } else if id < first_file {
+            let first = first_file + (id - 1 - DIRS) * FILES;
+            out.extend((0..FILES).map(|f| (first + f, weight(first + f))));
+        }
+    }
+
+    fn synthetic_parent(id: usize) -> Option<usize> {
+        let first_file = 1 + 100 + 100 * 100;
+        match id {
+            0 => None,
+            1..=100 => Some(0),
+            _ if id < first_file => Some((id - 101) / 100 + 1),
+            _ => Some((id - first_file) / 9 + 101),
+        }
+    }
+
+    #[test]
+    fn rounding_gaps_between_tiles_are_closed_and_real_background_is_kept() {
+        // At 4K this tree has pixel centres that fall between two neighbouring tiles because the
+        // neighbours' shared edge differs by a few float ulps (a sliver of background; before the fix 39
+        // of 8.3M pixels).
+        let (w, h) = (3840_usize, 2160_usize);
+        let bounds = Rect { x: 0.0, y: 0.0, w: 3840.0, h: 2160.0 };
+        let tiles = dirustat_treemap::layout_tree(0, bounds, dirustat_treemap::LayoutOptions::default(), |id, out| {
+            synthetic_children(id, out);
+        });
+        let mut by_id = HashMap::new();
+        for (i, t) in tiles.iter().enumerate().filter(|(_, t)| !t.remainder) {
+            by_id.insert(t.id, i);
+        }
+        let cushion_tiles: Vec<CushionTile> = tiles
+            .iter()
+            .map(|t| CushionTile {
+                rect: t.rect,
+                color: [200, 140, 90],
+                node: t.id,
+                parent: if t.remainder { None } else { synthetic_parent(t.id) },
+                leaf: t.leaf,
+                remainder: t.remainder,
+            })
+            .collect();
+        let mut input = CushionInput {
+            size: [w, h],
+            scale: 1.0,
+            background: [1, 2, 3],
+            tiles: cushion_tiles,
+            config: CushionConfig::default(),
+            grid: false,
+        };
+        let (image, closed) = render_counted(&input, &AtomicBool::new(false)).expect("not cancelled");
+        assert!(closed > 0, "the scenario must contain a rounding gap, otherwise it proves nothing");
+        let background = Color32::from_rgb(1, 2, 3);
+        assert_eq!(image.pixels.iter().filter(|&&p| p == background).count(), 0, "no uncovered pixel");
+        // A real hole (the area of one leaf is not painted) stays background.
+        if let Some(leaf) = input.tiles.iter_mut().find(|t| t.leaf && t.rect.w > 8.0 && t.rect.h > 8.0) {
+            leaf.leaf = false;
+        }
+        let (holed, _) = render_counted(&input, &AtomicBool::new(false)).expect("not cancelled");
+        assert!(holed.pixels.contains(&background), "a missing leaf stays background");
+    }
+
+    #[test]
+    fn close_gaps_bridges_single_pixels_only() {
+        let bg = [9, 9, 9];
+        let hole = Color32::from_rgba_premultiplied(9, 9, 9, 0);
+        let c = Color32::from_rgb(50, 60, 70);
+        // Row 0: painted, gap, painted (bridged); row 1: painted, two gaps, painted (kept); row 2: edge gaps.
+        let mut image = ColorImage::filled([4, 3], hole);
+        for i in [0, 2, 3, 4, 7] {
+            image.pixels[i] = c;
+        }
+        let closed = close_gaps(&mut image, bg);
+        assert_eq!(closed, 1);
+        assert_eq!(image.pixels[1], c);
+        assert_eq!(image.pixels[5], Color32::from_rgb(9, 9, 9));
+        assert_eq!(image.pixels[6], Color32::from_rgb(9, 9, 9));
+        assert!(image.pixels.iter().all(|p| p.a() == 255));
     }
 }

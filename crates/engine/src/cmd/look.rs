@@ -1,4 +1,5 @@
-//! `treemap.look` and `treemap.grid`: the cushion constants and the tile grid (G-018). Like
+//! `treemap.look`, `treemap.grid` and `treemap.free_space`: the cushion constants, the tile grid and the
+//! free-space band (G-018). Like
 //! `treemap.cushion` they change settings only; the shell reads the settings when it paints.
 
 use super::{CommandSpec, always, parse_params};
@@ -35,6 +36,19 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             enabled: always,
             run: run_grid,
         },
+        CommandSpec {
+            id: "treemap.free_space",
+            label: "Free space",
+            menu: "View/Free space",
+            shortcut: None,
+            params_doc: "{\"enabled\": bool (optional, omitted = toggle)} shows the free space of the scanned \
+                volume as a band at the right edge of the treemap, its width proportional to free / (scanned + free) \
+                (setting treemap.show_free_space, default off). The volume is asked in the background; nothing is \
+                shown for a root that is not on a local drive or when the query fails. Returns {enabled}.",
+            destructive: false,
+            enabled: always,
+            run: run_free_space,
+        },
     ]
 }
 
@@ -58,6 +72,15 @@ fn run_grid(session: &mut Session, params: &Value) -> Result<Value, CommandError
     let mut next = session.settings().clone();
     let enabled = p.enabled.unwrap_or(!next.treemap.grid);
     next.treemap.grid = enabled;
+    session.apply_settings(next);
+    Ok(json!({ "enabled": enabled }))
+}
+
+fn run_free_space(session: &mut Session, params: &Value) -> Result<Value, CommandError> {
+    let p: GridParams = parse_params(params)?;
+    let mut next = session.settings().clone();
+    let enabled = p.enabled.unwrap_or(!next.treemap.show_free_space);
+    next.treemap.show_free_space = enabled;
     session.apply_settings(next);
     Ok(json!({ "enabled": enabled }))
 }

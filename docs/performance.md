@@ -1,6 +1,6 @@
 # Performance
 
-> Status: 2026-10-13 · revision 3. Budgets are in `perf/budgets.toml`; `enforce = false` for now because nothing is measured yet.
+> Status: 2026-10-23 · revision 4. Budgets are in `perf/budgets.toml`; the two cushion shading rows are measured and `enforce = true`, the others stay `enforce = false` until measured.
 
 ## Targets
 
@@ -28,6 +28,13 @@
 4. **Treemap:** limit layout depth by minimum rectangle size (do not lay out below 1-2 pixels), cache by (revision, size, focus), render as a single mesh/texture with cushion shading, rebuild only when the cache changes.
 5. **Tree/list UI:** row virtualization (draw only visible rows), sort in the background.
 6. **Memory:** intern extensions, names as `Box<str>`; cluster counts as `u32` units where that saves space.
+
+## Cushion shading (G-018, M5.6)
+
+- `cargo run --release -p dirustat-treemap --example cushion_bench` builds synthetic trees of 100,101 and 1,000,101 nodes (dense ids, skewed weights, 3 levels) and prints layout, surface accumulation, per-pixel shading and the number of pixels no leaf covers.
+- Measured 2026-10-23 (Windows 11, release, single thread): 1080p with the default 50,000-tile cap 11.4-11.9 ms for both the 100k and the 1M tree (5.3-5.6 ns/px, surfaces 0.3 ms), so the cost follows the pixels and the tile cap, not the node count; 200,000-tile cap 11.7 ms (100k) / 13.5 ms (1M, 143,705 tiles); 4K 44-45 ms. Layout of the 1M tree at the 50,000-tile cap: 15-17 ms (100k: 5.5 ms). The renderer adds a gap closing pass over the image, 1.3 ms at 1080p. Budget 25 ms (rows `treemap_cushion_shading_100k_nodes_1080p` and `treemap_cushion_shading_1m_nodes_1080p`, both enforced).
+- The job runs once per layout on a background thread; a frame only paints the cached texture. It is cancelled early when the revision or the look changes.
+- Not measured: a real 1M-file scan in the window, the 4K case against a budget (44 ms is within the 300 ms settle time but has no row).
 
 ## Duplicate finder (`duplicates.*`)
 

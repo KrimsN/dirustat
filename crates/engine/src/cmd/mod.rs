@@ -25,6 +25,7 @@ mod tree;
 mod treemap;
 mod view;
 
+pub(crate) use detached::BusyGuard;
 pub use detached::{DetachedJob, JobOutcome, Prepared, execute_unlocked};
 pub(crate) use duplicates::DupState;
 pub use privileges::{FastPathStatus, fast_path_status, volume_root_of};

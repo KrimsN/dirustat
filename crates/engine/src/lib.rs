@@ -11,6 +11,7 @@ mod drives;
 pub mod duplicates;
 pub mod export;
 mod ext;
+mod free_space;
 mod fsops;
 mod guard;
 mod journal;
@@ -28,6 +29,7 @@ pub use cmd::{
     CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, execute_unlocked, fast_path_status,
     tree_node_path, volume_root_of,
 };
+pub use free_space::{FreeSpace, FreeSplit, MAX_BAND_SHARE, MIN_BAND_WIDTH, MIN_PANEL_WIDTH, split_bounds};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
 pub use paths::{PathClass, classify_path, is_local_path, is_unc_path, normalize_scan_root};
 
@@ -140,6 +142,8 @@ pub struct Session {
     /// Set while a helper thread waits for the OS to answer a volume query (QA-143).
     volume_query_busy: Arc<AtomicBool>,
     volume_query_timeout: Duration,
+    /// Free space of the scanned volume for the treemap band (`treemap.free_space`).
+    volume: free_space::VolumeState,
     /// Duplicate search job and result (`duplicates.*`), valid for one tree revision.
     dups: cmd::DupState,
 }
@@ -180,6 +184,7 @@ impl Session {
             removal_busy: Arc::new(AtomicBool::new(false)),
             volume_query_busy: Arc::new(AtomicBool::new(false)),
             volume_query_timeout: DEFAULT_VOLUME_QUERY_TIMEOUT,
+            volume: free_space::VolumeState::default(),
             dups: cmd::DupState::default(),
         }
     }
