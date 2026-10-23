@@ -19,6 +19,7 @@ mod settings;
 #[cfg(test)]
 mod testing;
 mod tree;
+mod treemap;
 mod view;
 
 pub use detached::{DetachedJob, JobOutcome, Prepared, execute_unlocked};
@@ -74,6 +75,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(scan::specs());
         all.extend(select::specs());
         all.extend(view::specs());
+        all.extend(treemap::specs());
         all.extend(session::specs());
         all.extend(settings::specs());
         all.extend(tree::specs());

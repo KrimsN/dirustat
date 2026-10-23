@@ -25,6 +25,15 @@ enforce = false
 budget_ms = 8
 enforce = false
 
+[treemap_cushion_shading_100k_nodes_1080p]
+# Cushion surfaces plus per-pixel shading of every leaf tile, run once per layout on a background thread
+# (not per frame; a frame paints one cached texture). Measured 2026-10-23 (Windows 11, release, single
+# thread, `cargo run --release -p dirustat-treemap --example cushion_bench`, 100,101-node synthetic tree
+# capped at 50,000 tiles): 1920x1080 11.3-12.0 ms (5.3 ns/px, surfaces 0.4 ms); 3840x2160 43.5 ms;
+# 200,000-tile cap at 1080p 15.9 ms. Excludes layout (12-14 ms for the same tree).
+budget_ms = 25
+enforce = false
+
 [ui_first_paint_after_scan_start]
 budget_ms = 300
 enforce = false

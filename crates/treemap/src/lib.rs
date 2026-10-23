@@ -3,6 +3,10 @@
 //! Input is weights in descending order plus a rectangle; output is one rectangle per weight. A weight
 //! of 0 yields a zero-area rectangle. The function never panics on any input (NaN, empty bounds).
 
+pub mod cushion;
+
+pub use cushion::{CushionConfig, Shader, Surface};
+
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 

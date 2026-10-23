@@ -3,6 +3,7 @@
 //! The layout lives in panel-local coordinates (origin at the panel's top-left, whole-pixel size),
 //! so it is cached by the session and only recomputed on a tree, size or panel-size change.
 
+use crate::cushion_view;
 use crate::state::UiState;
 use crate::theme::{Rgba, Tokens};
 use dirustat_engine::{MapTile, Session, extension_of};
@@ -91,6 +92,51 @@ fn cache_key(session: &Session, bounds: Rect) -> (u64, u64, [u32; 2], bool) {
     )
 }
 
+/// The cushion texture for the current layout (see [`cushion_view`]); `None` while there is none yet.
+/// `may_start` is false while a layout is outstanding: the tiles are about to change, so no job is
+/// started for them.
+fn cushion_texture(
+    ctx: &egui::Context,
+    tokens: &Tokens,
+    (key, bounds): ((u64, u64, [u32; 2], bool), Rect),
+    tiles: &[MapTile],
+    tree: &Tree,
+    colors: &[Rgba],
+    may_start: bool,
+) -> Option<egui::TextureId> {
+    let (revision, generation, bounds_bits, allocated) = key;
+    let (size, scale) = cushion_view::image_geometry(bounds.w, bounds.h, ctx.pixels_per_point())?;
+    let cushion_key = cushion_view::CushionKey {
+        revision,
+        generation,
+        bounds: bounds_bits,
+        allocated,
+        theme: tokens.kind,
+        scale_bits: scale.to_bits(),
+    };
+    cushion_view::texture_for(ctx, &cushion_key, may_start && !tiles.is_empty(), || {
+        let tiles = tiles
+            .iter()
+            .zip(colors)
+            .map(|(t, c)| cushion_view::CushionTile {
+                rect: t.rect,
+                color: [c[0], c[1], c[2]],
+                node: t.node.index(),
+                parent: tree.get(t.node).and_then(|n| n.parent()).map(NodeId::index),
+                leaf: t.leaf,
+                remainder: t.remainder,
+            })
+            .collect();
+        Some(cushion_view::CushionInput {
+            size,
+            scale,
+            background: cushion_view::background_rgb(tokens),
+            tiles,
+            config: dirustat_treemap::CushionConfig::default(),
+        })
+    })
+}
+
 /// Draws the panel. Clicking selects the tile under the pointer through the `select.node` command.
 pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     let tokens = Tokens::for_kind(state.theme);
@@ -108,6 +154,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     let cached: Option<ColorCache> = ui.data(|d| d.get_temp::<ColorCache>(cache_id));
     let selected = session.selection();
     let mode = session.map_size_mode();
+    let cushion_on = session.settings().treemap.cushion;
 
     let pointer =
         response.hover_pos().and_then(|p| pointer_to_bounds((origin.x, origin.y), (bounds.w, bounds.h), (p.x, p.y)));
@@ -161,6 +208,18 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     });
 
     painter.rect_filled(response.rect, 0.0, Tokens::color(tokens.background));
+    // Cushion shading is one cached texture rendered off the UI thread; flat tiles are drawn until the
+    // first picture arrives and whenever the setting is off.
+    let cushion = if cushion_on {
+        cushion_texture(ui.ctx(), &tokens, (key, bounds), tiles, tree, &colors, !layout_pending)
+    } else {
+        cushion_view::release(ui.ctx());
+        None
+    };
+    if let Some(texture) = cushion {
+        let uv = egui::Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+        painter.image(texture, response.rect, uv, Color32::WHITE);
+    }
     let frame_stroke = Stroke::new(1.0, Tokens::color(tokens.border));
     let leaf_stroke = Stroke::new(1.0, Color32::from_black_alpha(70));
     let mut selected_rect = None;
@@ -175,6 +234,9 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
         }
         if r.w < MIN_TILE_PX || r.h < MIN_TILE_PX {
             continue;
+        }
+        if cushion.is_some() {
+            continue; // the texture carries fills, hierarchy and outlines
         }
         let screen = to_screen(origin, r);
         if tile.leaf {
@@ -399,6 +461,64 @@ mod tests {
         run_frame(&ctx, &mut s, &mut st, vec![click(false)]);
         assert!(s.selection().is_some(), "click selected a tile");
         assert_eq!(s.map_layout(bounds_for_size(400.0, 300.0)).tiles().as_ptr(), first, "layout cached");
+    }
+
+    /// Number of painted textured meshes that are not the font atlas, i.e. cushion images.
+    fn image_shapes(ctx: &egui::Context, s: &mut Session, st: &mut UiState) -> usize {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0))),
+            ..egui::RawInput::default()
+        };
+        let out = ctx.run_ui(input, |ui| show(ui, s, st));
+        let n = out
+            .shapes
+            .iter()
+            .filter(|c| matches!(&c.shape, egui::Shape::Mesh(m) if m.texture_id != egui::TextureId::default()))
+            .count();
+        out.drop_without_applying_deltas();
+        n
+    }
+
+    fn settled(ctx: &egui::Context, s: &mut Session, st: &mut UiState) {
+        run_frame(ctx, s, st, vec![]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while s.map_poll(bounds_for_size(400.0, 300.0)) {
+            assert!(std::time::Instant::now() < deadline, "background layout never finished");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn cushion_is_on_by_default_cached_and_switches_to_flat() {
+        let (mut s, _dir) = scanned_session();
+        let (mut st, ctx) = (UiState::default(), egui::Context::default());
+        settled(&ctx, &mut s, &mut st);
+        assert!(s.settings().treemap.cushion);
+        // Frames go on until the background render has delivered its picture.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while image_shapes(&ctx, &mut s, &mut st) == 0 {
+            assert!(std::time::Instant::now() < deadline, "cushion image never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let jobs = cushion_view::jobs_started(&ctx);
+        assert!(jobs >= 1);
+        for _ in 0..5 {
+            assert_eq!(image_shapes(&ctx, &mut s, &mut st), 1);
+        }
+        assert_eq!(cushion_view::jobs_started(&ctx), jobs, "no re-render while nothing changed");
+        // Off: flat tiles, no image, and the texture is released.
+        s.execute("treemap.cushion", &serde_json::json!({ "enabled": false })).unwrap();
+        let flat = run_frame(&ctx, &mut s, &mut st, vec![]);
+        assert_eq!(image_shapes(&ctx, &mut s, &mut st), 0);
+        assert!(flat >= 4, "flat fallback paints the tiles, painted {flat}");
+        assert_eq!(cushion_view::jobs_started(&ctx), jobs);
+        // Back on: one new picture.
+        s.execute("treemap.cushion", &serde_json::json!({})).unwrap();
+        while image_shapes(&ctx, &mut s, &mut st) == 0 {
+            assert!(std::time::Instant::now() < deadline, "cushion image never came back");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        assert_eq!(cushion_view::jobs_started(&ctx), jobs + 1);
     }
 
     #[test]
