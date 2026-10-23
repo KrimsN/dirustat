@@ -536,17 +536,33 @@ fn entry_from(name: String, name_lossy: bool, path: &Path, meta: &fs::Metadata, 
     } else {
         NodeKind::File
     };
-    let logical = if kind == NodeKind::File { meta.len() } else { 0 };
+    let mut logical = if kind == NodeKind::File { meta.len() } else { 0 };
+    let mut mtime = mtime_of(meta);
+    // An empty file adds nothing to any total, so it never needs the (on Windows costly) identity query.
+    let link_id = if kind == NodeKind::File && logical > 0 { link_id_of(meta, path) } else { None };
+    // G-065 (QA-149): NTFS refreshes the size and time copies in a directory listing only for the
+    // hard-link name that was used for a write, so a name of a multi-link file can list stale values.
+    // The destructive commands compare the node with the file itself (`fsops::verify_matches`) and
+    // stay strict (a size or time mismatch is `stale_tree`, never tolerated). The scan therefore
+    // reads the file itself for the names of multi-link files, which keeps the tree and that
+    // re-check in agreement and shows the real size. Residual: a file that was empty in the listing
+    // gets no identity query (it would cost an open per empty file) and stays stale until a rescan;
+    // a destructive command on it is refused as `stale_tree`, which is the safe outcome.
+    if link_id.is_some()
+        && let Ok(fresh) = fs::symlink_metadata(path)
+        && fresh.is_file()
+    {
+        logical = fresh.len();
+        mtime = mtime_of(&fresh);
+    }
     let data = NodeData {
         logical_size: logical,
         allocated_size: round_up(logical, cluster),
-        mtime: mtime_of(meta),
+        mtime,
         attributes,
         error: false,
         name_lossy,
     };
-    // An empty file adds nothing to any total, so it never needs the (on Windows costly) identity query.
-    let link_id = if kind == NodeKind::File && logical > 0 { link_id_of(meta, path) } else { None };
     Entry { name, kind, data, link_id, raw_name: None }
 }
 
@@ -740,6 +756,40 @@ mod tests {
         let root = out.tree.root();
         assert_eq!(out.tree.children(root).count(), 4);
         assert_eq!(out.tree.get(root).unwrap().total_size(SizeMode::Logical), (1 << 20) + 100);
+    }
+
+    /// G-065 (QA-149): a file written through one hard-link name lists stale size and time under
+    /// the other names on NTFS; the tree must hold the real values for every name, in either
+    /// scan order (`a.bin` sorts before `z.bin`, and each case is written through the other name).
+    #[test]
+    fn hardlinked_file_written_through_another_name_shows_real_size_and_time() {
+        use std::io::Write;
+        for (original, link, writer) in [("z.bin", "a.bin", "z.bin"), ("a.bin", "b.bin", "a.bin")] {
+            let tmp = tempfile::tempdir().unwrap();
+            write(&tmp.path().join(original), 10);
+            if fs::hard_link(tmp.path().join(original), tmp.path().join(link)).is_err() {
+                return; // hardlinks unavailable on this file system
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let mut f = fs::OpenOptions::new().append(true).open(tmp.path().join(writer)).unwrap();
+            f.write_all(b"12345").unwrap();
+            drop(f);
+            let real = fs::metadata(tmp.path().join(writer)).unwrap();
+            let out = scan(tmp.path());
+            let tree = &out.tree;
+            let mut nonzero = 0;
+            for name in [original, link] {
+                let id = tree.children(tree.root()).find(|&c| tree.get(c).is_some_and(|n| n.name() == name)).unwrap();
+                let data = tree.get(id).unwrap().data();
+                assert_eq!(data.mtime, mtime_of(&real), "{name}: time of the file itself");
+                if data.logical_size != 0 {
+                    nonzero += 1;
+                    assert_eq!(data.logical_size, 15, "{name}: size of the file itself");
+                }
+            }
+            assert_eq!(nonzero, 1, "the file is charged once");
+            assert_eq!(tree.get(tree.root()).unwrap().total_size(SizeMode::Logical), 15);
+        }
     }
 
     #[test]

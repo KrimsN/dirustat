@@ -27,6 +27,19 @@ impl Key {
     pub fn starts_with(&self, other: &Key) -> bool {
         self.root == other.root && self.comps.starts_with(&other.comps)
     }
+
+    /// Addressing counterpart of [`Key::starts_with`] for [`key_exact`] keys: components compare
+    /// with [`name_matches`] (exact, ASCII case folded on Windows only).
+    pub fn starts_with_names(&self, other: &Key, windows: bool) -> bool {
+        self.root == other.root
+            && self.comps.len() >= other.comps.len()
+            && self.comps.iter().zip(&other.comps).all(|(a, b)| name_matches(a, b, windows))
+    }
+
+    /// Whether two [`key_exact`] keys name the same location (see [`Key::starts_with_names`]).
+    pub fn same_names(&self, other: &Key, windows: bool) -> bool {
+        self.comps.len() == other.comps.len() && self.starts_with_names(other, windows)
+    }
 }
 
 /// Normalizes `path` for the protected-path checks; `None` when it is not an absolute path of the
@@ -54,10 +67,30 @@ pub(crate) fn name_matches(name: &str, comp: &str, windows: bool) -> bool {
 }
 
 fn key_impl(path: &str, windows: bool, exact: bool) -> Option<Key> {
+    if exact {
+        return key_core(path, windows, true);
+    }
+    let body = path.trim_start();
+    let trimmed = body.trim_end();
+    let mut key = key_core(trimmed, windows, false)?;
+    // G-064 (QA-148): trimming the whole path must not make a name that consists only of Unicode
+    // whitespace (NBSP, U+3000, U+0085, ...) vanish, or the key would name the parent (or the scan
+    // root) instead of the item. Whitespace that follows a separator is such a final component and
+    // is kept; whitespace glued to a name (`dupe<NBSP>`) is still dropped, which over-matches for
+    // the deny list on purpose. The key is therefore never shorter than the item's real location.
+    let after_separator = if windows { trimmed.ends_with(['\\', '/']) } else { trimmed.ends_with('/') };
+    let tail = body.get(trimmed.len()..).unwrap_or_default();
+    if after_separator && !tail.is_empty() {
+        key.comps.push(if windows { tail.to_lowercase() } else { tail.to_owned() });
+    }
+    Some(key)
+}
+
+fn key_core(path: &str, windows: bool, exact: bool) -> Option<Key> {
     if path.contains('\0') {
         return None;
     }
-    let mut p = if exact { path.to_owned() } else { path.trim().to_owned() };
+    let mut p = path.to_owned();
     if windows {
         let unified = p.replace('/', "\\");
         // `\\?\UNC\server\share` is the network path `\\server\share`.
@@ -548,6 +581,56 @@ mod tests {
         let loose = key_of("C:\\WINDOWS\u{a0}", true).unwrap();
         assert_eq!(loose.comps, ["windows"]);
         assert!(win().check("C:\\Windows\u{a0}", r"D:\scan").is_err());
+    }
+
+    /// G-064 (QA-148): a final component made only of Unicode whitespace is a component of the
+    /// permissive key too, so the key never collapses into its parent or the scan root.
+    #[test]
+    fn whitespace_only_final_component_survives_the_permissive_key() {
+        for ws in ["\u{a0}", "\u{3000}", "\u{2003}", "\u{85}", "\u{a0}\u{a0}", "\u{a0}\u{3000}"] {
+            let loose = key_of(&format!("C:\\Root\\Sub\\{ws}"), true).unwrap();
+            assert_eq!(loose.comps, ["root", "sub", ws], "{ws:?}");
+            let at_root = key_of(&format!("C:\\Root\\{ws}"), true).unwrap();
+            assert_eq!(at_root.comps, ["root", ws], "{ws:?}");
+            assert_eq!(key_exact(&format!("C:\\Root\\{ws}"), true).unwrap().comps, ["Root", ws], "{ws:?}");
+            // The check no longer mistakes the item for its parent or for the scan root.
+            assert!(win().check(&format!("D:\\scan\\{ws}"), r"D:\scan").is_ok(), "{ws:?}");
+            assert!(win().check(&format!("D:\\scan\\sub\\{ws}"), r"D:\scan").is_ok(), "{ws:?}");
+        }
+        // Whitespace glued to a name is still dropped (over-matching is the safe direction).
+        assert_eq!(key_of("C:\\Root\\dupe\u{a0}", true).unwrap().comps, ["root", "dupe"]);
+        assert_eq!(key_of("  C:\\Root\\dupe \t\n", true).unwrap().comps, ["root", "dupe"]);
+        assert_eq!(key_of("/a/b\u{a0}", false).unwrap().comps, ["a", "b"]);
+        assert_eq!(key_of("/a/\u{3000}", false).unwrap().comps, ["a", "\u{3000}"]);
+    }
+
+    /// G-064: keeping the whitespace-only component does not weaken the deny list.
+    #[test]
+    fn whitespace_variants_of_protected_paths_stay_refused() {
+        let p = win();
+        for path in [
+            "C:\\Windows\u{a0}",
+            "C:\\Windows\\\u{a0}",
+            "C:\\Windows\\System32\\\u{3000}",
+            "C:\\Users\\\u{a0}",
+            "C:\\\u{a0}\\..",
+            "C:\\Program Files\u{2003}",
+            "D:\\scan\u{a0}",
+            "D:\\scan\\sub\\..\\\u{a0}\\..",
+        ] {
+            assert!(p.check(path, r"D:\scan").is_err(), "{path:?} must stay refused");
+        }
+    }
+
+    #[test]
+    fn exact_keys_compare_with_name_matches() {
+        let a = key_exact(r"C:\Root\Sub", true).unwrap();
+        let b = key_exact(r"c:\root\SUB", true).unwrap();
+        assert!(a.same_names(&b, true) && !a.same_names(&b, false));
+        let child = key_exact("C:\\Root\\Sub\\\u{a0}", true).unwrap();
+        assert!(child.starts_with_names(&a, true) && !a.starts_with_names(&child, true) && !a.same_names(&child, true));
+        let lookalike = key_exact("C:\\Root\\Sub\u{a0}", true).unwrap();
+        assert!(!lookalike.same_names(&a, true) && !lookalike.starts_with_names(&a, true));
     }
 
     #[test]

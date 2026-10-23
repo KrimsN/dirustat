@@ -5,7 +5,7 @@
 //! target, and walks use `symlink_metadata`. All walks are iterative.
 
 use crate::CommandError;
-use crate::protected::{Key, ProtectedPaths, key_of};
+use crate::protected::{Key, ProtectedPaths, key_exact};
 use dirustat_model::{ATTR_HARDLINK_DUPLICATE, NodeData, NodeKind};
 use std::fs::{self, Metadata};
 use std::io;
@@ -168,9 +168,11 @@ pub(crate) fn verify_location(
     windows: bool,
 ) -> Result<Key, CommandError> {
     let outside = || CommandError::InvalidParams("path is outside the scanned tree".to_owned());
-    let path_key = key_of(path, windows).ok_or_else(outside)?;
-    let root_key = key_of(root, windows).ok_or_else(outside)?;
-    if !path_key.starts_with(&root_key) {
+    // G-064 (QA-148): the exact key addresses the item. The permissive key trims the whole path, so
+    // a name made only of Unicode whitespace would vanish from it; it is for the deny list only.
+    let path_key = key_exact(path, windows).ok_or_else(outside)?;
+    let root_key = key_exact(root, windows).ok_or_else(outside)?;
+    if !path_key.starts_with_names(&root_key, windows) {
         return Err(outside());
     }
     let rel = path_key.comps.get(root_key.comps.len()..).unwrap_or_default();
@@ -183,9 +185,9 @@ pub(crate) fn verify_location(
     for comp in rel_parent {
         expected.push(comp);
     }
-    let real_parent = key_of(&canon_parent.to_string_lossy(), windows).ok_or_else(outside)?;
-    let expected_key = key_of(&expected.to_string_lossy(), windows).ok_or_else(outside)?;
-    if real_parent != expected_key {
+    let real_parent = key_exact(&canon_parent.to_string_lossy(), windows).ok_or_else(outside)?;
+    let expected_key = key_exact(&expected.to_string_lossy(), windows).ok_or_else(outside)?;
+    if !real_parent.same_names(&expected_key, windows) {
         return Err(CommandError::ProtectedPath(
             "the path reaches the target through a link or reparse point".to_owned(),
         ));
@@ -416,6 +418,26 @@ mod tests {
         }
         assert!(name_problem("a:b", true).is_some_and(|w| w.contains("alternate data stream")));
         assert_eq!(name_problem("a\u{1}b", false), None, "only Windows has these rules");
+    }
+
+    /// G-064 (QA-148): a name made only of Unicode whitespace is located like any other name, under
+    /// a subfolder (was "through a link") and directly under the scan root (was "the scan root itself").
+    #[test]
+    fn whitespace_only_names_are_located_exactly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        let protected = ProtectedPaths::from_env();
+        let root_s = root.to_string_lossy().into_owned();
+        for name in ["\u{a0}", "\u{3000}", "\u{2003}", "\u{85}", "\u{a0}\u{a0}"] {
+            for file in [root.join(name), root.join("sub").join(name)] {
+                fs::write(&file, b"x").unwrap();
+                let path = file.to_string_lossy().into_owned();
+                let located = verify_location(&path, &root_s, &protected, cfg!(windows));
+                assert!(located.is_ok(), "{name:?} at {path:?}: {located:?}");
+                protected.check(&path, &root_s).unwrap();
+            }
+        }
     }
 
     #[test]

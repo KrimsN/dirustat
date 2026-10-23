@@ -516,19 +516,21 @@ fn check_destination(plan: &Plan, destination: &str) -> Result<(), CommandError>
     if windows && destination.ends_with(['.', ' ']) {
         return Err(bad("a name ends with a dot or a space"));
     }
-    let dest_key = key_of(destination, windows).ok_or_else(|| bad("must be an absolute path"))?;
-    let src_key = key_of(&plan.path, windows).ok_or_else(|| bad("the source has no absolute path"))?;
-    if dest_key.starts_with(&src_key) {
+    // The permissive key (trimmed, case folded) only over-matches for the "into itself" test; the
+    // exact key is what the move will really address, so the component rules run on it (G-064: a
+    // trailing `\n` or `\t` must be seen as a control character, not trimmed away).
+    let loose_dest = key_of(destination, windows).ok_or_else(|| bad("must be an absolute path"))?;
+    let loose_src = key_of(&plan.path, windows).ok_or_else(|| bad("the source has no absolute path"))?;
+    if loose_dest.starts_with(&loose_src) {
         return Err(bad("cannot move an item into itself"));
     }
+    let dest_key = key_exact(destination, windows).ok_or_else(|| bad("must be an absolute path"))?;
     if let Some(why) = destination_component_problem(&dest_key.comps, windows) {
         return Err(bad(why));
     }
     let protected = ProtectedPaths::from_env();
     protected.check(destination, "").map_err(|why| CommandError::ProtectedPath(format!("destination is {why}")))?;
-    let mut parent_key = dest_key.clone();
-    parent_key.comps.pop();
-    if parent_key == dest_key {
+    if dest_key.comps.is_empty() {
         return Err(bad("must name a new item inside a directory"));
     }
     let parent = Path::new(destination).parent().ok_or_else(|| bad("has no parent directory"))?;
@@ -1747,6 +1749,109 @@ mod tests {
         let out = delete_perm(&mut s, &folder).unwrap();
         assert_eq!(out["done"], true);
         assert!(!folder.exists());
+    }
+
+    /// G-064 (QA-148): a name consisting only of Unicode whitespace is deletable like any other,
+    /// by path and by id, in a subfolder and directly under the scan root (it was refused as
+    /// `protected_path`: the permissive key trimmed the whole path and the name vanished).
+    #[test]
+    fn whitespace_only_names_are_deletable_by_path_and_by_id() {
+        for name in ["\u{a0}", "\u{3000}", "\u{2003}", "\u{85}", "\u{a0}\u{a0}"] {
+            for nested in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let root = dir.path().join("root");
+                let parent = if nested { root.join("sub") } else { root.clone() };
+                std::fs::create_dir_all(&parent).unwrap();
+                let file = parent.join(name);
+                std::fs::write(&file, b"payload").unwrap();
+                std::fs::write(parent.join("keep.txt"), b"keep").unwrap();
+                let (mut s, fake) = scanned(&root);
+                let path = file.to_string_lossy().into_owned();
+                let tag = format!("{name:?} nested={nested}");
+                let preview = s.execute("file.delete_preview", &json!({"path": path}));
+                assert!(preview.is_ok(), "{tag}: {preview:?}");
+                let dry = delete_perm_params(&path, true);
+                let dry_out = s.execute("file.delete_permanent", &dry);
+                assert!(dry_out.is_ok_and(|v| v["dry_run"] == true), "{tag}: dry run by path");
+                let by_id = json!({
+                    "id": id_named(&s, name), "revision": s.revision(), "dry_run": true,
+                    "confirm": true, "i_understand_permanent": true,
+                });
+                let out = s.execute("file.delete_permanent", &by_id);
+                assert!(out.is_ok(), "{tag}: by id {out:?}");
+                let recycle = s.execute("file.delete", &json!({"path": path, "confirm": true, "dry_run": true}));
+                assert!(recycle.is_ok(), "{tag}: recycle {recycle:?}");
+                assert!(file.exists() && fake.calls().is_empty(), "{tag}: dry runs touch nothing");
+                let out = delete_perm(&mut s, &file).unwrap();
+                assert_eq!(out["done"], true, "{tag}");
+                assert!(!file.exists() && parent.join("keep.txt").exists(), "{tag}");
+            }
+        }
+    }
+
+    fn delete_perm_params(path: &str, dry_run: bool) -> Value {
+        json!({"path": path, "dry_run": dry_run, "confirm": true, "i_understand_permanent": true})
+    }
+
+    /// G-064 (QA-148): a destination whose name ends in a C0 control character (`\n`, `\t`) is
+    /// `invalid_params` (it was `internal`: the trimmed key hid the character from the name rules).
+    #[cfg(windows)]
+    #[test]
+    fn move_destination_with_a_trailing_control_character_is_invalid_params() {
+        let mut f = fixture();
+        let src = f.path_of("keep.txt");
+        for suffix in ["\n", "\t", "\u{1}", "\u{1f}", "\r"] {
+            let dest = format!("{}{suffix}", f.path_of("sub/new"));
+            let p = json!({"path": src, "destination": dest, "confirm": true});
+            let err = f.s.execute("file.move", &p).unwrap_err();
+            assert_eq!(err.code(), "invalid_params", "{suffix:?}: {err}");
+            assert!(err.to_string().contains("control character"), "{suffix:?}: {err}");
+            let dry = json!({"path": src, "destination": dest, "confirm": true, "dry_run": true});
+            assert_eq!(f.code("file.move", dry), "invalid_params", "{suffix:?} dry run");
+        }
+        // A whitespace-only destination name that Win32 accepts is a valid name.
+        for ws in ["\u{a0}", "\u{3000}", "\u{85}"] {
+            let dest = format!("{}\\{ws}", f.path_of("sub"));
+            let p = json!({"path": src, "destination": dest, "confirm": true, "dry_run": true});
+            assert!(f.s.execute("file.move", &p).is_ok(), "{ws:?}");
+        }
+        assert!(Path::new(&src).exists());
+        assert!(f.fake.calls().is_empty());
+    }
+
+    /// G-065 (QA-149): a hard-linked file written through one name lists a stale size and time
+    /// under the others on NTFS. The scan reads the file itself for such names, so every name
+    /// passes the re-check against the disk (which stays strict) and the tree shows the real size.
+    #[test]
+    fn hardlinked_file_written_through_another_name_stays_deletable() {
+        use std::io::Write;
+        for (original, link) in [("z.bin", "a.bin"), ("a.bin", "b.bin")] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().join("root");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(original), vec![1u8; 10]).unwrap();
+            if std::fs::hard_link(root.join(original), root.join(link)).is_err() {
+                return; // hardlinks unavailable on this file system
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1100));
+            let mut w = std::fs::OpenOptions::new().append(true).open(root.join(original)).unwrap();
+            w.write_all(b"12345").unwrap();
+            drop(w);
+            let (mut s, _fake) = scanned(&root);
+            assert_eq!(s.tree().get(s.tree().root()).map(|n| n.total_size(SizeMode::Logical)), Some(15));
+            for name in [original, link] {
+                let path = root.join(name).to_string_lossy().into_owned();
+                let out = s.execute("file.delete_permanent", &delete_perm_params(&path, true));
+                assert!(out.is_ok(), "{name}: {out:?}");
+            }
+            // The strict check stays: a change after the scan is still refused.
+            let late = std::fs::OpenOptions::new().write(true).open(root.join(original)).unwrap();
+            late.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000)).unwrap();
+            drop(late);
+            let path = root.join(link).to_string_lossy().into_owned();
+            let err = s.execute("file.delete_permanent", &delete_perm_params(&path, true)).unwrap_err();
+            assert_eq!(err.code(), "stale_tree", "{err}");
+        }
     }
 
     /// QA-142: creating a junction in a folder just before the scan once made the next permanent
