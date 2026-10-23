@@ -122,6 +122,9 @@ pub struct MapState {
     inflight: Option<InFlight>,
     /// Bumped whenever `cache` or `view` receives different tiles; lets the UI key its own caches.
     generation: u64,
+    /// Path of a selection that could not be carried over to the tree of the last finished scan
+    /// (the node is gone there); cleared by the next selection change.
+    lost_selection: Option<String>,
 }
 
 /// A background layout: the key it is computed for and the channel its result arrives on.
@@ -141,6 +144,7 @@ impl MapState {
             view: None,
             inflight: None,
             generation: 0,
+            lost_selection: None,
         }
     }
 }
@@ -201,6 +205,7 @@ impl Session {
     pub(crate) fn tree_replaced(&mut self) {
         self.revision = self.revision.saturating_add(1);
         self.map.selected = None;
+        self.map.lost_selection = None;
         self.map.cache = None;
         self.map.view = None;
         // A layout still being computed belongs to the old tree: its result is dropped.
@@ -371,6 +376,7 @@ impl Session {
     /// Selects the node under the point (or clears the selection when nothing is there).
     pub fn select_at(&mut self, px: f32, py: f32) -> Option<NodeId> {
         self.map.selected = self.tile_at(px, py);
+        self.map.lost_selection = None;
         self.map.selected
     }
 
@@ -384,11 +390,66 @@ impl Session {
             return false;
         }
         self.map.selected = Some(id);
+        self.map.lost_selection = None;
         true
     }
 
     pub fn clear_selection(&mut self) {
         self.map.selected = None;
+        self.map.lost_selection = None;
+    }
+
+    /// Names from the scan root down to the selected node (root first); `None` without a selection
+    /// or when the parent chain is broken. Taken before a tree replacement by
+    /// [`Session::restore_selection`].
+    pub(crate) fn selection_names(&self) -> Option<Vec<String>> {
+        let mut names: Vec<String> = Vec::new();
+        let mut cur = self.map.selected?;
+        // A parent chain longer than the tree is cyclic; the tree size is the natural bound.
+        for _ in 0..=self.tree.len() {
+            let n = self.tree.get(cur)?;
+            names.push(n.name().to_owned());
+            match n.parent() {
+                Some(parent) => cur = parent,
+                None => {
+                    names.reverse();
+                    return Some(names);
+                }
+            }
+        }
+        None
+    }
+
+    /// Re-selects, in the (new) current tree, the node a selection pointed at before the tree was
+    /// replaced: same root name and the same chain of names below it. When the node does not exist
+    /// any more the selection stays empty and `selection_lost` reports its former path.
+    pub(crate) fn restore_selection(&mut self, names: &[String], display_path: String) {
+        let mut parts = names.iter();
+        let root = self.tree.root();
+        let same_root = parts.next().is_some_and(|first| self.tree.get(root).is_some_and(|n| n.name() == first));
+        let found = same_root
+            .then(|| {
+                parts.try_fold(root, |dir, name| {
+                    self.tree.children(dir).find(|&c| self.tree.get(c).is_some_and(|n| n.name() == name.as_str()))
+                })
+            })
+            .flatten();
+        match found {
+            Some(id) => {
+                self.select_node(id);
+            }
+            None => self.map.lost_selection = Some(display_path),
+        }
+    }
+
+    /// Records that the selection at `path` could not be carried over to the new tree.
+    pub(crate) fn mark_selection_lost(&mut self, path: String) {
+        self.map.lost_selection = Some(path);
+    }
+
+    /// Path of the selection dropped when the last scan finished (the node is not in the new tree).
+    pub fn lost_selection(&self) -> Option<&str> {
+        self.map.lost_selection.as_deref()
     }
 
     /// Serializable snapshot of the map state.
@@ -509,6 +570,21 @@ mod tests {
         }
         assert!(!s.select_node(last), "id outside the arena is rejected");
         assert_eq!(s.selection(), Some(root));
+    }
+
+    #[test]
+    fn selection_names_follow_chains_deeper_than_4096() {
+        let mut tree = Tree::new("root");
+        let mut last = tree.root();
+        for _ in 0..5000 {
+            last = tree.add_child(last, "d", NodeKind::Dir, 0).unwrap();
+        }
+        let mut s = Session::new();
+        s.replace_tree(tree);
+        assert!(s.select_node(last));
+        let names = s.selection_names().expect("deep chain is followed");
+        assert_eq!(names.len(), 5001);
+        assert_eq!(names.first().map(String::as_str), Some("root"));
     }
 
     #[test]

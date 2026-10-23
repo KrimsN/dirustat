@@ -23,7 +23,7 @@ mod subtree;
 
 pub use cmd::{
     CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, execute_unlocked, fast_path_status,
-    volume_root_of,
+    tree_node_path, volume_root_of,
 };
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
 pub use paths::{PathClass, classify_path, is_local_path, is_unc_path, normalize_scan_root};
@@ -252,8 +252,21 @@ impl Session {
         self.last_scan = Some(LastScan { backend: outcome.backend, fallback_reason: outcome.fallback_reason });
         self.partial_scan = used_exclusions;
         self.rescan_recommended = false;
+        // A selection made against the previous tree (also one issued while this scan was
+        // finishing) follows its node into the new tree by path instead of being dropped.
+        let kept = self.selection_names().zip(self.selection().and_then(|n| self.node_path(n)));
+        // A selection whose parent chain is broken cannot be followed: report it, never drop it silently.
+        let unfollowable = match (&kept, self.selection()) {
+            (None, Some(node)) => Some(self.node_path(node).unwrap_or_default()),
+            _ => None,
+        };
         self.tree = Arc::new(outcome.tree);
         self.tree_replaced();
+        if let Some((names, path)) = kept {
+            self.restore_selection(&names, path);
+        } else if let Some(path) = unfollowable {
+            self.mark_selection_lost(path);
+        }
         Ok(true)
     }
 }
