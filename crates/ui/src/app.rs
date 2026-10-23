@@ -9,7 +9,9 @@ use crate::palette::{self, PaletteEntry};
 use crate::screenshot::{Region, SaveOptions, ScreenshotStatus, Screenshots};
 use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
-use crate::{cleanups_ui, drive_picker, ext_panel, journal_ui, map_panel, prefs, search_panel, toast, tree_panel};
+use crate::{
+    cleanups_ui, drive_picker, ext_panel, journal_ui, look_prefs, map_panel, prefs, search_panel, toast, tree_panel,
+};
 use dirustat_control::{SharedSession, lock_session, share};
 use dirustat_engine::{CommandError, CommandInfo, FastPathStatus, Session, execute_unlocked};
 use dirustat_model::SizeMode;
@@ -372,6 +374,11 @@ impl DirustatApp {
     pub fn apply_prefs_action(&mut self, action: prefs::PrefsAction) {
         let current = lock_session(&self.session).settings().exclude.clone();
         let result = match action {
+            prefs::PrefsAction::Treemap(edit) => {
+                let mut session = lock_session(&self.session);
+                let (id, params) = look_prefs::command_for(edit, &session.settings().treemap.look);
+                session.execute(id, &params).map(|_| ()).map_err(|e| strip_prefix(&e.to_string()))
+            }
             prefs::PrefsAction::Add(text) => {
                 prefs::with_pattern(&current, &text).and_then(|next| self.set_excludes(&next)).map(|()| {
                     self.state.exclude_input.clear();
@@ -531,7 +538,7 @@ impl DirustatApp {
                 let next = if session.map_size_mode() == SizeMode::Allocated { "logical" } else { "allocated" };
                 Some(json!({ "mode": next }))
             }
-            "treemap.cushion" => Some(json!({})),
+            "treemap.cushion" | "treemap.grid" => Some(json!({})),
             "platform.reveal" | "platform.properties" => session.selection().map(|n| json!({ "id": n.index() })),
             _ => {
                 let info = infos.iter().find(|i| i.id == id)?;
@@ -557,6 +564,7 @@ impl DirustatApp {
             "scan.start"
                 | "view.size_mode"
                 | "treemap.cushion"
+                | "treemap.grid"
                 | "platform.reveal"
                 | "platform.properties"
                 | "file.delete"
@@ -603,6 +611,23 @@ impl DirustatApp {
         }
     }
 
+    /// Tells the user once when the selection did not survive a rescan (`selection_lost` of
+    /// `session.state`, G-067). A later selection clears the engine report and re-arms the toast.
+    fn announce_lost_selection(&mut self) {
+        let lost = lock_session(&self.session).lost_selection().map(str::to_owned);
+        if lost == self.state.lost_announced {
+            return;
+        }
+        if let Some(path) = &lost {
+            toast::push(
+                &mut self.state,
+                toast::ToastKind::Info,
+                format!("The selected item is gone after the rescan and was deselected: {path}"),
+            );
+        }
+        self.state.lost_announced = lost;
+    }
+
     /// Copies the session's scan progress into the status; returns the error count.
     fn progress_into_status(ui_state: &mut UiState, session: &Session) -> u64 {
         let state = session.state_json();
@@ -631,6 +656,7 @@ impl DirustatApp {
             self.applied_zoom = Some(self.state.zoom_percent);
         }
         self.poll_scan(&ctx);
+        self.announce_lost_selection();
         self.poll_browse(&ctx);
         self.poll_command_job(&ctx);
         self.poll_free_space(&ctx);
@@ -729,14 +755,17 @@ impl DirustatApp {
         if !self.state.prefs_open {
             return;
         }
-        let exclude = lock_session(&self.session).settings().exclude.clone();
+        let (exclude, treemap) = {
+            let session = lock_session(&self.session);
+            (session.settings().exclude.clone(), session.settings().treemap)
+        };
         let mut open = true;
         let action = prefs::show(
             ctx,
             &mut open,
             &mut self.state.exclude_input,
             self.state.prefs_error.as_deref(),
-            &exclude,
+            (&exclude, &treemap),
             &self.tokens,
         );
         self.state.prefs_open = open;
@@ -985,14 +1014,14 @@ impl DirustatApp {
                 items.push(item);
             }
         };
-        let (has_selection, has_hits, delete_block, cushion_on) = {
+        let (has_selection, has_hits, delete_block, treemap) = {
             let session = lock_session(&self.session);
             let selection = session.selection();
             let block = match selection {
                 Some(node) => delete_dialog::node_block_reason(&session, node),
                 None => delete_dialog::block_reason(&session),
             };
-            (selection.is_some(), !session.search_hits().is_empty(), block, session.settings().treemap.cushion)
+            (selection.is_some(), !session.search_hits().is_empty(), block, session.settings().treemap)
         };
         for i in infos.iter().filter(|i| !Self::menu_of(i).is_empty() && Self::runnable_without_form(i)) {
             let menu = Self::menu_of(i);
@@ -1013,7 +1042,7 @@ impl DirustatApp {
                 label,
                 shortcut: Self::shortcut_of(i),
                 enabled: i.enabled && satisfied,
-                checked: i.id == "treemap.cushion" && cushion_on,
+                checked: (i.id == "treemap.cushion" && treemap.cushion) || (i.id == "treemap.grid" && treemap.grid),
                 disabled_reason: if needs == Needs::Deletable && has_selection { delete_block } else { None },
             };
             add(menu, item);
@@ -1911,6 +1940,96 @@ mod tests {
         app.apply_prefs_action(prefs::PrefsAction::Remove(99));
         assert_eq!(app.session().settings().exclude, ["*.tmp"]);
         assert_eq!(app.ui_state_json()["prefs_open"], true);
+    }
+
+    #[test]
+    fn treemap_section_edits_run_the_commands_and_report_errors() {
+        use crate::look_prefs::LookAction;
+        let (mut app, _fake) = app_with_fake();
+        let ctx = egui::Context::default();
+        assert!(app.run_command("ui.preferences").is_ok());
+        for theme in [ThemeKind::Dark, ThemeKind::Light] {
+            app.state_mut().theme = theme;
+            assert!(frame(&mut app, &ctx) > 0, "the section draws in {theme:?}");
+        }
+        for edit in [
+            LookAction::Cushion(false),
+            LookAction::Grid(true),
+            LookAction::Height(0.8),
+            LookAction::Scale(0.5),
+            LookAction::Ambient(0.2),
+            LookAction::Diffuse(0.9),
+            LookAction::Azimuth(45.0),
+            LookAction::Elevation(30.0),
+        ] {
+            app.apply_prefs_action(prefs::PrefsAction::Treemap(edit));
+            assert_eq!(app.state().prefs_error, None, "{edit:?}");
+        }
+        let t = app.session().settings().treemap;
+        assert!(!t.cushion && t.grid);
+        assert_eq!((t.look.height, t.look.scale, t.look.ambient, t.look.diffuse), (0.8, 0.5, 0.2, 0.9));
+        assert!(frame(&mut app, &ctx) > 0);
+        // A value the engine refuses is shown inline and changes nothing.
+        app.apply_prefs_action(prefs::PrefsAction::Treemap(LookAction::Height(9.0)));
+        assert!(app.state().prefs_error.is_some());
+        assert_eq!(app.session().settings().treemap.look.height, 0.8);
+        app.apply_prefs_action(prefs::PrefsAction::Treemap(LookAction::Reset));
+        assert_eq!(app.state().prefs_error, None);
+        assert_eq!(app.session().settings().treemap.look, dirustat_engine::CushionLook::default());
+    }
+
+    #[test]
+    fn grid_menu_item_is_checked_and_toggles_the_setting() {
+        let mut app = DirustatApp::new();
+        let item_checked = |app: &DirustatApp| {
+            let infos = app.session().commands();
+            let groups = app.menu_groups(&infos);
+            let found = groups.iter().flat_map(|(_, i)| i).find(|i| i.id == "treemap.grid");
+            found.map(|i| (i.checked, i.enabled))
+        };
+        assert_eq!(item_checked(&app), Some((false, true)), "off by default, listed in the View menu");
+        assert!(app.run_command("treemap.grid").is_ok());
+        assert!(app.session().settings().treemap.grid);
+        assert_eq!(item_checked(&app), Some((true, true)));
+    }
+
+    #[test]
+    fn a_selection_lost_by_a_rescan_is_announced_once() {
+        let Some(dir) = fixture_dir() else { return };
+        let (mut app, _fake) = app_with_fake();
+        let ctx = egui::Context::default();
+        scan_dir(&mut app, &ctx, dir.path());
+        let id = {
+            let session = app.session();
+            let tree = session.tree();
+            tree.children(tree.root())
+                .find(|c| tree.get(*c).is_some_and(|n| n.name() == "small.bin"))
+                .map(|n| n.index())
+        };
+        let id = id.expect("small.bin is in the tree");
+        app.session().execute("select.node", &json!({ "id": id })).unwrap();
+        assert!(frame(&mut app, &ctx) > 0);
+        assert!(app.state().toast.is_none(), "nothing is lost yet");
+        std::fs::remove_file(dir.path().join("small.bin")).unwrap();
+        scan_dir(&mut app, &ctx, dir.path());
+        let toast = app.state().toast.clone().expect("the lost selection is announced");
+        assert_eq!(toast.kind, toast::ToastKind::Info);
+        assert!(toast.text.contains("small.bin"), "{}", toast.text);
+        // Once per loss: a dismissed toast does not come back on later frames.
+        app.state_mut().toast = None;
+        let _ = frame(&mut app, &ctx);
+        assert!(app.state().toast.is_none());
+        // A new selection clears the engine report; losing that one announces again.
+        let big = {
+            let session = app.session();
+            let tree = session.tree();
+            tree.children(tree.root()).find(|c| tree.get(*c).is_some_and(|n| n.name() == "big.bin")).map(|n| n.index())
+        };
+        app.session().execute("select.node", &json!({ "id": big.expect("big.bin") })).unwrap();
+        let _ = frame(&mut app, &ctx);
+        std::fs::remove_file(dir.path().join("big.bin")).unwrap();
+        scan_dir(&mut app, &ctx, dir.path());
+        assert!(app.state().toast.as_ref().is_some_and(|t| t.text.contains("big.bin")));
     }
 
     #[test]

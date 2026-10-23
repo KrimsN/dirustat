@@ -13,7 +13,8 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             label: "Select node",
             menu: "",
             shortcut: None,
-            params_doc: "{\"id\": u64} arena index of the node to select (as reported by session.state).",
+            params_doc: "{\"id\": u64} arena index of the node to select (as reported by session.state). \
+                A selection is carried across a rescan by its name chain from the root; when several siblings share a name the first one in tree order is restored.",
             destructive: false,
             enabled: always,
             run: run_node,

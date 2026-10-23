@@ -75,24 +75,26 @@ impl Default for SortSetting {
     }
 }
 
-/// Treemap display options. `cushion` is read by the shell's painter (`treemap.cushion` command);
-/// the other two are placeholders the layout does not read yet.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Treemap display options, read by the shell's painter. `cushion` is the `treemap.cushion` command,
+/// `grid` the `treemap.grid` command (1-pixel lines along the tile edges), `look` the cushion
+/// constants (`treemap.look`). `show_free_space` is still a placeholder.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TreemapSettings {
     pub cushion: bool,
     pub grid: bool,
     pub show_free_space: bool,
+    pub look: crate::look::CushionLook,
 }
 
 impl Default for TreemapSettings {
     fn default() -> Self {
-        Self { cushion: true, grid: false, show_free_space: false }
+        Self { cushion: true, grid: false, show_free_space: false, look: crate::look::CushionLook::default() }
     }
 }
 
 /// All persisted user settings.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub version: u32,
@@ -150,7 +152,7 @@ fn sanitized_excludes(list: Vec<String>) -> Vec<String> {
 }
 
 /// Result of [`Settings::load_from`]: always usable settings plus an optional warning.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LoadOutcome {
     pub settings: Settings,
     /// Set when the file existed but could not be fully used.
@@ -173,6 +175,7 @@ impl Settings {
     /// Normalizes untrusted values: current version, bounded and de-duplicated recent paths.
     pub fn sanitize(&mut self) {
         self.version = SETTINGS_VERSION;
+        self.treemap.look = self.treemap.look.sanitized();
         let mut kept: Vec<String> = Vec::new();
         for p in std::mem::take(&mut self.recent_paths) {
             if p.is_empty() || p.len() > MAX_PATH_LEN || kept.contains(&p) {
@@ -351,6 +354,7 @@ mod tests {
         let path = dir.path().join("nested").join("settings.json");
         let mut s = Settings { size_mode: SizeModeName::Logical, ..Settings::default() };
         s.treemap.grid = true;
+        s.treemap.look = crate::CushionLook { height: 0.9, light: [0.3, -0.7, 1.1], ..crate::CushionLook::default() };
         s.push_recent("C:\\a");
         s.save_to(&path).unwrap();
         s.push_recent("C:\\b");

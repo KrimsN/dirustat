@@ -1,6 +1,6 @@
 # Control protocol and MCP
 
-> Status: 2026-10-23 · revision 8 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
+> Status: 2026-10-23 · revision 9 · **protocol draft** (implementation in milestone M2). `PROTOCOL_VERSION = 1`.
 
 Goal: any action a human can take is available to an agent; the app can be launched, scan a test folder, run commands and take a screenshot without a mouse or keyboard.
 
@@ -61,7 +61,7 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 
 ## Command conventions
 
-- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; `cleanup.list`, `cleanup.save`, `cleanup.remove`, `cleanup.preview`, `cleanup.run`; planned, not implemented yet: `export.csv`).
+- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; `treemap.cushion`, `treemap.grid`, `treemap.look`; `cleanup.list`, `cleanup.save`, `cleanup.remove`, `cleanup.preview`, `cleanup.run`; planned, not implemented yet: `export.csv`).
 - Groups: `scan`, `view`, `select`, `tree`, `treemap`, `ext`, `file`, `cleanup`, `search`, `filter`, `export`, `snapshot`, `settings`, `ui` (shell only).
 - Parameters are a JSON object; every field is documented in `params_doc`; unknown fields are an `invalid_params` error.
 
@@ -99,3 +99,8 @@ Loopback only, mandatory key, request size limit, rate limit; destructive comman
 - 2026-10-19 · r6: positive local-path validator for path-typed params, `subtree_changed`, subtree verification, unaddressable names, `budget_exhausted` on cleanup preview/run (M4.8).
 - 2026-10-19 · r5: `id` addressing of destructive commands requires `revision`; `partial_tree` and `i_understand_partial`; UNC scan roots refused; `revision`/`budget_exhausted` on listings (M4.6).
 - 2026-10-18 · r4: documented `search.find`, `search.clear`, the filters of `tree.children`/`list.largest_files`, and `scan.start` `exclude` / setting `scan.exclude` (M4.2, G-016).
+
+## Treemap appearance
+
+- `treemap.cushion {enabled?}` and `treemap.grid {enabled?}` toggle (omitted = toggle) and return `{enabled}`.
+- `treemap.look {height?, scale?, ambient?, diffuse?, light?, reset?}` changes the cushion constants and returns `{look}`. Ranges: `height` 0..=4 (default 0.22), `scale` 0..=1 (0.85), `ambient` 0..=1 (0.4), `diffuse` 0..=1 (0.6), `light` `[x, y, z]` direction towards the light (x right, y down, z towards the viewer; `|x|,|y| <= 100`, `z` in 0..=100, length at least 0.001; default `[-1, -1, 2.5]`), `reset` restores the defaults first. A value out of range (or a NaN/infinite one) is `invalid_params` and nothing changes. The same patch is accepted by `settings.set` with key `treemap.look`. A settings file is clamped instead of rejected, so a hand-edited file never produces an unusable look.

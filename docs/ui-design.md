@@ -1,6 +1,6 @@
 # UI design
 
-> Status: 2026-10-18 · revision 3 · draft (implementation in M1/M5).
+> Status: 2026-10-23 · revision 4 · draft (implementation in M1/M5).
 
 ## Layout
 
@@ -31,7 +31,7 @@ Additional surfaces (M4.4): the **search bar** (`ui.toggle_search`, Ctrl+F) unde
 
 ## Treemap
 
-- Squarified layout (`dirustat-treemap`), cushion shading (van Wijk) with parameters: brightness, height, scale, light source, grid.
+- Squarified layout (`dirustat-treemap`), cushion shading (van Wijk) rendered into one cached texture (`ui::cushion_view`) with user-settable parameters: ridge height, scale per level, ambient and diffuse light, light direction (`treemap.look`), and grid lines (`treemap.grid`). Preferences has a **Treemap** section (checkboxes for cushion and grid, six sliders, "Reset cushion look"); every edit is a command and the treemap behind the window repaints while a slider moves. The texture key contains the theme, the look and the grid flag; a picture with another look stands in until the new one is rendered. Tile colours are cached per `MapKey` (revision, layout generation, size, size mode, theme). A selection that does not survive a rescan is announced once in an info toast.
 - Nodes smaller than a threshold (about 2 px) are not laid out. Click selects a node; double click zooms; the tooltip shows path, size and percentage of the parent.
 - Selection is synchronized between the tree, the treemap and the extension list.
 

@@ -30,16 +30,33 @@ pub struct CushionKey {
     pub allocated: bool,
     pub theme: ThemeKind,
     pub scale_bits: u32,
+    /// Bits of the cushion constants (see [`look_bits`]): a new look is a new picture.
+    pub look_bits: [u32; 7],
+    /// Grid lines are part of the picture.
+    pub grid: bool,
+}
+
+/// The cushion constants as comparable bits (height, scale, ambient, diffuse, light x, y, z).
+pub fn look_bits(c: &CushionConfig) -> [u32; 7] {
+    let [lx, ly, lz] = c.light;
+    [c.height, c.scale, c.ambient, c.diffuse, lx, ly, lz].map(f32::to_bits)
 }
 
 impl CushionKey {
     /// An image of `self` may stand in (stretched) for `other` while the right one is rendered: same
-    /// tree, size mode, theme and scale, only the layout generation or panel size differs.
+    /// tree, size mode, theme and scale, only the layout generation or panel size differs. A picture
+    /// with another look or grid setting may stand in too (it is replaced as soon as the right one
+    /// arrives), but a job for it is not worth finishing, see [`Self::same_look`].
     fn can_stand_in_for(&self, other: &Self) -> bool {
         self.revision == other.revision
             && self.allocated == other.allocated
             && self.theme == other.theme
             && self.scale_bits == other.scale_bits
+    }
+
+    /// Same cushion constants and grid setting.
+    fn same_look(&self, other: &Self) -> bool {
+        self.look_bits == other.look_bits && self.grid == other.grid
     }
 }
 
@@ -67,6 +84,8 @@ pub struct CushionInput {
     pub background: [u8; 3],
     pub tiles: Vec<CushionTile>,
     pub config: CushionConfig,
+    /// Darken a 1-pixel line along the right and bottom edge of every leaf tile.
+    pub grid: bool,
 }
 
 /// Largest image side used when the backend does not report a texture limit (egui's own default).
@@ -166,8 +185,46 @@ pub fn render_until(input: &CushionInput, cancel: &AtomicBool) -> Option<ColorIm
                 *pixel = Color32::from_rgb(channel(r, brightness), channel(g, brightness), channel(b, brightness));
             }
         });
+        if input.grid {
+            draw_grid(&mut image, *rect);
+        }
     }
     Some(image)
+}
+
+/// Fraction of its brightness a pixel keeps on a grid line.
+const GRID_KEEP: f32 = 0.55;
+
+/// Pixel index for a coordinate, clamped into `0..=limit` (NaN gives 0).
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn pixel_edge(v: f32, limit: usize) -> usize {
+    if v.is_nan() { 0 } else { v.round().clamp(0.0, to_len_f32(limit)) as usize }
+}
+
+/// Darkens the last pixel column and row of `rect` (clipped to the image). Pixels outside the tile or
+/// the image are never touched; an empty or non-finite rectangle draws nothing.
+fn draw_grid(image: &mut ColorImage, rect: Rect) {
+    let [w, h] = image.size;
+    if !(rect.x.is_finite() && rect.y.is_finite() && rect.w.is_finite() && rect.h.is_finite()) {
+        return;
+    }
+    let (x0, x1) = (pixel_edge(rect.x, w), pixel_edge(rect.x + rect.w, w));
+    let (y0, y1) = (pixel_edge(rect.y, h), pixel_edge(rect.y + rect.h, h));
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+    let mut darken = |col: usize, row: usize| {
+        if let Some(p) = image.pixels.get_mut(row.saturating_mul(w).saturating_add(col)) {
+            *p = Color32::from_rgb(channel(p.r(), GRID_KEEP), channel(p.g(), GRID_KEEP), channel(p.b(), GRID_KEEP));
+        }
+    };
+    for row in y0..y1 {
+        darken(x1 - 1, row);
+    }
+    // The corner pixel was darkened by the column pass; the row pass skips it.
+    for col in x0..x1.saturating_sub(1) {
+        darken(col, y1 - 1);
+    }
 }
 
 /// How long the tree revision must stay unchanged before a render job starts. While a scan advances
@@ -249,7 +306,7 @@ fn texture_for_at(
         }
         guard.seen_revision = Some(key.revision);
     }
-    if let Some(run) = guard.running.as_ref().filter(|r| !r.key.can_stand_in_for(key)) {
+    if let Some(run) = guard.running.as_ref().filter(|r| !r.key.can_stand_in_for(key) || !r.key.same_look(key)) {
         run.cancel.store(true, Ordering::Relaxed);
     }
     if let Some((k, image)) = guard.result.take()
@@ -343,6 +400,7 @@ mod tests {
             scale: 1.0,
             background: [1, 2, 3],
             config: CushionConfig::default(),
+            grid: false,
             tiles: vec![
                 tile(rect(0.0, 0.0, 100.0, 60.0), 0, None, false),
                 tile(rect(0.0, 0.0, 60.0, 60.0), 1, Some(0), true),
@@ -470,6 +528,8 @@ mod tests {
             allocated: true,
             theme: ThemeKind::Dark,
             scale_bits: 1.0_f32.to_bits(),
+            look_bits: look_bits(&CushionConfig::default()),
+            grid: false,
         }
     }
 
@@ -596,6 +656,78 @@ mod tests {
         lock(&shared(&ctx)).running = Some(Running { key: key(2, 3), cancel: Arc::clone(&off) });
         release(&ctx);
         assert!(off.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_new_look_or_grid_is_a_new_picture_and_cancels_the_stale_job() {
+        let ctx = egui::Context::default();
+        let k = key(1, 1);
+        assert_eq!(ask_now(&ctx, &k, true, || Some(input())), None);
+        wait_rendered(&ctx);
+        let first = ask_now(&ctx, &k, true, || Some(input()));
+        assert!(first.is_some());
+        assert_eq!(jobs_started(&ctx), 1);
+        // Another height: the old picture stands in, a new job starts, and the result replaces it.
+        let tall = CushionKey { look_bits: look_bits(&CushionConfig { height: 0.9, ..CushionConfig::default() }), ..k };
+        assert_ne!(tall, k);
+        assert_eq!(ask_now(&ctx, &tall, true, || Some(input())), first, "stale picture stands in");
+        assert_eq!(jobs_started(&ctx), 2, "a changed look renders again");
+        wait_rendered(&ctx);
+        let second = ask_now(&ctx, &tall, true, || Some(input()));
+        assert!(second.is_some() && second != first);
+        assert_eq!(ask_now(&ctx, &tall, true, || Some(input())), second);
+        assert_eq!(jobs_started(&ctx), 2, "same look: cached");
+        // The grid flag is part of the key as well.
+        let gridded = CushionKey { grid: true, ..tall };
+        let _ = ask_now(&ctx, &gridded, true, || Some(input()));
+        assert_eq!(jobs_started(&ctx), 3);
+        // A job whose look is no longer wanted is told to stop.
+        let flag = Arc::new(AtomicBool::new(false));
+        wait_rendered(&ctx);
+        lock(&shared(&ctx)).running = Some(Running { key: gridded, cancel: Arc::clone(&flag) });
+        let _ = ask_now(&ctx, &tall, false, || None);
+        assert!(flag.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn look_parameters_change_the_pixels_and_every_value_is_finite() {
+        let base = render(&input()).pixels;
+        let flat = CushionConfig { height: 0.0, ..CushionConfig::default() };
+        let bright = CushionConfig { ambient: 0.9, diffuse: 0.1, ..CushionConfig::default() };
+        let from_right = CushionConfig { light: [1.0, 0.0, 1.0], ..CushionConfig::default() };
+        for config in [flat, bright, from_right] {
+            let mut i = input();
+            i.config = config;
+            assert_ne!(render(&i).pixels, base, "{config:?}");
+        }
+        // Sanitised hostile constants render without panicking.
+        let mut i = input();
+        i.config =
+            CushionConfig { height: f32::NAN, scale: 9.0, ambient: -1.0, diffuse: f32::INFINITY, light: [0.0; 3] }
+                .sanitized();
+        assert_eq!(render(&i).pixels.len(), 6000);
+    }
+
+    #[test]
+    fn grid_darkens_only_the_right_and_bottom_edge_of_each_leaf() {
+        let mut i = input();
+        let plain = render(&i);
+        i.grid = true;
+        let grid = render(&i);
+        let at =
+            |img: &ColorImage, x: usize, y: usize| img.pixels.get(y * 100 + x).copied().unwrap_or(Color32::TRANSPARENT);
+        // Leaf 1 is 60x60 at the origin: column 59 and row 59 are darker, the interior is unchanged.
+        assert!(at(&grid, 59, 10).r() < at(&plain, 59, 10).r());
+        assert!(at(&grid, 10, 59).r() < at(&plain, 10, 59).r());
+        assert_eq!(at(&grid, 10, 10), at(&plain, 10, 10));
+        assert_eq!(at(&grid, 0, 0), at(&plain, 0, 0), "left and top edges are not drawn");
+        // Background and the non-leaf root tile are untouched.
+        assert_eq!(at(&grid, 80, 45), Color32::from_rgb(1, 2, 3));
+        // Hostile rectangles do not draw outside the image or panic.
+        i.tiles.push(tile(rect(f32::NAN, 0.0, 5.0, 5.0), 9, Some(0), true));
+        i.tiles.push(tile(rect(-1e30, -1e30, 2e30, 2e30), 10, Some(0), true));
+        i.tiles.push(tile(rect(90.0, 50.0, f32::INFINITY, 5.0), 11, Some(0), true));
+        assert_eq!(render(&i).pixels.len(), 6000);
     }
 
     #[test]

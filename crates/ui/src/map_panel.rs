@@ -5,7 +5,7 @@
 
 use crate::cushion_view;
 use crate::state::UiState;
-use crate::theme::{Rgba, Tokens};
+use crate::theme::{Rgba, ThemeKind, Tokens};
 use dirustat_engine::{MapTile, Session, extension_of};
 use dirustat_model::{NodeId, NodeKind, SizeMode, Tree};
 use dirustat_treemap::Rect;
@@ -68,17 +68,29 @@ pub fn node_path(tree: &Tree, node: NodeId) -> String {
 /// Per-tile colours, cached across frames in egui's temp memory.
 #[derive(Clone)]
 struct ColorCache {
-    key: (u64, u64, [u32; 2], bool),
+    key: MapKey,
     colors: Arc<Vec<Rgba>>,
 }
 
-fn cache_key(session: &Session, bounds: Rect) -> (u64, u64, [u32; 2], bool) {
-    (
-        session.revision(),
-        session.map_generation(),
-        [bounds.w.to_bits(), bounds.h.to_bits()],
-        session.map_size_mode() == SizeMode::Allocated,
-    )
+/// What the cached per-tile data depends on. The theme is part of it: tile colours come from the
+/// theme's tokens, so a theme switch must not keep showing the old ones (G-066).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MapKey {
+    revision: u64,
+    generation: u64,
+    bounds: [u32; 2],
+    allocated: bool,
+    theme: ThemeKind,
+}
+
+fn cache_key(session: &Session, bounds: Rect, theme: ThemeKind) -> MapKey {
+    MapKey {
+        revision: session.revision(),
+        generation: session.map_generation(),
+        bounds: [bounds.w.to_bits(), bounds.h.to_bits()],
+        allocated: session.map_size_mode() == SizeMode::Allocated,
+        theme,
+    }
 }
 
 /// The cushion texture for the current layout (see [`cushion_view`]); `None` while there is none yet.
@@ -87,22 +99,24 @@ fn cache_key(session: &Session, bounds: Rect) -> (u64, u64, [u32; 2], bool) {
 fn cushion_texture(
     ctx: &egui::Context,
     tokens: &Tokens,
-    (key, bounds): ((u64, u64, [u32; 2], bool), Rect),
+    (key, bounds): (MapKey, Rect),
     tiles: &[MapTile],
     tree: &Tree,
     colors: &[Rgba],
-    may_start: bool,
+    (treemap, may_start): (&dirustat_engine::TreemapSettings, bool),
 ) -> Option<egui::TextureId> {
-    let (revision, generation, bounds_bits, allocated) = key;
     let max_side = ctx.input(|i| i.max_texture_side);
     let (size, scale) = cushion_view::image_geometry(bounds.w, bounds.h, ctx.pixels_per_point(), max_side)?;
+    let config = treemap.look.config();
     let cushion_key = cushion_view::CushionKey {
-        revision,
-        generation,
-        bounds: bounds_bits,
-        allocated,
+        revision: key.revision,
+        generation: key.generation,
+        bounds: key.bounds,
+        allocated: key.allocated,
         theme: tokens.kind,
         scale_bits: scale.to_bits(),
+        look_bits: cushion_view::look_bits(&config),
+        grid: treemap.grid,
     };
     cushion_view::texture_for(ctx, &cushion_key, may_start && !tiles.is_empty(), || {
         let tiles = tiles
@@ -122,7 +136,8 @@ fn cushion_texture(
             scale,
             background: cushion_view::background_rgb(tokens),
             tiles,
-            config: dirustat_treemap::CushionConfig::default(),
+            config,
+            grid: treemap.grid,
         })
     })
 }
@@ -139,12 +154,12 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     let origin = response.rect.min;
     // The layout is computed on a background thread; until it arrives the previous one is shown.
     let layout_pending = session.map_poll(bounds);
-    let key = cache_key(session, bounds);
+    let key = cache_key(session, bounds, state.theme);
     let cache_id = ui.id().with("map_colors");
     let cached: Option<ColorCache> = ui.data(|d| d.get_temp::<ColorCache>(cache_id));
     let selected = session.selection();
     let mode = session.map_size_mode();
-    let cushion_on = session.settings().treemap.cushion;
+    let treemap_settings = session.settings().treemap;
 
     let pointer =
         response.hover_pos().and_then(|p| pointer_to_bounds((origin.x, origin.y), (bounds.w, bounds.h), (p.x, p.y)));
@@ -182,7 +197,7 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     let ext_hits: Option<Arc<Vec<bool>>> = state.selected_ext.as_deref().map(|want| {
         let id = ui.id().with("map_ext_hits");
         let hit_key = (key, want.to_owned());
-        if let Some((k, v)) = ui.data(|d| d.get_temp::<(((u64, u64, [u32; 2], bool), String), Arc<Vec<bool>>)>(id))
+        if let Some((k, v)) = ui.data(|d| d.get_temp::<((MapKey, String), Arc<Vec<bool>>)>(id))
             && k == hit_key
         {
             return v;
@@ -200,8 +215,8 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
     painter.rect_filled(response.rect, 0.0, Tokens::color(tokens.background));
     // Cushion shading is one cached texture rendered off the UI thread; flat tiles are drawn until the
     // first picture arrives and whenever the setting is off.
-    let cushion = if cushion_on {
-        cushion_texture(ui.ctx(), &tokens, (key, bounds), tiles, tree, &colors, !layout_pending)
+    let cushion = if treemap_settings.cushion {
+        cushion_texture(ui.ctx(), &tokens, (key, bounds), tiles, tree, &colors, (&treemap_settings, !layout_pending))
     } else {
         cushion_view::release(ui.ctx());
         None
@@ -211,7 +226,8 @@ pub fn show(ui: &mut egui::Ui, session: &mut Session, state: &mut UiState) {
         painter.image(texture, response.rect, uv, Color32::WHITE);
     }
     let frame_stroke = Stroke::new(1.0, Tokens::color(tokens.border));
-    let leaf_stroke = Stroke::new(1.0, Color32::from_black_alpha(70));
+    // With the grid on, the flat tiles get a clearly visible outline instead of the faint default.
+    let leaf_stroke = Stroke::new(1.0, Color32::from_black_alpha(if treemap_settings.grid { 170 } else { 70 }));
     let mut selected_rect = None;
     let mut hovered_rect = None;
     for (tile, color) in tiles.iter().zip(colors.iter()) {
@@ -441,6 +457,67 @@ mod tests {
         n
     }
 
+    /// Runs one frame and returns the colour cache the panel left in egui's memory.
+    fn frame_cache(ctx: &egui::Context, s: &mut Session, st: &mut UiState) -> Option<ColorCache> {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0))),
+            ..egui::RawInput::default()
+        };
+        let mut cache = None;
+        let out = ctx.run_ui(input, |ui| {
+            show(ui, s, st);
+            cache = ui.data(|d| d.get_temp::<ColorCache>(ui.id().with("map_colors")));
+        });
+        out.drop_without_applying_deltas();
+        cache
+    }
+
+    fn wait_for_layout(s: &mut Session) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while s.map_poll(bounds_for_size(400.0, 300.0)) {
+            assert!(std::time::Instant::now() < deadline, "background layout never finished");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn a_theme_switch_rebuilds_the_tile_colours() {
+        // G-066: the cache key had no theme, so colours stayed stale after a switch.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("empty")).unwrap();
+        std::fs::write(dir.path().join("a.bin"), vec![1u8; 6000]).unwrap();
+        let handle = dirustat_scan::start(dir.path(), dirustat_scan::ScanOptions::default()).unwrap();
+        let mut s = Session::new();
+        assert_eq!(s.finish_scan(handle), Ok(true));
+        let mut st = UiState::default();
+        let ctx = egui::Context::default();
+        let _ = frame_cache(&ctx, &mut s, &mut st);
+        wait_for_layout(&mut s);
+        let dark = frame_cache(&ctx, &mut s, &mut st).expect("cache after the layout arrived");
+        assert_eq!(dark.key.theme, ThemeKind::Dark);
+        let dark_tokens = Tokens::for_kind(ThemeKind::Dark);
+        let light_tokens = Tokens::for_kind(ThemeKind::Light);
+        assert_ne!(dark_tokens.surface, light_tokens.surface);
+        let tree = s.tree().clone();
+        let tiles: Vec<MapTile> = s.map_ready_view().1.tiles().to_vec();
+        let expected = |tokens: &Tokens| -> Vec<Rgba> {
+            tiles
+                .iter()
+                .map(|t| tree.get(t.node).map_or(tokens.surface, |n| tile_color(n.kind(), n.name(), tokens, false)))
+                .collect()
+        };
+        assert_eq!(*dark.colors, expected(&dark_tokens));
+        st.theme = ThemeKind::Light;
+        let light = frame_cache(&ctx, &mut s, &mut st).expect("cache");
+        assert_eq!(light.key.theme, ThemeKind::Light, "the key follows the theme");
+        assert_ne!(light.key, dark.key);
+        assert_eq!(*light.colors, expected(&light_tokens), "colours are rebuilt with the light tokens");
+        let has_dir_tile = tiles.iter().any(|t| tree.get(t.node).is_some_and(|n| n.kind() == NodeKind::Dir));
+        if has_dir_tile {
+            assert_ne!(*dark.colors, *light.colors, "a collapsed directory uses the theme's surface colour");
+        }
+    }
+
     #[test]
     fn headless_frame_paints_tiles_and_click_selects() {
         let (mut s, _dir) = scanned_session();
@@ -528,6 +605,78 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert_eq!(cushion_view::jobs_started(&ctx), jobs + 1);
+    }
+
+    #[test]
+    fn a_new_look_or_grid_renders_one_new_picture_and_an_unchanged_one_does_not() {
+        let (mut s, _dir) = scanned_session();
+        let (mut st, ctx) = (UiState::default(), egui::Context::default());
+        settled(&ctx, &mut s, &mut st);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let wait_image = |ctx: &egui::Context, s: &mut Session, st: &mut UiState, jobs: u64| {
+            // The old picture stays on screen (1 image shape) while the new one renders.
+            while cushion_view::jobs_started(ctx) < jobs || cushion_view::is_rendering(ctx) {
+                assert_eq!(image_shapes(ctx, s, st), 1, "a stand-in picture keeps the treemap visible");
+                assert!(std::time::Instant::now() < deadline, "render never finished");
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            assert_eq!(image_shapes(ctx, s, st), 1);
+        };
+        while image_shapes(&ctx, &mut s, &mut st) == 0 {
+            assert!(std::time::Instant::now() < deadline, "cushion image never arrived");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let jobs = cushion_view::jobs_started(&ctx);
+        s.execute("treemap.look", &serde_json::json!({ "height": 0.9 })).unwrap();
+        assert_eq!(image_shapes(&ctx, &mut s, &mut st), 1);
+        wait_image(&ctx, &mut s, &mut st, jobs + 1);
+        assert_eq!(cushion_view::jobs_started(&ctx), jobs + 1, "a new look renders once");
+        // The same value again changes nothing.
+        s.execute("treemap.look", &serde_json::json!({ "height": 0.9 })).unwrap();
+        for _ in 0..3 {
+            assert_eq!(image_shapes(&ctx, &mut s, &mut st), 1);
+        }
+        assert_eq!(cushion_view::jobs_started(&ctx), jobs + 1, "unchanged look: cached");
+        s.execute("treemap.grid", &serde_json::json!({ "enabled": true })).unwrap();
+        assert_eq!(image_shapes(&ctx, &mut s, &mut st), 1);
+        wait_image(&ctx, &mut s, &mut st, jobs + 2);
+        assert_eq!(cushion_view::jobs_started(&ctx), jobs + 2, "the grid is part of the picture");
+        // Resetting the settings restores the default look (one more picture, never a blank map).
+        s.execute("settings.reset", &serde_json::json!({})).unwrap();
+        assert_eq!(image_shapes(&ctx, &mut s, &mut st), 1);
+    }
+
+    #[test]
+    fn grid_makes_the_flat_outline_stronger() {
+        let (mut s, _dir) = scanned_session();
+        let (mut st, ctx) = (UiState::default(), egui::Context::default());
+        settled(&ctx, &mut s, &mut st);
+        s.execute("treemap.cushion", &serde_json::json!({ "enabled": false })).unwrap();
+        let alpha_of_leaf_strokes = |ctx: &egui::Context, s: &mut Session, st: &mut UiState| -> Vec<u8> {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, egui::vec2(400.0, 300.0))),
+                ..egui::RawInput::default()
+            };
+            let out = ctx.run_ui(input, |ui| show(ui, s, st));
+            let mut alphas: Vec<u8> = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::epaint::Shape::Rect(r) if r.stroke.width > 0.0 && r.fill == Color32::TRANSPARENT => {
+                        Some(r.stroke.color.a())
+                    }
+                    _ => None,
+                })
+                .collect();
+            alphas.sort_unstable();
+            out.drop_without_applying_deltas();
+            alphas
+        };
+        let plain = alpha_of_leaf_strokes(&ctx, &mut s, &mut st);
+        s.execute("treemap.grid", &serde_json::json!({ "enabled": true })).unwrap();
+        let grid = alpha_of_leaf_strokes(&ctx, &mut s, &mut st);
+        assert!(plain.contains(&70) && !plain.contains(&170), "{plain:?}");
+        assert!(grid.contains(&170) && !grid.contains(&70), "{grid:?}");
     }
 
     #[test]

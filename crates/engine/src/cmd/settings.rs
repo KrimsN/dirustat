@@ -27,6 +27,7 @@ pub(super) fn specs() -> Vec<CommandSpec> {
             params_doc: "{\"key\": string, \"value\": any} keys: size_mode (\"logical\"|\"allocated\"), \
                 ext_sort / tree_sort ({\"key\": \"size\"|\"name\"|\"count\", \"descending\": bool}), \
                 treemap.cushion / treemap.grid / treemap.show_free_space (bool), \
+                treemap.look (partial cushion look as in the treemap.look command; out of range is invalid_params), \
                 scan.prefer_fast_path (bool, default true), \
                 scan.exclude (array of at most 256 non-empty wildcard patterns, default []), \
                 recent_paths (array of at most 20 non-empty strings). Unknown key is invalid_params.",
@@ -80,6 +81,10 @@ fn apply_key(s: &mut Settings, key: &str, value: &Value) -> Result<(), CommandEr
         "tree_sort" => s.tree_sort = typed(key, value)?,
         "treemap.cushion" => s.treemap.cushion = typed(key, value)?,
         "treemap.grid" => s.treemap.grid = typed(key, value)?,
+        "treemap.look" => {
+            let patch: crate::LookPatch = typed(key, value)?;
+            s.treemap.look = patch.apply(s.treemap.look).map_err(invalid)?;
+        }
         "treemap.show_free_space" => s.treemap.show_free_space = typed(key, value)?,
         "scan.prefer_fast_path" => s.prefer_fast_path = typed(key, value)?,
         "scan.exclude" => s.exclude = super::scan::checked_excludes(typed(key, value)?)?,

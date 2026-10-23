@@ -161,6 +161,9 @@ pub struct UiState {
     /// Lifetime bookkeeping of `notice`; not serialized and ignored by equality.
     #[serde(skip)]
     pub notice_clock: NoticeClock,
+    /// The lost-selection path already announced in a toast (so it is shown once per loss).
+    #[serde(skip)]
+    pub lost_announced: Option<String>,
 }
 
 /// How long a status-bar notice stays when nothing else clears it.
@@ -248,6 +251,7 @@ impl Default for UiState {
             cleanups: crate::cleanups_ui::CleanupsState::default(),
             journal: crate::journal_ui::JournalState::default(),
             notice_clock: NoticeClock::default(),
+            lost_announced: None,
         }
     }
 }

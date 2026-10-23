@@ -9,6 +9,7 @@ mod cleanup;
 mod detached;
 mod file;
 mod list;
+mod look;
 mod platform;
 mod privileges;
 mod scan;
@@ -77,6 +78,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(select::specs());
         all.extend(view::specs());
         all.extend(treemap::specs());
+        all.extend(look::specs());
         all.extend(session::specs());
         all.extend(settings::specs());
         all.extend(tree::specs());

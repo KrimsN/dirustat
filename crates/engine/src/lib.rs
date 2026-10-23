@@ -13,6 +13,7 @@ mod fsops;
 mod guard;
 mod journal;
 mod launch;
+mod look;
 mod map;
 mod paths;
 mod protected;
@@ -30,6 +31,7 @@ pub use paths::{PathClass, classify_path, is_local_path, is_unc_path, normalize_
 
 pub use drives::{DriveInfo, MAX_DRIVES};
 pub use launch::{LaunchArgs, LaunchError, USAGE as LAUNCH_USAGE};
+pub use look::{CushionLook, LookPatch};
 pub use settings::{
     LoadOutcome, MAX_RECENT_PATHS, SETTINGS_VERSION, Settings, SettingsError, SizeModeName, SortKey, SortSetting,
     TreemapSettings, default_dir as settings_dir, default_path as settings_path,

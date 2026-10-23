@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-23 · revision 12 · WinDirStat done 11/34 (partial 17), WizTree done 2/12 (partial 4). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-23 · revision 13 · WinDirStat done 11/34 (partial 18), WizTree done 2/12 (partial 4). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -22,7 +22,7 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 12 | "Free space" and "unknown" items | `view.free_space` | M2 | missing |
 | 13 | Squarified treemap | `treemap.render` | M1 | done 2026-10-13 (layout invariants + extension-coloured rendering, hover tooltip; flat, cushion is row 14; screenshot `docs/img/m1-main.png`) |
 | 14 | Cushion shading | `treemap.cushion` | M5 | partial 2026-10-23 (M5.1: van Wijk cushion shading in `crates/treemap/src/cushion.rs`, background renderer `crates/ui/src/cushion_view.rs` cached by revision/size/theme, command `treemap.cushion` / View > Cushion shading, setting `treemap.cushion` default on; treemap tests 10 -> 22; 100k nodes at 1080p about 12 ms per layout on a background thread, 4K 43.5 ms; checked on the synthetic demo screenshot only; budget `treemap_cushion_shading_100k_nodes_1080p` 25 ms not enforced, not re-measured on 1M nodes, about 12 of 2.07M pixels at 1080p show the background colour, wasm32 check not run locally; G-018) |
-| 15 | Treemap options (grid, brightness, height, scale, light) | `treemap.options` | M5 | missing (the cushion look constants exist in code but are not user-settable; `treemap.grid` and `show_free_space` are placeholders; M5.2) |
+| 15 | Treemap options (grid, brightness, height, scale, light) | `treemap.look`, `treemap.grid` | M5 | partial 2026-10-23 (M5.2: `treemap.look` sets height, scale, ambient, diffuse and light direction (validated, persisted as `treemap.look`), `treemap.grid` draws tile edge lines, Preferences "Treemap" section with live sliders and View > Grid lines; engine tests +8, ui tests +14; checked on the synthetic demo screenshots `docs/img/m52-prefs-*.png` only; no separate brightness setting, `show_free_space` is still a placeholder; G-018) |
 | 16 | Zoom into/out of a directory | `view.zoom_in` / `view.zoom_out` | M2 | missing |
 | 17 | Highlight the selection on the treemap | `treemap.highlight` | M1 | partial (selection synced to the map; not visually verified) |
 | 18 | Select by clicking the treemap | `treemap.pick` | M1 | partial (click select via `treemap::hit_test`; not a command yet) |
@@ -68,7 +68,7 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 
 | Metric | Value |
 |---|---|
-| WinDirStat, `done` | 11 / 34 (partial 17) |
+| WinDirStat, `done` | 11 / 34 (partial 18) |
 | WizTree, `done` | 2 / 12 (partial 4) |
 | MFT scan speed (1M files) | 0.31 / 0.74 / 3.26 s over 3 elevated release runs on a VHDX (budget ≤ 3 s, one outlier: G-052; devlog 2026-10-15) |
 
@@ -86,3 +86,4 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 - 2026-10-19 · r10: M4.7 UI part 2. Rows 26 (delete to recycle bin), 27 (delete permanently) and 29 (user-defined cleanups) moved `partial` -> `done` with screenshots. Recounted: WinDirStat done 10/34, partial 13.
 - 2026-10-19 · r11: M4 code complete (M4.1-M4.10). Rows 25 (reveal), 28 (copy path) and 30 (properties) moved `missing` -> `partial` (commands, UI hooks and tests; real shell calls never run by agents, no screenshots). Row 31 (search by name) moved `missing` -> `done` (same feature and evidence as B5). Rows 26, 27, 29 stay `done`; M4.8 and M4.10 safety fixes (QA-116..QA-146) do not change row status. Fixed the stale Metrics table (it still said 7/34). Recounted from rows: WinDirStat done 11/34 (A1, A3, A10, A11, A13, A21, A26, A27, A29, A31, A33), partial 16 (A4-A9, A17, A18, A20, A22, A23, A25, A28, A30, A32, A34); WizTree unchanged (done 2: B5, B10; partial 4: B1, B2, B4, B11).
 - 2026-10-23 · r12: M5.1 (G-018 first half). Row 14 (cushion shading) moved `missing` -> `partial`: implemented and tested, but checked visually on the synthetic demo only, budget not enforced, 1M nodes not re-measured. Row 15 stays `missing` (note added). The G-064, G-065, G-053, G-054 fixes do not change any row. Recounted from rows: WinDirStat done 11/34 (unchanged), partial 17 (A4-A9, A14, A17, A18, A20, A22, A23, A25, A28, A30, A32, A34); WizTree unchanged (done 2, partial 4). Metrics: the MFT scan speed row now quotes the 2026-10-15 measurement, as `ROADMAP.md` already did.
+- 2026-10-23 · r13: M5.2 (G-018 second half). Row 15 moved `missing` -> `partial` (look constants and grid user-settable, UI and tests, demo screenshots only). Recounted: WinDirStat done 11/34, partial 18. G-066 and G-067 closed (no parity row).

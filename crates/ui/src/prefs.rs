@@ -8,10 +8,12 @@ use crate::theme::Tokens;
 pub const MAX_PATTERNS: usize = 256;
 
 /// What the user did in the window this frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PrefsAction {
     Add(String),
     Remove(usize),
+    /// A change in the Treemap section (cushion, grid, cushion look).
+    Treemap(crate::look_prefs::LookAction),
 }
 
 /// The list with `input` appended. Empty input and duplicates are reported, not added.
@@ -42,11 +44,18 @@ pub fn show(
     open: &mut bool,
     input: &mut String,
     error: Option<&str>,
-    exclude: &[String],
+    (exclude, treemap): (&[String], &dirustat_engine::TreemapSettings),
     tokens: &Tokens,
 ) -> Option<PrefsAction> {
     let mut action = None;
-    egui::Window::new("Preferences").open(open).collapsible(false).default_width(420.0).show(ctx, |ui| {
+    // The window scrolls when the screen is too short for the treemap section plus the exclusions list.
+    let max_height = (ctx.content_rect().height() - 60.0).max(160.0);
+    let window = egui::Window::new("Preferences").open(open).collapsible(false).default_width(420.0);
+    window.vscroll(true).max_height(max_height).show(ctx, |ui| {
+        if let Some(edit) = crate::look_prefs::show(ui, treemap, tokens) {
+            action = Some(PrefsAction::Treemap(edit));
+        }
+        ui.separator();
         ui.heading("Scan exclusions");
         ui.colored_label(
             Tokens::color(tokens.text_muted),
@@ -109,7 +118,14 @@ mod tests {
             for _ in 0..2 {
                 let raw = egui::RawInput { screen_rect: Some(screen), ..egui::RawInput::default() };
                 let out = ctx.run_ui(raw, |ui| {
-                    let _ = show(ui.ctx(), &mut open, &mut input, None, &exclude, &tokens);
+                    let _ = show(
+                        ui.ctx(),
+                        &mut open,
+                        &mut input,
+                        None,
+                        (&exclude, &dirustat_engine::TreemapSettings::default()),
+                        &tokens,
+                    );
                 });
                 out.drop_without_applying_deltas();
             }

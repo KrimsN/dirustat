@@ -14,6 +14,7 @@ pub mod ext_colors;
 pub mod ext_panel;
 pub mod fonts;
 pub mod journal_ui;
+pub mod look_prefs;
 pub mod map_panel;
 pub mod palette;
 pub mod prefs;
