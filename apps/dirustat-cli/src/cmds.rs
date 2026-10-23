@@ -413,6 +413,32 @@ mod tests {
         assert!(text.contains("file.delete_permanent") && text.contains("junk.bin"), "{text}");
     }
 
+    /// G-019: `run` exports the scanned tree; the PNG export needs the desktop app.
+    #[test]
+    fn run_exports_csv_and_json_and_reports_png_as_unsupported() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), b"hello").unwrap();
+        let out_dir = fixture.path().join("out");
+        std::fs::create_dir_all(&out_dir).unwrap();
+        let root_s = root.to_string_lossy().into_owned();
+        let csv = out_dir.join("t.csv").to_string_lossy().into_owned();
+        let json_path = out_dir.join("t.json").to_string_lossy().into_owned();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let calls = [call("export.csv", json!({ "path": csv })), call("export.json", json!({ "path": json_path }))];
+        let ran = run_cmds(Some(&root_s), &calls, false, None, None, &mut out, &mut err);
+        assert!(ran.is_ok(), "{:?}", ran.err().map(|f| f.message));
+        assert!(std::fs::read_to_string(out_dir.join("t.csv")).unwrap().contains("a.txt"));
+        let parsed: Value = serde_json::from_slice(&std::fs::read(out_dir.join("t.json")).unwrap()).unwrap();
+        assert_eq!(parsed["rows"], 2);
+        let again = run_cmds(Some(&root_s), &calls[..1], false, None, None, &mut out, &mut err);
+        assert!(again.is_err(), "an existing file is refused without overwrite");
+        let png = [call("export.png", json!({ "path": out_dir.join("t.png").to_string_lossy() }))];
+        assert!(run_cmds(Some(&root_s), &png, false, None, None, &mut out, &mut err).is_err());
+        assert!(!out_dir.join("t.png").exists());
+    }
+
     #[test]
     fn write_atomic_replaces_and_leaves_no_temp_files() {
         let dir = tempfile::tempdir().unwrap();

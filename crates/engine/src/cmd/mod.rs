@@ -7,6 +7,7 @@
 
 mod cleanup;
 mod detached;
+mod export;
 mod file;
 mod list;
 mod look;
@@ -88,6 +89,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(platform::specs());
         all.extend(file::specs());
         all.extend(cleanup::specs());
+        all.extend(export::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all

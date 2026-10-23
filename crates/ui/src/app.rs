@@ -3,7 +3,7 @@
 //! Every action goes through a command: menus are built from `Session::commands()` plus the
 //! shell-only `UI_COMMANDS`, buttons and shortcuts dispatch by id (`DirustatApp::run_command`).
 
-use crate::commands::{self, Needs, UI_COMMANDS, UiEffect};
+use crate::commands::{self, ExportKind, Needs, UI_COMMANDS, UiEffect};
 use crate::delete_dialog::{self, DeleteMode, DialogEvent, DialogRequest};
 use crate::palette::{self, PaletteEntry};
 use crate::screenshot::{Region, SaveOptions, ScreenshotStatus, Screenshots};
@@ -58,10 +58,50 @@ pub struct DirustatApp {
     command_job: Option<CommandJob>,
     /// Scan root and pending answer of `platform.free_space`, asked on a worker thread.
     free_job: Option<(String, CommandJob)>,
+    /// The save dialog of File > Export running on a helper thread, with what it will write.
+    export_pick: Option<(ExportKind, DialogAnswer)>,
+    /// The `export.*` command running on a worker thread.
+    export_job: Option<CommandJob>,
 }
 
 /// The answer of a command running on a worker thread.
 type CommandJob = Receiver<Result<Value, CommandError>>;
+
+/// The answer of a native file dialog running on a helper thread.
+type DialogAnswer = Receiver<Result<Option<PathBuf>, PlatformError>>;
+
+/// The submenu a menu label belongs to (`Export/CSV…` -> `Export`).
+fn submenu_of(label: &str) -> Option<&str> {
+    label.split_once('/').map(|(sub, _)| sub)
+}
+
+/// Draws one menu entry; true when it was clicked.
+fn menu_entry(ui: &mut egui::Ui, item: &MenuItem, label: &str) -> bool {
+    // A bullet marks a checked item (the filled-button style reads as a stray bar).
+    let label = if item.checked { format!("\u{2022} {label}") } else { label.to_owned() };
+    let mut button = egui::Button::new(label);
+    if let Some(sc) = item.shortcut {
+        button = button.shortcut_text(sc);
+    }
+    let mut response = ui.add_enabled(item.enabled, button);
+    if let Some(reason) = item.disabled_reason {
+        response = response.on_disabled_hover_text(reason);
+    }
+    response.clicked()
+}
+
+/// Status-bar text for a finished `export.*` command.
+fn export_notice(done: &Value) -> String {
+    let path = done.get("path").and_then(Value::as_str).unwrap_or("the file");
+    let what = match done.get("rows").and_then(Value::as_u64) {
+        Some(rows) if done.get("truncated").and_then(Value::as_bool) == Some(true) => {
+            format!("{rows} rows (limit reached)")
+        }
+        Some(rows) => format!("{rows} rows"),
+        None => "the treemap image".to_owned(),
+    };
+    format!("Exported {what} to {path}")
+}
 
 /// Share of the window width the treemap always keeps, and its absolute floor in points.
 const MAP_MIN_FRACTION: f32 = 0.40;
@@ -148,6 +188,7 @@ impl DirustatApp {
 
     /// Builds the app around a session that is also shared with the control server.
     pub fn with_shared_session(session: SharedSession) -> Self {
+        crate::export_png::register();
         Self {
             session,
             state: UiState::default(),
@@ -166,6 +207,8 @@ impl DirustatApp {
             browse_requested: false,
             command_job: None,
             free_job: None,
+            export_pick: None,
+            export_job: None,
         }
     }
 
@@ -269,6 +312,7 @@ impl DirustatApp {
                 UiEffect::Quit => self.quit_requested = true,
                 UiEffect::CopyPath => self.copy_selected_path()?,
                 UiEffect::BrowseFolder => self.start_browse()?,
+                UiEffect::Export(kind) => self.start_export(kind)?,
                 UiEffect::None => {}
             }
             return Ok(json!({ "ok": true }));
@@ -350,6 +394,79 @@ impl DirustatApp {
             }
             Err(err) => self.state.notice = Some(format!("Cannot open the folder dialog: {err}")),
         }
+    }
+
+    /// Opens the native save dialog on a helper thread; [`Self::poll_export`] picks up the answer and
+    /// runs the export command. Like the folder dialog, only the interactive entry points reach
+    /// this: the `export.*` commands themselves take a path and never open a dialog.
+    fn start_export(&mut self, kind: ExportKind) -> Result<(), String> {
+        if self.export_pick.is_some() || self.export_job.is_some() {
+            return Ok(());
+        }
+        if lock_session(&self.session).tree().len() <= 1 {
+            return Err("Nothing to export: scan a folder first".to_owned());
+        }
+        let (tx, rx) = mpsc::channel();
+        let picker = Arc::clone(&self.picker);
+        std::thread::Builder::new()
+            .name("save-dialog".to_owned())
+            .spawn(move || {
+                let _ = tx.send(picker.pick_save_file(kind.suggested_name(), kind.extension()));
+            })
+            .map_err(|_| "Cannot open the save dialog".to_owned())?;
+        self.export_pick = Some((kind, rx));
+        Ok(())
+    }
+
+    /// Applies a finished save dialog and a finished export, if any, without blocking. The file the
+    /// user chose in the dialog counts as the explicit permission to replace it and to write into
+    /// the scanned folder (the dialog already asked about overwriting).
+    fn poll_export(&mut self, ctx: &egui::Context) {
+        if let Some((kind, rx)) = &self.export_pick {
+            let kind = *kind;
+            let answer = match rx.try_recv() {
+                Ok(answer) => answer,
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(SCAN_REPAINT);
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => Err(PlatformError::Failed {
+                    op: "pick_save_file",
+                    message: "the dialog thread ended without an answer".to_owned(),
+                }),
+            };
+            self.export_pick = None;
+            ctx.request_repaint();
+            match answer {
+                Ok(Some(file)) => {
+                    let params =
+                        json!({ "path": file.to_string_lossy(), "overwrite": true, "allow_inside_scan": true });
+                    self.export_job = Some(self.spawn_command(kind.command(), params));
+                }
+                Ok(None) => {}
+                Err(PlatformError::Unsupported(_)) => {
+                    self.state.notice = Some("The save dialog is not available here".to_owned());
+                }
+                Err(err) => self.state.notice = Some(format!("Cannot open the save dialog: {err}")),
+            }
+        }
+        let Some(rx) = &self.export_job else { return };
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(SCAN_REPAINT);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => {
+                Err(CommandError::Platform("the export stopped without an answer".to_owned()))
+            }
+        };
+        self.export_job = None;
+        self.state.notice = Some(match result {
+            Ok(v) => export_notice(&v),
+            Err(e) => format!("Export failed: {e}"),
+        });
+        ctx.request_repaint();
     }
 
     /// Queues the path of the selected node for the clipboard.
@@ -658,6 +775,7 @@ impl DirustatApp {
         self.poll_scan(&ctx);
         self.announce_lost_selection();
         self.poll_browse(&ctx);
+        self.poll_export(&ctx);
         self.poll_command_job(&ctx);
         self.poll_free_space(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) && self.deletion_running() {
@@ -1074,19 +1192,23 @@ impl DirustatApp {
             egui::MenuBar::new().ui(ui, |ui| {
                 for (name, items) in &groups {
                     ui.menu_button(name, |ui| {
+                        let mut opened: Vec<&str> = Vec::new();
                         for item in items {
-                            // A bullet marks a checked item (the filled-button style reads as a stray bar).
-                            let label =
-                                if item.checked { format!("\u{2022} {}", item.label) } else { item.label.clone() };
-                            let mut button = egui::Button::new(label);
-                            if let Some(sc) = item.shortcut {
-                                button = button.shortcut_text(sc);
-                            }
-                            let mut response = ui.add_enabled(item.enabled, button);
-                            if let Some(reason) = item.disabled_reason {
-                                response = response.on_disabled_hover_text(reason);
-                            }
-                            if response.clicked() {
+                            // A label `Sub/Item` lives in the submenu `Sub`, drawn where its first item sits.
+                            if let Some((sub, _)) = item.label.split_once('/') {
+                                if !opened.contains(&sub) {
+                                    opened.push(sub);
+                                    ui.menu_button(sub, |ui| {
+                                        for member in items.iter().filter(|m| submenu_of(&m.label) == Some(sub)) {
+                                            let label = member.label.split_once('/').map_or("", |(_, l)| l);
+                                            if menu_entry(ui, member, label) {
+                                                clicked = Some(member.id.clone());
+                                                ui.close();
+                                            }
+                                        }
+                                    });
+                                }
+                            } else if menu_entry(ui, item, &item.label) {
                                 clicked = Some(item.id.clone());
                                 ui.close();
                             }
@@ -1766,6 +1888,78 @@ mod tests {
         let _ = frame(&mut app, &ctx);
         assert!(matches!(app.state().scan, ScanStatus::Done { .. }), "{:?}", app.state().scan);
         assert!(fake.calls().contains(&dirustat_platform::PlatformCall::PickFolder));
+    }
+
+    /// Runs frames until the save dialog and the export it started are both done.
+    fn wait_export(app: &mut DirustatApp, ctx: &egui::Context) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while (app.export_pick.is_some() || app.export_job.is_some()) && Instant::now() < deadline {
+            let _ = frame(app, ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = frame(app, ctx);
+    }
+
+    fn with_small_tree(app: &DirustatApp) {
+        let mut t = dirustat_model::Tree::new("root");
+        t.add_child(t.root(), "a.txt", dirustat_model::NodeKind::File, 10).unwrap();
+        t.aggregate();
+        lock_session(&app.session).replace_tree(t);
+    }
+
+    #[test]
+    fn export_menu_commands_ask_for_a_file_and_write_it() {
+        let (mut app, fake) = app_with_fake();
+        app.set_folder_picker(fake.clone());
+        with_small_tree(&app);
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        for (id, name, ext) in [("ui.export_csv", "out.csv", "csv"), ("ui.export_json", "out.json", "json")] {
+            fake.set_picked_save_file(Some(dir.path().join(name)));
+            assert!(app.run_command(id).is_ok(), "{id}");
+            wait_export(&mut app, &ctx);
+            let text = std::fs::read_to_string(dir.path().join(name)).unwrap();
+            assert!(text.contains("a.txt"), "{id}: {text}");
+            let notice = app.state().notice.clone().unwrap_or_default();
+            assert!(notice.starts_with("Exported 2 rows to "), "{notice}");
+            assert!(
+                fake.calls()
+                    .iter()
+                    .any(|c| matches!(c, dirustat_platform::PlatformCall::PickSaveFile(_, e) if e == ext))
+            );
+        }
+        // The dialog's own overwrite prompt is the permission to replace the chosen file.
+        fake.set_picked_save_file(Some(dir.path().join("out.csv")));
+        assert!(app.run_command("ui.export_csv").is_ok());
+        wait_export(&mut app, &ctx);
+        assert!(app.state().notice.clone().unwrap_or_default().starts_with("Exported"));
+    }
+
+    #[test]
+    fn cancelled_save_dialog_and_empty_session_write_nothing() {
+        let (mut app, fake) = app_with_fake();
+        app.set_folder_picker(fake.clone());
+        let ctx = egui::Context::default();
+        assert!(app.run_command("ui.export_csv").is_err(), "nothing scanned yet");
+        assert!(
+            !fake.calls().iter().any(|c| matches!(c, dirustat_platform::PlatformCall::PickSaveFile(..))),
+            "no dialog without a tree"
+        );
+        with_small_tree(&app);
+        assert!(app.run_command("ui.export_png").is_ok());
+        wait_export(&mut app, &ctx);
+        assert!(app.state().notice.is_none() && app.export_job.is_none(), "Cancel does nothing");
+    }
+
+    #[test]
+    fn programmatic_exports_never_open_the_save_dialog() {
+        let (app, fake) = app_with_fake();
+        with_small_tree(&app);
+        let dir = tempfile::tempdir().unwrap();
+        let params = json!({"path": dir.path().join("p.csv").to_string_lossy()});
+        lock_session(&app.session).execute("export.csv", &params).unwrap();
+        assert!(dir.path().join("p.csv").is_file());
+        assert!(!fake.calls().iter().any(|c| matches!(c, dirustat_platform::PlatformCall::PickSaveFile(..))));
     }
 
     #[test]

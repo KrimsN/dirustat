@@ -84,6 +84,14 @@ pub trait PlatformServices: Send + Sync + Debug {
         Err(PlatformError::Unsupported("pick_folder"))
     }
 
+    /// Shows the native "save as" dialog (with an overwrite prompt) and blocks until it closes:
+    /// `Ok(Some(path))` for a chosen file name, `Ok(None)` for Cancel. `extension` is the file type
+    /// without the dot (`csv`); `suggested_name` pre-fills the name. Interactive only: call it from
+    /// a helper thread, never from a command. Optional: defaults to `Unsupported`.
+    fn pick_save_file(&self, _suggested_name: &str, _extension: &str) -> Result<Option<PathBuf>> {
+        Err(PlatformError::Unsupported("pick_save_file"))
+    }
+
     /// Opens `path` with its default application. Optional: defaults to `Unsupported`.
     fn open_default(&self, _path: &Path) -> Result<()> {
         Err(PlatformError::Unsupported("open_default"))

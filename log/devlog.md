@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-23 · M5.3 export (G-019 first half) · Claude
+- Landed: `export.csv`, `export.json` (streamed, node/byte/depth limits, subtree root, formula-safe CSV cells, atomic write, overwrite refusal, inside-scan refusal) in `crates/engine/src/export.rs` and `cmd/export.rs`; `export.png` through a renderer registered by the UI layer (`crates/ui/src/export_png.rs`, reuses `cushion_view::render`); File > Export submenu with a native save dialog (`platform::pick_save_file`, Win32 `GetSaveFileNameW`); detached execution off the session lock; `MapLayout::build_from`.
+- Numbers: engine 260 tests, platform 23, ui 180, workspace about 770; `cargo xtask ci` green (wasm-core skipped locally).
+- Verified: tests with synthetic trees only; the real save dialog and the PNG export in the running app were not exercised by agents.
+- Still open: `export.png` is unsupported headless; it ignores session cushion settings (M5.2) and the theme only changes background and directory colours; snapshots and comparison (M5.4); mtime is Unix seconds; CSV guard alters names starting with `= + - @` (JSON keeps exact names).
+
 ## 2026-10-23 · M5.2 · Claude (cushion look settings, grid, G-066, G-067)
 - Landed (G-018 second half): `engine::look` (`CushionLook`, `LookPatch`; strict ranges in commands and `settings.set` key `treemap.look`, clamping in `Settings::sanitize` so a hostile file is safe; shortest-decimal JSON), commands `treemap.look` and `treemap.grid` (View > Grid lines) in `cmd/look.rs`; `treemap.grid` draws 1-pixel dark lines on the right and bottom edge of every leaf tile in the cushion texture (stronger outlines in flat mode); `CushionKey` includes the look bits and the grid flag (stale picture stands in, stale job cancelled); Preferences "Treemap" section (`ui::look_prefs`: cushion and grid checkboxes, six sliders with live preview, reset; the window scrolls on short screens). A slider bug was found by the draw test: `fixed_decimals` rounds the stored value and reported a change on the first frame, so the section uses a display-only formatter.
 - Landed (quick wins): G-066 `MapKey` with the theme for the tile colour cache, test switches the theme. G-067 once-per-loss info toast for `selection_lost`; duplicate sibling names documented, not disambiguated.

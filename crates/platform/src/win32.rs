@@ -11,6 +11,10 @@ use windows_sys::Win32::Storage::FileSystem::{
 use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize};
 use windows_sys::Win32::System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SetThreadErrorMode};
 use windows_sys::Win32::System::WindowsProgramming::{DRIVE_FIXED, DRIVE_REMOVABLE};
+use windows_sys::Win32::UI::Controls::Dialogs::{
+    CommDlgExtendedError, GetSaveFileNameW, OFN_EXPLORER, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
+    OPENFILENAMEW,
+};
 use windows_sys::Win32::UI::Shell::{
     BIF_NEWDIALOGSTYLE, BIF_RETURNONLYFSDIRS, BROWSEINFOW, SEE_MASK_INVOKEIDLIST, SHBrowseForFolderW,
     SHELLEXECUTEINFOW, SHGetPathFromIDListW, ShellExecuteExW,
@@ -132,6 +136,55 @@ pub(crate) fn pick_folder(title: &str) -> Result<Option<String>, &'static str> {
         unsafe { CoUninitialize() };
     }
     result
+}
+
+/// Result of the save dialog: the chosen path, `None` for Cancel, `Err` when it could not be shown.
+/// The dialog asks before replacing an existing file and never changes the working directory.
+pub(crate) fn pick_save_file(title: &str, suggested: &str, extension: &str) -> Result<Option<String>, &'static str> {
+    const CAPACITY: usize = 32_768;
+    let title = wide(title).ok_or("title contains NUL")?;
+    let ext = wide(extension).ok_or("extension contains NUL")?;
+    // "<EXT> files (*.ext)\0*.ext\0\0": the filter is a list of NUL-terminated pairs.
+    let label = format!("{} files (*.{extension})", extension.to_uppercase());
+    let pattern = format!("*.{extension}");
+    if label.contains('\0') || pattern.contains('\0') {
+        return Err("extension contains NUL");
+    }
+    let filter: Vec<u16> = label.encode_utf16().chain([0]).chain(pattern.encode_utf16()).chain([0, 0]).collect();
+    let mut file = vec![0_u16; CAPACITY];
+    for (slot, unit) in file.iter_mut().take(CAPACITY.saturating_sub(1)).zip(suggested.encode_utf16()) {
+        *slot = unit;
+    }
+    // SAFETY: `OPENFILENAMEW` is a plain C struct of integers and pointers; all-zero is valid.
+    let mut info: OPENFILENAMEW = unsafe { core::mem::zeroed() };
+    info.lStructSize = u32::try_from(core::mem::size_of::<OPENFILENAMEW>()).map_err(|_| "struct size")?;
+    info.lpstrFilter = filter.as_ptr();
+    info.nFilterIndex = 1;
+    info.lpstrFile = file.as_mut_ptr();
+    info.nMaxFile = u32::try_from(CAPACITY).map_err(|_| "buffer size")?;
+    info.lpstrTitle = title.as_ptr();
+    info.lpstrDefExt = ext.as_ptr();
+    info.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER;
+    // SAFETY: initialises COM for this thread; the reserved pointer must be null. A negative result
+    // (a different apartment model already set) is tolerated and not paired below.
+    let com = unsafe { CoInitializeEx(null(), COINIT_APARTMENTTHREADED as u32) } >= 0;
+    // SAFETY: `info` is fully initialised; `filter`, `file`, `title` and `ext` are NUL-terminated
+    // UTF-16 buffers (`file` writable for `nMaxFile` u16s) that outlive the call. The dialog runs its
+    // own message loop on this thread.
+    let accepted = unsafe { GetSaveFileNameW(&mut info) } != 0;
+    // SAFETY: no preconditions; read right after the call that failed or was cancelled.
+    let failure = if accepted { 0 } else { unsafe { CommDlgExtendedError() } };
+    if com {
+        // SAFETY: balances the successful `CoInitializeEx` above on the same thread.
+        unsafe { CoUninitialize() };
+    }
+    if accepted {
+        Ok(Some(from_wide(&file)))
+    } else if failure == 0 {
+        Ok(None)
+    } else {
+        Err("the save dialog could not be shown")
+    }
 }
 
 /// Shows the shell properties window of `path`; `true` when the shell accepted the request.

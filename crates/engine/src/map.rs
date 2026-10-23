@@ -39,8 +39,13 @@ pub struct MapLayout {
 impl MapLayout {
     /// Lays out `tree` inside `bounds`, weighting nodes by `mode`.
     pub fn build(tree: &Tree, bounds: Rect, mode: SizeMode, opts: LayoutOptions) -> Self {
+        Self::build_from(tree, tree.root(), bounds, mode, opts)
+    }
+
+    /// Like [`Self::build`], for the subtree of `start`.
+    pub fn build_from(tree: &Tree, start: NodeId, bounds: Rect, mode: SizeMode, opts: LayoutOptions) -> Self {
         // Handles given to the treemap are positions in `ids`.
-        let mut ids: Vec<NodeId> = vec![tree.root()];
+        let mut ids: Vec<NodeId> = vec![start];
         let tiles = layout_tree(0, bounds, opts, |handle, out| {
             let Some(&node) = ids.get(handle) else { return };
             for child in tree.children(node) {

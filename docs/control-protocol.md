@@ -36,6 +36,7 @@ Implementation (`dirustat-control`): `Dispatcher` (one line in, one line out), `
 Rules:
 - A programmatic call never opens a dialog; anything that needs a dialog in the UI has a parameterized command variant.
 - `engine.execute` of `file.delete`, `file.delete_permanent`, `cleanup.run` and `platform.free_space` runs the slow part (the recycle or removal, each cleanup action, the OS volume query) with the session unlocked (QA-143, QA-144, G-062), so `session.state` and other reads answer meanwhile. While a deletion or a non-dry cleanup run is in flight, `session.state` has `removal_in_progress: true` and destructive commands and `scan.*` are `not_enabled` ("a deletion is still running"). A cleanup run stops (`stopped`, `rescan_recommended`) if the tree is replaced between two of its actions. A volume query that did not return within 3 s keeps one helper thread busy; further `platform.free_space` calls fail at once with `internal` ("an earlier query of a volume has not returned yet") until it finishes.
+- `engine.execute` of `export.csv`, `export.json` and `export.png` also runs unlocked, on a snapshot of the tree, so a long export does not block reads.
 - `engine.execute` blocks until fast commands finish; long ones (`scan.start`) return at once and progress is read through `session.state`.
 - Responses are size-limited: big trees are returned in pages (`session.tree`). One `session.tree` call examines at most 50 000 nodes; past that the answer has `truncated: true` and `visit_capped: true` (`total_children` is then a lower bound).
 - **Path parameters over control.** In `engine.execute`, every parameter named `path`, `paths`, `destination`, `only_under` or `root` (at any depth, so also `selector.only_under` of `cleanup.save`) must be an absolute local drive path (`X:\...`, `X:/...`, `\\?\X:\...`); UNC and network spellings, device namespaces (`\\.\`, `\\?\GLOBALROOT\`, `\\?\Volume{`, `\??\`), relative and drive-relative paths are `invalid_params` at once, before any I/O (QA-117). Free text (`query`, `exclude` patterns, names) is never inspected, so `\\d+` or `a//b` are fine (QA-122). The CLI and the UI are not restricted by this rule. `scan.start` returns at once: a missing or non-directory root is reported when the scan is polled (`session.poll`/`session.state`) as `invalid_params`.
@@ -61,7 +62,7 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 
 ## Command conventions
 
-- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; `treemap.cushion`, `treemap.grid`, `treemap.look`; `cleanup.list`, `cleanup.save`, `cleanup.remove`, `cleanup.preview`, `cleanup.run`; planned, not implemented yet: `export.csv`).
+- Id: `group.action` (`scan.start`, `scan.cancel`, `view.zoom_in`, `select.node`; `search.find`, `search.clear`; `file.delete`, `file.delete_permanent`, `file.move`, `file.delete_preview`, `file.journal`; `treemap.cushion`, `treemap.grid`, `treemap.look`; `cleanup.list`, `cleanup.save`, `cleanup.remove`, `cleanup.preview`, `cleanup.run`; `export.csv`, `export.json`, `export.png`; shell only: `ui.export_csv`, `ui.export_json`, `ui.export_png`).
 - Groups: `scan`, `view`, `select`, `tree`, `treemap`, `ext`, `file`, `cleanup`, `search`, `filter`, `export`, `snapshot`, `settings`, `ui` (shell only).
 - Parameters are a JSON object; every field is documented in `params_doc`; unknown fields are an `invalid_params` error.
 
@@ -87,12 +88,22 @@ dirustat-cli run --scan <folder> --cmd 'select.node={"id":0}'
 - `cleanup.preview {id}` (read-only) -> `{id, name, action, revision, count, size, truncated, budget_exhausted (5 s budget; partial list, unchecked items have status "unchecked"), items: [{id, name, kind, path, size, status: "ok"|"protected"|"stale"|"invalid", error?}]}`, largest first, at most 10000. For `empty_dir_contents` the items are the entries inside the selected folders.
 - `cleanup.run {id, dry_run?, i_understand_permanent?, confirm: true}` -> `{id, action, dry_run, count, size, truncated, budget_exhausted, deleted, deleted_size, failed, not_attempted, stopped, results: [{id, path, ok, status: "ok"|"done"|"protected"|"stale"|"invalid"|"failed", error?}], done, tree_updated, rescan_recommended, revision, ids_invalidated}`. Not enabled without a scanned tree. `reveal` shows only the largest match. Ids are invalid after a run that deleted something.
 
+## Export (`export.*`, G-019)
+
+- `export.csv {path, overwrite?, subtree?, kind?, max_nodes?, max_bytes?, max_depth?, bom?, allow_inside_scan?}` and `export.json {...same}` write the tree (or the subtree under `subtree`, a node id with `revision`, or an exact path) to `path`. Fields per row: `path`, `name`, `kind`, `size` (logical), `allocated`, `files`, `mtime` (Unix seconds), `extension`. Unknown fields: `invalid_params`.
+- CSV is RFC 4180 (CRLF, quoting); a cell starting with `=`, `+`, `-`, `@`, TAB or CR gets a leading `'` (formula-injection guard) and control characters become U+FFFD. JSON is streamed as `{schema: "dirustat.export.v1", scan_root, root, nodes: [...], rows, truncated, truncated_reason}` and keeps exact names (lossy for non-UTF-8).
+- Limits: `max_nodes` (default 1 000 000, hard 20 000 000), `max_bytes` (default 1 GiB, hard 16 GiB), `max_depth`; the result reports `truncated` and the reason instead of failing.
+- `export.png {path, overwrite?, subtree?, width?, height?, theme?, size_mode?, allow_inside_scan?}` renders the cushion-shaded treemap (16..=8192 px per side, at most 16M pixels). It needs the desktop app (the renderer is registered by the UI layer); headless hosts answer `unsupported`. It uses the default cushion look, not the session's settings.
+- Writes are safe: `path` must be a local absolute path with the right extension, in an existing directory, outside system folders and (unless `allow_inside_scan: true`) outside the scanned folder; an existing file is refused unless `overwrite: true`; the file is written to a temporary name and renamed, so a failure never leaves a partial file. Result: `{path, format, rows, bytes, truncated, ...}`.
+- `ui.export_csv`, `ui.export_json`, `ui.export_png` (File > Export) are shell commands: from the UI they open a native save dialog and then run the matching `export.*` command; they are not part of the programmatic surface.
+
 ## Channel security
 
 Loopback only, mandatory key, request size limit, rate limit; destructive commands follow `docs/safety.md`. The channel is off by default.
 
 ## Revision history
 
+- 2026-10-23 · r9: M5.3: `export.csv`, `export.json`, `export.png` and the shell commands `ui.export_*` (G-019 first half).
 - 2026-10-23 · r8: G-062: `file.delete` and `cleanup.run` act without the session lock and holds `removal_in_progress` while it runs; the busy refusal now reads "a deletion is still running".
 - 2026-10-19 · r7: M4.10: exact path addressing, `removal_in_progress`, lock-free permanent removal and `platform.free_space`, `skipped_deep`, drive-type classification.
 - 2026-10-13 · r3: documented `session.state` fields `progress.backend`, `progress.fallback_reason`, `last_scan{backend,fallback_reason}` (M3.4). Earlier revisions (r1, r2) predate this section.
