@@ -15,7 +15,7 @@
 | Layer | Crate | Responsibility | Status |
 |---|---|---|---|
 | L0 | `dirustat-model` | Arena file tree (`Tree`, `NodeId`, `Node`), iterative saturating size aggregation | skeleton + tests |
-| L0 | `dirustat-treemap` | Squarified layout (`squarify`); later cushion coefficients and hit-testing | skeleton + tests |
+| L0 | `dirustat-treemap` | Squarified layout (`squarify`, `layout_tree`), hit-testing, cushion surfaces and shading (`cushion`) | skeleton + tests |
 | L0 | `dirustat-ntfs` | NTFS MFT reading and parsing; the only `unsafe` zone (Win32 FFI) | stub |
 | L1 | `dirustat-scan` | Filesystem walk to `Tree`: portable parallel and fast MFT paths; progress and cancellation | stub |
 | L2 | `dirustat-engine` | `Session`, command registry, extension statistics, search, filters, snapshots, actions | skeleton |

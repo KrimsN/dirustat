@@ -531,6 +531,7 @@ impl DirustatApp {
                 let next = if session.map_size_mode() == SizeMode::Allocated { "logical" } else { "allocated" };
                 Some(json!({ "mode": next }))
             }
+            "treemap.cushion" => Some(json!({})),
             "platform.reveal" | "platform.properties" => session.selection().map(|n| json!({ "id": n.index() })),
             _ => {
                 let info = infos.iter().find(|i| i.id == id)?;
@@ -555,6 +556,7 @@ impl DirustatApp {
             info.id,
             "scan.start"
                 | "view.size_mode"
+                | "treemap.cushion"
                 | "platform.reveal"
                 | "platform.properties"
                 | "file.delete"
@@ -983,14 +985,14 @@ impl DirustatApp {
                 items.push(item);
             }
         };
-        let (has_selection, has_hits, delete_block) = {
+        let (has_selection, has_hits, delete_block, cushion_on) = {
             let session = lock_session(&self.session);
             let selection = session.selection();
             let block = match selection {
                 Some(node) => delete_dialog::node_block_reason(&session, node),
                 None => delete_dialog::block_reason(&session),
             };
-            (selection.is_some(), !session.search_hits().is_empty(), block)
+            (selection.is_some(), !session.search_hits().is_empty(), block, session.settings().treemap.cushion)
         };
         for i in infos.iter().filter(|i| !Self::menu_of(i).is_empty() && Self::runnable_without_form(i)) {
             let menu = Self::menu_of(i);
@@ -1011,7 +1013,7 @@ impl DirustatApp {
                 label,
                 shortcut: Self::shortcut_of(i),
                 enabled: i.enabled && satisfied,
-                checked: false,
+                checked: i.id == "treemap.cushion" && cushion_on,
                 disabled_reason: if needs == Needs::Deletable && has_selection { delete_block } else { None },
             };
             add(menu, item);
@@ -1481,6 +1483,25 @@ mod tests {
         let entries = DirustatApp::palette_entries(&infos);
         assert!(entries.iter().any(|e| e.id == "ui.command_palette"));
         assert!(entries.iter().all(|e| e.id != "select.node"));
+    }
+
+    #[test]
+    fn cushion_menu_item_is_checked_and_toggles_the_setting() {
+        let mut app = DirustatApp::new();
+        let item_checked = |app: &DirustatApp| {
+            let infos = app.session().commands();
+            let groups = app.menu_groups(&infos);
+            let found = groups.iter().flat_map(|(_, i)| i).find(|i| i.id == "treemap.cushion");
+            found.map(|i| (i.checked, i.enabled))
+        };
+        assert_eq!(item_checked(&app), Some((true, true)), "on by default, listed in the View menu");
+        let infos = app.session().commands();
+        assert!(DirustatApp::palette_entries(&infos).iter().any(|e| e.id == "treemap.cushion"));
+        assert!(app.run_command("treemap.cushion").is_ok());
+        assert!(!app.session().settings().treemap.cushion);
+        assert_eq!(item_checked(&app), Some((false, true)));
+        assert!(app.run_command("treemap.cushion").is_ok());
+        assert_eq!(item_checked(&app), Some((true, true)));
     }
 
     #[test]

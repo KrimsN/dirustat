@@ -75,7 +75,8 @@ impl Default for SortSetting {
     }
 }
 
-/// Treemap display options (placeholder set; the layout does not read them yet).
+/// Treemap display options. `cushion` is read by the shell's painter (`treemap.cushion` command);
+/// the other two are placeholders the layout does not read yet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TreemapSettings {

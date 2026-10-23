@@ -6,6 +6,7 @@ pub mod cleanups_ui;
 pub mod commands;
 pub mod context_menu;
 pub mod contrast;
+pub mod cushion_view;
 pub mod delete_dialog;
 pub mod demo;
 pub mod drive_picker;
