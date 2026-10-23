@@ -255,10 +255,17 @@ impl Session {
         // A selection made against the previous tree (also one issued while this scan was
         // finishing) follows its node into the new tree by path instead of being dropped.
         let kept = self.selection_names().zip(self.selection().and_then(|n| self.node_path(n)));
+        // A selection whose parent chain is broken cannot be followed: report it, never drop it silently.
+        let unfollowable = match (&kept, self.selection()) {
+            (None, Some(node)) => Some(self.node_path(node).unwrap_or_default()),
+            _ => None,
+        };
         self.tree = Arc::new(outcome.tree);
         self.tree_replaced();
         if let Some((names, path)) = kept {
             self.restore_selection(&names, path);
+        } else if let Some(path) = unfollowable {
+            self.mark_selection_lost(path);
         }
         Ok(true)
     }

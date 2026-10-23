@@ -171,6 +171,18 @@ mod tests {
     }
 
     #[test]
+    fn selecting_by_click_clears_the_lost_selection_report() {
+        let (dir, mut s) = scanned();
+        s.execute("select.node", &json!({"id": id_named(&s, "a.txt")})).unwrap();
+        std::fs::remove_file(dir.path().join("sub").join("a.txt")).unwrap();
+        rescan(&mut s, dir.path());
+        assert!(s.state_json()["selection_lost"].is_string());
+        s.map_layout(dirustat_treemap::Rect { x: 0.0, y: 0.0, w: 400.0, h: 300.0 });
+        assert!(s.select_at(1.0, 1.0).is_some());
+        assert!(s.state_json()["selection_lost"].is_null());
+    }
+
+    #[test]
     fn selection_does_not_follow_into_a_different_root() {
         let (_dir, mut s) = scanned();
         s.execute("select.node", &json!({"id": id_named(&s, "a.txt")})).unwrap();

@@ -149,10 +149,6 @@ impl MapState {
     }
 }
 
-/// Upper bound on the depth followed when carrying a selection across a tree replacement
-/// (a broken parent chain cannot loop).
-const MAX_SELECTION_DEPTH: usize = 4096;
-
 fn bounds_from_bits(bits: [u32; 4]) -> Rect {
     Rect {
         x: f32::from_bits(bits[0]),
@@ -380,6 +376,7 @@ impl Session {
     /// Selects the node under the point (or clears the selection when nothing is there).
     pub fn select_at(&mut self, px: f32, py: f32) -> Option<NodeId> {
         self.map.selected = self.tile_at(px, py);
+        self.map.lost_selection = None;
         self.map.selected
     }
 
@@ -408,7 +405,8 @@ impl Session {
     pub(crate) fn selection_names(&self) -> Option<Vec<String>> {
         let mut names: Vec<String> = Vec::new();
         let mut cur = self.map.selected?;
-        for _ in 0..=MAX_SELECTION_DEPTH {
+        // A parent chain longer than the tree is cyclic; the tree size is the natural bound.
+        for _ in 0..=self.tree.len() {
             let n = self.tree.get(cur)?;
             names.push(n.name().to_owned());
             match n.parent() {
@@ -442,6 +440,11 @@ impl Session {
             }
             None => self.map.lost_selection = Some(display_path),
         }
+    }
+
+    /// Records that the selection at `path` could not be carried over to the new tree.
+    pub(crate) fn mark_selection_lost(&mut self, path: String) {
+        self.map.lost_selection = Some(path);
     }
 
     /// Path of the selection dropped when the last scan finished (the node is not in the new tree).
@@ -567,6 +570,21 @@ mod tests {
         }
         assert!(!s.select_node(last), "id outside the arena is rejected");
         assert_eq!(s.selection(), Some(root));
+    }
+
+    #[test]
+    fn selection_names_follow_chains_deeper_than_4096() {
+        let mut tree = Tree::new("root");
+        let mut last = tree.root();
+        for _ in 0..5000 {
+            last = tree.add_child(last, "d", NodeKind::Dir, 0).unwrap();
+        }
+        let mut s = Session::new();
+        s.replace_tree(tree);
+        assert!(s.select_node(last));
+        let names = s.selection_names().expect("deep chain is followed");
+        assert_eq!(names.len(), 5001);
+        assert_eq!(names.first().map(String::as_str), Some("root"));
     }
 
     #[test]
