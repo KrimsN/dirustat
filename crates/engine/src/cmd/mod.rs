@@ -23,6 +23,7 @@ mod view;
 
 pub use detached::{DetachedJob, JobOutcome, Prepared, execute_unlocked};
 pub use privileges::{FastPathStatus, fast_path_status, volume_root_of};
+pub use tree::tree_node_path;
 
 use crate::{CommandError, Session, guard};
 use serde::Serialize;

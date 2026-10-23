@@ -19,8 +19,6 @@ const MIN_OUTLINE_PX: f32 = 5.0;
 const HIT_RING_PX: f32 = 2.0;
 /// Tiles smaller than this get a single ring.
 const HIT_RING_MIN_PX: f32 = 10.0;
-/// Upper bound on the number of parent hops when building a path (cyclic arenas cannot hang us).
-const MAX_PATH_DEPTH: usize = 4096;
 
 /// Panel-local layout bounds for a panel of `size` points: whole pixels, never negative or NaN.
 pub fn bounds_for_size(width: f32, height: f32) -> Rect {
@@ -59,20 +57,11 @@ fn to_screen(origin: Pos2, r: Rect) -> egui::Rect {
     egui::Rect::from_min_size(Pos2::new(origin.x + r.x, origin.y + r.y), egui::vec2(r.w, r.h))
 }
 
-/// `/`-joined path of a node from the scan root (bounded, iterative).
+/// Path of a node for the tooltip: the same join as `tree.path` / `Session::node_path` (platform
+/// separator, normalized root), computed on the tree the map snapshot was built from. Empty for an
+/// unknown node or a broken parent chain.
 pub fn node_path(tree: &Tree, node: NodeId) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    let mut cur = Some(node);
-    while let Some(id) = cur {
-        if parts.len() >= MAX_PATH_DEPTH {
-            break;
-        }
-        let Some(n) = tree.get(id) else { break };
-        parts.push(n.name());
-        cur = n.parent();
-    }
-    parts.reverse();
-    parts.join("/")
+    dirustat_engine::tree_node_path(tree, node).unwrap_or_default()
 }
 
 /// Per-tile colours, cached across frames in egui's temp memory.
@@ -342,8 +331,25 @@ mod tests {
         let root = tree.root();
         let d = tree.add_child(root, "d", NodeKind::Dir, 0).unwrap();
         let f = tree.add_child(d, "f.txt", NodeKind::File, 1).unwrap();
-        assert_eq!(node_path(&tree, f), "root/d/f.txt");
+        let sep = std::path::MAIN_SEPARATOR;
+        assert_eq!(node_path(&tree, f), format!("root{sep}d{sep}f.txt"));
         assert_eq!(node_path(&tree, root), "root");
+    }
+
+    #[test]
+    fn tooltip_path_matches_tree_path() {
+        // Trailing separator on the root and a Windows-style root must not double the separator.
+        let (mut s, _dir) = scanned_session();
+        let nodes: Vec<NodeId> = (0..s.tree().len()).filter_map(|i| s.tree().node_at(i)).collect();
+        assert!(nodes.len() > 3);
+        for id in nodes {
+            let expected = s.execute("tree.path", &serde_json::json!({ "node": id.index() })).unwrap();
+            assert_eq!(node_path(s.tree(), id), expected["path"].as_str().unwrap());
+        }
+        let mut tree = Tree::new("C:\\");
+        let root = tree.root();
+        let f = tree.add_child(root, "f.txt", NodeKind::File, 1).unwrap();
+        assert_eq!(node_path(&tree, f), "C:\\f.txt");
     }
 
     fn scanned_session() -> (Session, tempfile::TempDir) {
