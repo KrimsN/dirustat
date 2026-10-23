@@ -6,7 +6,7 @@ use super::select::node_by_index;
 use super::{CommandSpec, always, parse_params};
 use crate::search::Budget;
 use crate::{CommandError, Session};
-use dirustat_model::{NodeId, NodeKind};
+use dirustat_model::{NodeId, NodeKind, Tree};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -154,19 +154,23 @@ impl Session {
     /// node. Walks up the parent chain with a step bound of the tree size; `None` for an unknown
     /// node or a broken parent chain.
     pub fn node_path(&self, node: NodeId) -> Option<String> {
-        let tree = self.tree();
-        let mut names: Vec<&str> = Vec::new();
-        let mut cur = node;
-        for _ in 0..=tree.len() {
-            let n = tree.get(cur)?;
-            names.push(n.name());
-            match n.parent() {
-                Some(parent) => cur = parent,
-                None => return Some(join_path(names.into_iter().rev())),
-            }
-        }
-        None
+        path_in(self.tree(), node)
     }
+}
+
+/// [`Session::node_path`] for any tree (background jobs hold their own `Arc<Tree>`).
+pub(crate) fn path_in(tree: &Tree, node: NodeId) -> Option<String> {
+    let mut names: Vec<&str> = Vec::new();
+    let mut cur = node;
+    for _ in 0..=tree.len() {
+        let n = tree.get(cur)?;
+        names.push(n.name());
+        match n.parent() {
+            Some(parent) => cur = parent,
+            None => return Some(join_path(names.into_iter().rev())),
+        }
+    }
+    None
 }
 
 fn join_path<'a>(parts: impl Iterator<Item = &'a str>) -> String {

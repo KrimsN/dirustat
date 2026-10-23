@@ -8,6 +8,7 @@
 pub mod cleanup;
 mod cmd;
 mod drives;
+pub mod duplicates;
 mod ext;
 mod fsops;
 mod guard;
@@ -136,6 +137,8 @@ pub struct Session {
     /// Set while a helper thread waits for the OS to answer a volume query (QA-143).
     volume_query_busy: Arc<AtomicBool>,
     volume_query_timeout: Duration,
+    /// Duplicate search job and result (`duplicates.*`), valid for one tree revision.
+    dups: cmd::DupState,
 }
 
 /// Default time `platform.free_space` waits for a volume (short in tests).
@@ -174,6 +177,7 @@ impl Session {
             removal_busy: Arc::new(AtomicBool::new(false)),
             volume_query_busy: Arc::new(AtomicBool::new(false)),
             volume_query_timeout: DEFAULT_VOLUME_QUERY_TIMEOUT,
+            dups: cmd::DupState::default(),
         }
     }
 

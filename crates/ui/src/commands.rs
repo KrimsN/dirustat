@@ -110,6 +110,10 @@ fn journal(s: &mut UiState) -> UiEffect {
     s.journal.loaded = false;
     UiEffect::None
 }
+fn duplicates(s: &mut UiState) -> UiEffect {
+    s.duplicates.open = !s.duplicates.open;
+    UiEffect::None
+}
 
 const NONE: &str = "none";
 
@@ -168,6 +172,15 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params_doc: NONE,
         checked: Some(|s| s.journal.open),
         run: journal,
+    },
+    UiCommand {
+        id: "ui.duplicates",
+        label: "Duplicate files",
+        menu: "Tools/Duplicate files",
+        shortcut: None,
+        params_doc: NONE,
+        checked: Some(|s| s.duplicates.open),
+        run: duplicates,
     },
     UiCommand {
         id: "ui.refresh_drives",

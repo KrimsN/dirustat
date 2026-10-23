@@ -7,6 +7,7 @@
 
 mod cleanup;
 mod detached;
+mod duplicates;
 mod file;
 mod list;
 mod platform;
@@ -22,7 +23,9 @@ mod tree;
 mod view;
 
 pub use detached::{DetachedJob, JobOutcome, Prepared, execute_unlocked};
+pub(crate) use duplicates::DupState;
 pub use privileges::{FastPathStatus, fast_path_status, volume_root_of};
+pub(crate) use tree::path_in;
 
 use crate::{CommandError, Session, guard};
 use serde::Serialize;
@@ -83,6 +86,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(platform::specs());
         all.extend(file::specs());
         all.extend(cleanup::specs());
+        all.extend(duplicates::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all

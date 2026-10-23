@@ -51,6 +51,7 @@ Every dependency is justified in the table below (add a row in the same change).
 | `windows-sys` 0.61 (more features) | platform (cfg windows) | drives, free space, shell properties in the isolated `win32.rs` (ADR 0009); same crate as above | MIT OR Apache-2.0 | accepted 2026-10-18 |
 | `trash` 5 | platform (cfg windows) | move to the recycle bin without own `unsafe`; alternative: `SHFileOperationW` by hand (more unsafe) | MIT | accepted 2026-10-18 |
 | `regex` 1 (std, perf, unicode) | engine | `search.find` regex mode; linear-time automata engine (no catastrophic backtracking), enforced `size_limit`, pattern length cap; alternative: hand-written matcher (error-prone) | MIT OR Apache-2.0 | accepted 2026-10-18 |
+| `blake3` 1 (no default features, `pure`) | engine | content hash of the duplicate finder (`duplicates.*`, G-020): 256-bit, fast portable Rust, no C or assembly build step (`pure`), streaming `Hasher`; brings `constant_time_eq`; alternatives: SHA-256 (slower, hand-rolled or another crate), std `DefaultHasher` (64-bit, collisions plausible on millions of files) | Apache-2.0 OR CC0-1.0 OR Apache-2.0 WITH LLVM-exception | accepted 2026-10-23 |
 
 Planned (decided in an ADR when introduced): `image` (PNG export).
 

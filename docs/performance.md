@@ -1,6 +1,6 @@
 # Performance
 
-> Status: 2026-10-13 · revision 2. Budgets are in `perf/budgets.toml`; `enforce = false` for now because nothing is measured yet.
+> Status: 2026-10-13 · revision 3. Budgets are in `perf/budgets.toml`; `enforce = false` for now because nothing is measured yet.
 
 ## Targets
 
@@ -28,6 +28,14 @@
 4. **Treemap:** limit layout depth by minimum rectangle size (do not lay out below 1-2 pixels), cache by (revision, size, focus), render as a single mesh/texture with cushion shading, rebuild only when the cache changes.
 5. **Tree/list UI:** row virtualization (draw only visible rows), sort in the background.
 6. **Memory:** intern extensions, names as `Box<str>`; cluster counts as `u32` units where that saves space.
+
+## Duplicate finder (`duplicates.*`)
+
+- Cost is dominated by disk reads, so the pipeline reads as little as possible: only files that share a logical size are opened, then only their first and last 64 KiB, and the whole file only when those collide (files up to 128 KiB are read once, whole). A tree with no equal sizes never touches the disk.
+- Memory: 16 bytes per eligible file for the size sort plus the ids of the candidate runs; one 256 KiB buffer per worker (at most 4 workers); paths are built on demand from the tree (no stored path strings) and only the requested number of groups (default 1000) is kept.
+- The job runs on its own thread and never holds the session lock; the UI polls `duplicates.status` once per frame. Cancel is checked per file and per buffer, so it takes effect within one 256 KiB read per worker.
+- File identity (for unflagged hardlinks) is queried only for members of confirmed groups, not for every candidate.
+- Not measured yet at 1M files or on a spinning disk (several workers can hurt a hard disk; lower `MAX_WORKERS` in `crates/engine/src/duplicates.rs` if so).
 
 ## Anti-patterns
 
