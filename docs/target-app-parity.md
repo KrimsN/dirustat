@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-23 · revision 12 · WinDirStat done 11/34 (partial 17), WizTree done 2/12 (partial 4). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-23 · revision 13 · WinDirStat done 11/34 (partial 17), WizTree done 3/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -52,8 +52,8 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 3 | Flat list of all files | `view.file_list` | M2 | missing |
 | 4 | Top largest files | `list.largest_files` | M2 | partial (engine command with tests, callable from CLI/control/MCP; no UI panel; O(n) per call, see G-025) |
 | 5 | Search with wildcard/regex | `search.find` (mode) | M4 | done 2026-10-18 (search bar with substring/wildcard/regex, case and path toggles, size and extension filters, result list, tree and treemap highlight, inline errors; screenshots `docs/qa/evidence/ui-m44-search-dark.png`, `ui-m44-search-light.png`) |
-| 6 | CSV export | `export.csv` | M5 | missing |
-| 7 | Treemap image export | `export.image` | M5 | missing |
+| 6 | CSV export | `export.csv` | M5 | done 2026-10-23 (CSV and JSON, streamed, limits, formula-safe cells, atomic write, File > Export; native save dialog not exercised by agents) |
+| 7 | Treemap image export | `export.png` | M5 | partial 2026-10-23 (cushion-shaded PNG of a subtree at a chosen size, desktop app only; default cushion look, checked on synthetic data only) |
 | 8 | Save/load scan snapshots | `snapshot.save` / `snapshot.load` | M5 | missing |
 | 9 | Compare snapshots | `snapshot.compare` | M5 | missing |
 | 10 | Drive picker with fill bars | `list.drives` | M2 | done 2026-10-18 (start-screen picker and Drives menu with fill bars from `list.drives`, click starts `scan.start`; free space of the scanned volume in the status bar via `platform.free_space`; screenshots `docs/qa/evidence/ui-m44-start-dark.png`, `ui-m44-start-light.png`) |
@@ -69,7 +69,7 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 | Metric | Value |
 |---|---|
 | WinDirStat, `done` | 11 / 34 (partial 17) |
-| WizTree, `done` | 2 / 12 (partial 4) |
+| WizTree, `done` | 3 / 12 (partial 5) |
 | MFT scan speed (1M files) | 0.31 / 0.74 / 3.26 s over 3 elevated release runs on a VHDX (budget ≤ 3 s, one outlier: G-052; devlog 2026-10-15) |
 
 ## Revision history
@@ -86,3 +86,4 @@ Duplicate file finder (size → partial hash → full hash), change history betw
 - 2026-10-19 · r10: M4.7 UI part 2. Rows 26 (delete to recycle bin), 27 (delete permanently) and 29 (user-defined cleanups) moved `partial` -> `done` with screenshots. Recounted: WinDirStat done 10/34, partial 13.
 - 2026-10-19 · r11: M4 code complete (M4.1-M4.10). Rows 25 (reveal), 28 (copy path) and 30 (properties) moved `missing` -> `partial` (commands, UI hooks and tests; real shell calls never run by agents, no screenshots). Row 31 (search by name) moved `missing` -> `done` (same feature and evidence as B5). Rows 26, 27, 29 stay `done`; M4.8 and M4.10 safety fixes (QA-116..QA-146) do not change row status. Fixed the stale Metrics table (it still said 7/34). Recounted from rows: WinDirStat done 11/34 (A1, A3, A10, A11, A13, A21, A26, A27, A29, A31, A33), partial 16 (A4-A9, A17, A18, A20, A22, A23, A25, A28, A30, A32, A34); WizTree unchanged (done 2: B5, B10; partial 4: B1, B2, B4, B11).
 - 2026-10-23 · r12: M5.1 (G-018 first half). Row 14 (cushion shading) moved `missing` -> `partial`: implemented and tested, but checked visually on the synthetic demo only, budget not enforced, 1M nodes not re-measured. Row 15 stays `missing` (note added). The G-064, G-065, G-053, G-054 fixes do not change any row. Recounted from rows: WinDirStat done 11/34 (unchanged), partial 17 (A4-A9, A14, A17, A18, A20, A22, A23, A25, A28, A30, A32, A34); WizTree unchanged (done 2, partial 4). Metrics: the MFT scan speed row now quotes the 2026-10-15 measurement, as `ROADMAP.md` already did.
+- 2026-10-23 · r13: M5.3 (G-019 first half). B6 (CSV export) `missing` -> `done`, B7 (treemap image export) `missing` -> `partial`. Recounted: WizTree done 3, partial 5.

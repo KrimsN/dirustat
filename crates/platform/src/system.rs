@@ -91,6 +91,12 @@ impl PlatformServices for SystemPlatform {
             .map_err(|message| PlatformError::Failed { op: "pick_folder", message: message.to_owned() })
     }
 
+    fn pick_save_file(&self, suggested_name: &str, extension: &str) -> Result<Option<PathBuf>> {
+        crate::win32::pick_save_file("Export", suggested_name, extension)
+            .map(|chosen| chosen.map(PathBuf::from))
+            .map_err(|message| PlatformError::Failed { op: "pick_save_file", message: message.to_owned() })
+    }
+
     fn show_properties(&self, path: &Path) -> Result<()> {
         let text = crate::path::validate_absolute(path)?;
         crate::path::require_exists(path, text)?;

@@ -2,6 +2,12 @@
 
 New entries go on top. Format: `docs/progress-docs.md`.
 
+## 2026-10-23 · M5.3 export (G-019 first half) · Claude
+- Landed: `export.csv`, `export.json` (streamed, node/byte/depth limits, subtree root, formula-safe CSV cells, atomic write, overwrite refusal, inside-scan refusal) in `crates/engine/src/export.rs` and `cmd/export.rs`; `export.png` through a renderer registered by the UI layer (`crates/ui/src/export_png.rs`, reuses `cushion_view::render`); File > Export submenu with a native save dialog (`platform::pick_save_file`, Win32 `GetSaveFileNameW`); detached execution off the session lock; `MapLayout::build_from`.
+- Numbers: engine 260 tests, platform 23, ui 180, workspace about 770; `cargo xtask ci` green (wasm-core skipped locally).
+- Verified: tests with synthetic trees only; the real save dialog and the PNG export in the running app were not exercised by agents.
+- Still open: `export.png` is unsupported headless; it ignores session cushion settings (M5.2) and the theme only changes background and directory colours; snapshots and comparison (M5.4); mtime is Unix seconds; CSV guard alters names starting with `= + - @` (JSON keeps exact names).
+
 ## 2026-10-23 · M5.1 and QA quick fixes · Claude
 - Landed (M5.1, G-018 first half; commits 6ddcc4d, 9d24ef5): cushion shading by the van Wijk paper algorithm (`crates/treemap/src/cushion.rs`); background renderer `crates/ui/src/cushion_view.rs` cached by revision/size/theme, with a cancel flag, a 300 ms settle gate and the texture side clamped to the GPU limit; command `treemap.cushion` (View > Cushion shading), setting `treemap.cushion` (default on); budget row `treemap_cushion_shading_100k_nodes_1080p` (25 ms, `enforce = false`).
 - Landed (QA, commit fdc325e): G-064 (QA-148) whitespace-only names are addressable and deletable (exact key in `fsops::verify_location`, permissive key kept only for protection over-matching in `protected.rs`), move destinations ending in `\n` or `\t` give `invalid_params`. G-065 (QA-149) scan reads multi-link files itself with `symlink_metadata` (`entry_from` in `crates/scan/src/lib.rs`), so tree size and mtime match `verify_matches`.

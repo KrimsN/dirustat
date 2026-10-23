@@ -15,6 +15,45 @@ pub enum UiEffect {
     CopyPath,
     /// Open the native folder dialog; the app scans the chosen folder (dialog runs on a helper thread).
     BrowseFolder,
+    /// Open the native save dialog; the app runs the matching `export.*` command with the chosen file.
+    Export(ExportKind),
+}
+
+/// What File > Export writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportKind {
+    Csv,
+    Json,
+    Png,
+}
+
+impl ExportKind {
+    /// The engine command the chosen file is handed to.
+    pub fn command(self) -> &'static str {
+        match self {
+            Self::Csv => "export.csv",
+            Self::Json => "export.json",
+            Self::Png => "export.png",
+        }
+    }
+
+    /// File extension without the dot.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Csv => "csv",
+            Self::Json => "json",
+            Self::Png => "png",
+        }
+    }
+
+    /// Name pre-filled in the save dialog.
+    pub fn suggested_name(self) -> &'static str {
+        match self {
+            Self::Csv => "dirustat-export.csv",
+            Self::Json => "dirustat-export.json",
+            Self::Png => "dirustat-treemap.png",
+        }
+    }
 }
 
 /// A shell-only command.
@@ -101,6 +140,15 @@ fn copy_path(_: &mut UiState) -> UiEffect {
 fn browse_folder(_: &mut UiState) -> UiEffect {
     UiEffect::BrowseFolder
 }
+fn export_csv(_: &mut UiState) -> UiEffect {
+    UiEffect::Export(ExportKind::Csv)
+}
+fn export_json(_: &mut UiState) -> UiEffect {
+    UiEffect::Export(ExportKind::Json)
+}
+fn export_png(_: &mut UiState) -> UiEffect {
+    UiEffect::Export(ExportKind::Png)
+}
 fn cleanups(s: &mut UiState) -> UiEffect {
     s.cleanups.open = !s.cleanups.open;
     UiEffect::None
@@ -177,6 +225,33 @@ pub const UI_COMMANDS: &[UiCommand] = &[
         params_doc: NONE,
         checked: None,
         run: refresh_drives,
+    },
+    UiCommand {
+        id: "ui.export_csv",
+        label: "Export CSV",
+        menu: "File/Export/CSV…",
+        shortcut: None,
+        params_doc: "none. Opens a save dialog (interactive only), then runs export.csv with the chosen file.",
+        checked: None,
+        run: export_csv,
+    },
+    UiCommand {
+        id: "ui.export_json",
+        label: "Export JSON",
+        menu: "File/Export/JSON…",
+        shortcut: None,
+        params_doc: "none. Opens a save dialog (interactive only), then runs export.json with the chosen file.",
+        checked: None,
+        run: export_json,
+    },
+    UiCommand {
+        id: "ui.export_png",
+        label: "Export treemap PNG",
+        menu: "File/Export/Treemap image (PNG)…",
+        shortcut: None,
+        params_doc: "none. Opens a save dialog (interactive only), then runs export.png with the chosen file.",
+        checked: None,
+        run: export_png,
     },
     UiCommand {
         id: "ui.quit",

@@ -18,6 +18,7 @@
 //! `Session::execute` keeps the all-in-one behaviour for single-threaded callers (CLI, tests).
 
 use super::cleanup::{self, CleanupStep, Next, StepOutcome};
+use super::export::{self, ExportJob};
 use super::file::{self, Begun, RemovalJob, RemovalOutcome};
 use super::platform::{self, FreeSpaceJob};
 use super::{admit, registry};
@@ -43,6 +44,7 @@ pub struct DetachedJob(Kind);
 #[derive(Debug)]
 enum Kind {
     FreeSpace(FreeSpaceJob),
+    Export(ExportJob),
     Removal(RemovalJob),
     Cleanup(CleanupStep),
 }
@@ -63,6 +65,7 @@ impl DetachedJob {
     pub fn run(self) -> JobOutcome {
         JobOutcome(match self.0 {
             Kind::FreeSpace(job) => Done::Value(job.run()),
+            Kind::Export(job) => Done::Value(job.run()),
             Kind::Removal(job) => Done::Removal(job.run()),
             Kind::Cleanup(step) => Done::Cleanup(step.run()),
         })
@@ -116,6 +119,15 @@ impl Session {
             "platform.free_space" => begin(self, id, params, |s, p| {
                 platform::begin_free_space(s, p).map(|job| Ok(DetachedJob(Kind::FreeSpace(job))))
             }),
+            "export.csv" => begin(self, id, params, |s, p| {
+                export::begin_table(s, p, crate::export::Format::Csv).map(|job| Ok(DetachedJob(Kind::Export(job))))
+            }),
+            "export.json" => begin(self, id, params, |s, p| {
+                export::begin_table(s, p, crate::export::Format::Json).map(|job| Ok(DetachedJob(Kind::Export(job))))
+            }),
+            "export.png" => {
+                begin(self, id, params, |s, p| export::begin_png(s, p).map(|job| Ok(DetachedJob(Kind::Export(job)))))
+            }
             "file.delete_permanent" => begin(self, id, params, |s, p| file::begin_permanent(s, p).map(removal_job)),
             "file.delete" => begin(self, id, params, |s, p| file::begin_recycle(s, p).map(removal_job)),
             "cleanup.run" => begin(self, id, params, |s, p| cleanup::begin_run(s, p).map(cleanup_job)),

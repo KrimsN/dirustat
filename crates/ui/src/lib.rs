@@ -10,6 +10,7 @@ pub mod cushion_view;
 pub mod delete_dialog;
 pub mod demo;
 pub mod drive_picker;
+pub mod export_png;
 pub mod ext_colors;
 pub mod ext_panel;
 pub mod fonts;
@@ -26,7 +27,7 @@ pub mod toast;
 pub mod tree_panel;
 
 pub use app::DirustatApp;
-pub use commands::{UI_COMMANDS, UiCommand, UiEffect};
+pub use commands::{ExportKind, UI_COMMANDS, UiCommand, UiEffect};
 pub use screenshot::{Region, SaveOptions, ScreenshotStatus};
 pub use state::{PanelVisibility, ScanStatus, UiState};
 pub use theme::{ThemeKind, Tokens};

@@ -8,6 +8,7 @@
 pub mod cleanup;
 mod cmd;
 mod drives;
+pub mod export;
 mod ext;
 mod fsops;
 mod guard;
@@ -185,6 +186,11 @@ impl Session {
 
     pub fn tree(&self) -> &Tree {
         &self.tree
+    }
+
+    /// Shared handle to the current tree, for work that runs without the session lock (exports).
+    pub(crate) fn tree_arc(&self) -> Arc<Tree> {
+        Arc::clone(&self.tree)
     }
 
     /// Replaces the platform services (tests pass `dirustat_platform::FakePlatform`).
