@@ -19,6 +19,7 @@ mod search;
 mod select;
 mod session;
 mod settings;
+mod snapshot;
 #[cfg(test)]
 mod testing;
 mod tree;
@@ -29,6 +30,7 @@ pub(crate) use detached::BusyGuard;
 pub use detached::{DetachedJob, JobOutcome, Prepared, execute_unlocked};
 pub(crate) use duplicates::DupState;
 pub use privileges::{FastPathStatus, fast_path_status, volume_root_of};
+pub use snapshot::SnapshotView;
 pub use tree::tree_node_path;
 
 use crate::{CommandError, Session, guard};
@@ -94,6 +96,7 @@ pub(crate) fn registry() -> &'static [CommandSpec] {
         all.extend(cleanup::specs());
         all.extend(export::specs());
         all.extend(duplicates::specs());
+        all.extend(snapshot::specs());
         #[cfg(test)]
         all.extend(testing::specs());
         all
@@ -138,6 +141,12 @@ pub(crate) fn admit(session: &Session, spec: &CommandSpec, params: &Value) -> Re
     if session.removal_in_progress() && (spec.destructive || spec.id.starts_with("scan.")) {
         return Err(CommandError::NotEnabled(format!(
             "{}: a deletion is still running; wait for it to finish",
+            spec.id
+        )));
+    }
+    if spec.destructive && session.snapshot_view().is_some() {
+        return Err(CommandError::NotEnabled(format!(
+            "{}: the tree is a saved snapshot, not the live disk; scan the folder again or close the snapshot",
             spec.id
         )));
     }

@@ -23,11 +23,12 @@ mod protected;
 mod prune;
 pub mod search;
 mod settings;
+pub mod snapshot;
 mod subtree;
 
 pub use cmd::{
-    CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, execute_unlocked, fast_path_status,
-    tree_node_path, volume_root_of,
+    CommandInfo, CommandSpec, DetachedJob, FastPathStatus, JobOutcome, Prepared, SnapshotView, execute_unlocked,
+    fast_path_status, tree_node_path, volume_root_of,
 };
 pub use free_space::{FreeSpace, FreeSplit, MAX_BAND_SHARE, MIN_BAND_WIDTH, MIN_PANEL_WIDTH, split_bounds};
 pub use map::{MapLayout, MapState, MapStateView, MapTile};
@@ -146,6 +147,8 @@ pub struct Session {
     volume: free_space::VolumeState,
     /// Duplicate search job and result (`duplicates.*`), valid for one tree revision.
     dups: cmd::DupState,
+    /// Loaded snapshots and the one being viewed (`snapshot.*`).
+    snapshots: snapshot::Store,
 }
 
 /// Default time `platform.free_space` waits for a volume (short in tests).
@@ -186,6 +189,7 @@ impl Session {
             volume_query_timeout: DEFAULT_VOLUME_QUERY_TIMEOUT,
             volume: free_space::VolumeState::default(),
             dups: cmd::DupState::default(),
+            snapshots: snapshot::Store::default(),
         }
     }
 

@@ -288,6 +288,14 @@ impl Tree {
         Ok(())
     }
 
+    /// Replaces the payload of a node (used when a tree is rebuilt from a saved snapshot).
+    /// Totals are valid after `aggregate`.
+    pub fn set_node_data(&mut self, id: NodeId, data: NodeData) -> Result<(), ModelError> {
+        let node = self.nodes.get_mut(id.index()).ok_or(ModelError::UnknownNode)?;
+        node.data = data;
+        Ok(())
+    }
+
     /// Flags a node as unreadable (e.g. a directory that denied access after it was added).
     pub fn mark_error(&mut self, id: NodeId) -> Result<(), ModelError> {
         let node = self.nodes.get_mut(id.index()).ok_or(ModelError::UnknownNode)?;

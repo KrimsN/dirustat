@@ -3,15 +3,15 @@
 //! Every action goes through a command: menus are built from `Session::commands()` plus the
 //! shell-only `UI_COMMANDS`, buttons and shortcuts dispatch by id (`DirustatApp::run_command`).
 
-use crate::commands::{self, ExportKind, Needs, UI_COMMANDS, UiEffect};
+use crate::commands::{self, ExportKind, Needs, SNAPSHOT_EXTENSION, SnapshotKind, UI_COMMANDS, UiEffect};
 use crate::delete_dialog::{self, DeleteMode, DialogEvent, DialogRequest};
 use crate::palette::{self, PaletteEntry};
 use crate::screenshot::{Region, SaveOptions, ScreenshotStatus, Screenshots};
 use crate::state::{ScanStatus, UiState};
 use crate::theme::{ThemeKind, Tokens};
 use crate::{
-    cleanups_ui, drive_picker, duplicates_ui, ext_panel, journal_ui, look_prefs, map_panel, prefs, search_panel, toast,
-    tree_panel,
+    cleanups_ui, drive_picker, duplicates_ui, ext_panel, journal_ui, look_prefs, map_panel, prefs, search_panel,
+    snapshot_ui, toast, tree_panel,
 };
 use dirustat_control::{SharedSession, lock_session, share};
 use dirustat_engine::{CommandError, CommandInfo, FastPathStatus, Session, execute_unlocked};
@@ -63,6 +63,12 @@ pub struct DirustatApp {
     export_pick: Option<(ExportKind, DialogAnswer)>,
     /// The `export.*` command running on a worker thread.
     export_job: Option<CommandJob>,
+    /// The file dialog of File > Snapshot running on a helper thread.
+    snapshot_pick: Option<(SnapshotKind, DialogAnswer)>,
+    /// The `snapshot.save` / `snapshot.load` command running on a worker thread.
+    snapshot_job: Option<(SnapshotKind, CommandJob)>,
+    /// The `snapshot.compare` command of the comparison window running on a worker thread.
+    compare_job: Option<CommandJob>,
 }
 
 /// The answer of a command running on a worker thread.
@@ -210,6 +216,9 @@ impl DirustatApp {
             free_job: None,
             export_pick: None,
             export_job: None,
+            snapshot_pick: None,
+            snapshot_job: None,
+            compare_job: None,
         }
     }
 
@@ -314,6 +323,7 @@ impl DirustatApp {
                 UiEffect::CopyPath => self.copy_selected_path()?,
                 UiEffect::BrowseFolder => self.start_browse()?,
                 UiEffect::Export(kind) => self.start_export(kind)?,
+                UiEffect::Snapshot(kind) => self.start_snapshot(kind)?,
                 UiEffect::None => {}
             }
             return Ok(json!({ "ok": true }));
@@ -468,6 +478,154 @@ impl DirustatApp {
             Err(e) => format!("Export failed: {e}"),
         });
         ctx.request_repaint();
+    }
+
+    /// Opens the native save or open dialog of File > Snapshot on a helper thread;
+    /// [`Self::poll_snapshot`] picks up the answer and runs `snapshot.save` / `snapshot.load`. Only
+    /// the interactive entry points reach this: the commands themselves take a path.
+    fn start_snapshot(&mut self, kind: SnapshotKind) -> Result<(), String> {
+        if self.snapshot_pick.is_some() || self.snapshot_job.is_some() {
+            return Ok(());
+        }
+        if kind == SnapshotKind::Save && lock_session(&self.session).tree().len() <= 1 {
+            return Err("Nothing to save: scan a folder first".to_owned());
+        }
+        let (tx, rx) = mpsc::channel();
+        let picker = Arc::clone(&self.picker);
+        std::thread::Builder::new()
+            .name("snapshot-dialog".to_owned())
+            .spawn(move || {
+                let _ = tx.send(match kind {
+                    SnapshotKind::Save => picker.pick_save_file("dirustat-snapshot.dirsnap", SNAPSHOT_EXTENSION),
+                    SnapshotKind::Open | SnapshotKind::OpenForCompare => picker.pick_open_file(SNAPSHOT_EXTENSION),
+                });
+            })
+            .map_err(|_| "Cannot open the file dialog".to_owned())?;
+        self.snapshot_pick = Some((kind, rx));
+        Ok(())
+    }
+
+    /// Applies a finished file dialog and a finished snapshot command, if any, without blocking.
+    /// The save dialog already asked about replacing the file, so it counts as permission to do so.
+    fn poll_snapshot(&mut self, ctx: &egui::Context) {
+        if let Some((kind, rx)) = &self.snapshot_pick {
+            let kind = *kind;
+            let answer = match rx.try_recv() {
+                Ok(answer) => answer,
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(SCAN_REPAINT);
+                    return;
+                }
+                Err(TryRecvError::Disconnected) => Err(PlatformError::Failed {
+                    op: "snapshot dialog",
+                    message: "the dialog thread ended without an answer".to_owned(),
+                }),
+            };
+            self.snapshot_pick = None;
+            ctx.request_repaint();
+            match answer {
+                Ok(Some(file)) => {
+                    let path = file.to_string_lossy();
+                    self.snapshot_job = Some(match kind {
+                        SnapshotKind::Save => (
+                            kind,
+                            self.spawn_command(
+                                "snapshot.save",
+                                json!({ "path": path, "overwrite": true, "allow_inside_scan": true }),
+                            ),
+                        ),
+                        SnapshotKind::Open => (kind, self.spawn_command("snapshot.load", json!({ "path": path }))),
+                        SnapshotKind::OpenForCompare => {
+                            (kind, self.spawn_command("snapshot.load", json!({ "path": path, "show": false })))
+                        }
+                    });
+                }
+                Ok(None) => {}
+                Err(PlatformError::Unsupported(_)) => {
+                    self.state.notice = Some("The file dialog is not available here".to_owned());
+                }
+                Err(err) => self.state.notice = Some(format!("Cannot open the file dialog: {err}")),
+            }
+        }
+        let Some((kind, rx)) = &self.snapshot_job else { return };
+        let kind = *kind;
+        let result = match rx.try_recv() {
+            Ok(result) => result,
+            Err(TryRecvError::Empty) => {
+                ctx.request_repaint_after(SCAN_REPAINT);
+                return;
+            }
+            Err(TryRecvError::Disconnected) => {
+                Err(CommandError::Platform("the snapshot command stopped without an answer".to_owned()))
+            }
+        };
+        self.snapshot_job = None;
+        self.state.notice = None;
+        let text = match (kind, result) {
+            (SnapshotKind::Save, Ok(v)) => {
+                format!("Saved snapshot to {}", v.get("path").and_then(Value::as_str).unwrap_or("the file"))
+            }
+            (SnapshotKind::Open, Ok(v)) => {
+                self.state.compare.base = v.get("id").and_then(Value::as_u64);
+                "Opened a snapshot: this is a read-only view of a past scan, not the live disk".to_owned()
+            }
+            (SnapshotKind::OpenForCompare, Ok(v)) => {
+                self.state.compare.base = v.get("id").and_then(Value::as_u64);
+                "Snapshot loaded: press Compare to see what changed since then".to_owned()
+            }
+            (SnapshotKind::Save, Err(e)) => format!("Saving the snapshot failed: {e}"),
+            (SnapshotKind::Open | SnapshotKind::OpenForCompare, Err(e)) => {
+                format!("Opening the snapshot failed: {e}")
+            }
+        };
+        toast::push(&mut self.state, toast::ToastKind::Info, text);
+        ctx.request_repaint();
+    }
+
+    /// Tools > Compare with snapshot. The comparison runs on a worker thread.
+    fn compare_window(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.compare_job {
+            match rx.try_recv() {
+                Ok(answer) => {
+                    self.compare_job = None;
+                    snapshot_ui::apply_result(&mut self.state.compare, answer);
+                }
+                Err(TryRecvError::Empty) => ctx.request_repaint_after(SCAN_REPAINT),
+                Err(TryRecvError::Disconnected) => {
+                    self.compare_job = None;
+                    snapshot_ui::apply_result(
+                        &mut self.state.compare,
+                        Err(CommandError::Platform("the comparison stopped without an answer".to_owned())),
+                    );
+                }
+            }
+        }
+        if !self.state.compare.open {
+            return;
+        }
+        let selected = {
+            let mut session = lock_session(&self.session);
+            snapshot_ui::refresh(&mut session, &mut self.state.compare);
+            session.selection().map(|n| n.index())
+        };
+        match snapshot_ui::show(ctx, &mut self.state.compare, selected, &self.tokens) {
+            Some(snapshot_ui::CompareAction::Run) => {
+                if let Some(params) = snapshot_ui::request(&self.state.compare) {
+                    self.state.compare.running = true;
+                    self.state.compare.error = None;
+                    self.compare_job = Some(self.spawn_command("snapshot.compare", params));
+                }
+            }
+            Some(snapshot_ui::CompareAction::OpenFile) => {
+                if let Err(message) = self.start_snapshot(SnapshotKind::OpenForCompare) {
+                    self.state.notice = Some(message);
+                }
+            }
+            Some(snapshot_ui::CompareAction::Select(id)) => {
+                snapshot_ui::select(&mut lock_session(&self.session), &mut self.state.compare, id);
+            }
+            None => {}
+        }
     }
 
     /// Queues the path of the selected node for the clipboard.
@@ -778,6 +936,7 @@ impl DirustatApp {
         self.announce_lost_selection();
         self.poll_browse(&ctx);
         self.poll_export(&ctx);
+        self.poll_snapshot(&ctx);
         self.poll_command_job(&ctx);
         self.poll_free_space(&ctx);
         if ctx.input(|i| i.viewport().close_requested()) && self.deletion_running() {
@@ -817,6 +976,7 @@ impl DirustatApp {
         self.cleanups_window(&ctx);
         self.journal_window(&ctx);
         self.duplicates_window(&ctx);
+        self.compare_window(&ctx);
         self.delete_dialog_window(&ctx);
         toast::show(&ctx, &mut self.state, &self.tokens);
         let entries = Self::palette_entries(&infos);
@@ -1325,6 +1485,11 @@ impl DirustatApp {
                     ui.label(human_size(total));
                 }
                 ui.separator();
+                if let Some(snap) = session.snapshot_view() {
+                    ui.colored_label(Tokens::color(tokens.warning), "SNAPSHOT (read-only)")
+                        .on_hover_text(format!("A saved scan, not the live disk: {}", snap.path));
+                    ui.separator();
+                }
                 match &self.state.scan {
                     ScanStatus::Idle => {
                         ui.colored_label(Tokens::color(tokens.text_muted), "Idle");
@@ -1959,6 +2124,45 @@ mod tests {
         assert!(app.run_command("ui.export_csv").is_ok());
         wait_export(&mut app, &ctx);
         assert!(app.state().notice.clone().unwrap_or_default().starts_with("Exported"));
+    }
+
+    /// Runs frames until the file dialog and the snapshot command it started are both done.
+    fn wait_snapshot(app: &mut DirustatApp, ctx: &egui::Context) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while (app.snapshot_pick.is_some() || app.snapshot_job.is_some()) && Instant::now() < deadline {
+            let _ = frame(app, ctx);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let _ = frame(app, ctx);
+    }
+
+    #[test]
+    fn snapshot_menu_saves_opens_and_blocks_deleting() {
+        let (mut app, fake) = app_with_fake();
+        app.set_folder_picker(fake.clone());
+        let ctx = egui::Context::default();
+        assert!(app.run_command("ui.snapshot_save").is_err(), "nothing scanned yet");
+        with_small_tree(&app);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.dirsnap");
+        fake.set_picked_save_file(Some(file.clone()));
+        assert!(app.run_command("ui.snapshot_save").is_ok());
+        wait_snapshot(&mut app, &ctx);
+        assert!(file.is_file());
+        assert!(lock_session(&app.session).snapshot_view().is_none());
+
+        fake.set_picked_open_file(Some(file));
+        assert!(app.run_command("ui.snapshot_open").is_ok());
+        wait_snapshot(&mut app, &ctx);
+        let session = lock_session(&app.session);
+        assert!(session.snapshot_view().is_some(), "the snapshot is the current tree");
+        assert!(delete_dialog::block_reason(&session).is_some_and(|r| r.contains("snapshot")));
+        drop(session);
+        assert!(!app.state().compare.open);
+        assert!(app.run_command("ui.compare").is_ok());
+        assert!(app.state().compare.open);
+        let _ = frame(&mut app, &ctx);
+        assert_eq!(app.state().compare.snapshots.len(), 1);
     }
 
     #[test]

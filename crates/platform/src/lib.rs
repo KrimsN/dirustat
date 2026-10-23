@@ -92,6 +92,13 @@ pub trait PlatformServices: Send + Sync + Debug {
         Err(PlatformError::Unsupported("pick_save_file"))
     }
 
+    /// Shows the native "open file" dialog and blocks until it closes: `Ok(Some(path))` for a chosen
+    /// existing file, `Ok(None)` for Cancel. `extension` is the file type without the dot. Interactive
+    /// only: call it from a helper thread, never from a command. Optional: defaults to `Unsupported`.
+    fn pick_open_file(&self, _extension: &str) -> Result<Option<PathBuf>> {
+        Err(PlatformError::Unsupported("pick_open_file"))
+    }
+
     /// Opens `path` with its default application. Optional: defaults to `Unsupported`.
     fn open_default(&self, _path: &Path) -> Result<()> {
         Err(PlatformError::Unsupported("open_default"))

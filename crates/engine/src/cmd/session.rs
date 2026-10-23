@@ -71,6 +71,7 @@ impl Session {
             "partial_scan": self.partial_scan,
             "rescan_recommended": self.rescan_recommended,
             "removal_in_progress": self.removal_in_progress(),
+            "snapshot": self.snapshot_view_json(),
         })
     }
 }

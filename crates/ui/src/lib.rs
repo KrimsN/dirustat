@@ -22,6 +22,7 @@ pub mod palette;
 pub mod prefs;
 pub mod screenshot;
 pub mod search_panel;
+pub mod snapshot_ui;
 pub mod state;
 pub mod text_fit;
 pub mod theme;

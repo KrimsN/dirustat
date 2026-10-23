@@ -161,6 +161,9 @@ pub struct UiState {
     /// The Duplicate files window (`ui.duplicates`).
     #[serde(default)]
     pub duplicates: crate::duplicates_ui::DuplicatesState,
+    /// The snapshot comparison window (`ui.compare`).
+    #[serde(default)]
+    pub compare: crate::snapshot_ui::CompareState,
     /// Lifetime bookkeeping of `notice`; not serialized and ignored by equality.
     #[serde(skip)]
     pub notice_clock: NoticeClock,
@@ -254,6 +257,7 @@ impl Default for UiState {
             cleanups: crate::cleanups_ui::CleanupsState::default(),
             journal: crate::journal_ui::JournalState::default(),
             duplicates: crate::duplicates_ui::DuplicatesState::default(),
+            compare: crate::snapshot_ui::CompareState::default(),
             notice_clock: NoticeClock::default(),
             lost_announced: None,
         }
@@ -296,6 +300,7 @@ struct UiPatch {
     cleanups_open: Option<bool>,
     journal_open: Option<bool>,
     duplicates_open: Option<bool>,
+    compare_open: Option<bool>,
     /// Opens the Cleanups window, selects this cleanup and runs its (read-only) preview.
     cleanups_preview: Option<String>,
     /// Opens (or closes) the delete dialog for the selected node. Never confirms.
@@ -407,6 +412,7 @@ impl UiState {
         self.cleanups.open = p.cleanups_open.unwrap_or(self.cleanups.open);
         self.journal.open = p.journal_open.unwrap_or(self.journal.open);
         self.duplicates.open = p.duplicates_open.unwrap_or(self.duplicates.open);
+        self.compare.open = p.compare_open.unwrap_or(self.compare.open);
         if p.delete_dialog.is_some() {
             self.dialog_request = p.delete_dialog;
         }

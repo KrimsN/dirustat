@@ -21,6 +21,7 @@ use super::cleanup::{self, CleanupStep, Next, StepOutcome};
 use super::export::{self, ExportJob};
 use super::file::{self, Begun, RemovalJob, RemovalOutcome};
 use super::platform::{self, FreeSpaceJob};
+use super::snapshot::{self, SnapshotJob};
 use super::{admit, registry};
 use crate::{CommandError, Session, guard};
 use serde_json::Value;
@@ -45,6 +46,7 @@ pub struct DetachedJob(Kind);
 enum Kind {
     FreeSpace(FreeSpaceJob),
     Export(ExportJob),
+    Snapshot(SnapshotJob),
     Removal(RemovalJob),
     Cleanup(CleanupStep),
 }
@@ -56,6 +58,7 @@ pub struct JobOutcome(Done);
 #[derive(Debug)]
 enum Done {
     Value(Result<Value, CommandError>),
+    Snapshot(snapshot::Output),
     Removal(RemovalOutcome),
     Cleanup(StepOutcome),
 }
@@ -66,6 +69,7 @@ impl DetachedJob {
         JobOutcome(match self.0 {
             Kind::FreeSpace(job) => Done::Value(job.run()),
             Kind::Export(job) => Done::Value(job.run()),
+            Kind::Snapshot(job) => Done::Snapshot(job.run()),
             Kind::Removal(job) => Done::Removal(job.run()),
             Kind::Cleanup(step) => Done::Cleanup(step.run()),
         })
@@ -128,6 +132,15 @@ impl Session {
             "export.png" => {
                 begin(self, id, params, |s, p| export::begin_png(s, p).map(|job| Ok(DetachedJob(Kind::Export(job)))))
             }
+            "snapshot.save" => {
+                begin(self, id, params, |s, p| snapshot::begin_save(s, p).map(|j| Ok(DetachedJob(Kind::Snapshot(j)))))
+            }
+            "snapshot.load" => {
+                begin(self, id, params, |s, p| snapshot::begin_load(s, p).map(|j| Ok(DetachedJob(Kind::Snapshot(j)))))
+            }
+            "snapshot.compare" => begin(self, id, params, |s, p| {
+                snapshot::begin_compare(s, p).map(|j| Ok(DetachedJob(Kind::Snapshot(j))))
+            }),
             "file.delete_permanent" => begin(self, id, params, |s, p| file::begin_permanent(s, p).map(removal_job)),
             "file.delete" => begin(self, id, params, |s, p| file::begin_recycle(s, p).map(removal_job)),
             "cleanup.run" => begin(self, id, params, |s, p| cleanup::begin_run(s, p).map(cleanup_job)),
@@ -145,6 +158,7 @@ impl Session {
     pub fn finish_job(&mut self, outcome: JobOutcome) -> Prepared {
         match outcome.0 {
             Done::Value(result) => Prepared::Done(result),
+            Done::Snapshot(out) => Prepared::Done(guard::guarded("snapshot", || snapshot::finish(self, out))),
             Done::Removal(done) => Prepared::Done(guard::guarded("file.delete", || file::finish_removal(self, done))),
             Done::Cleanup(done) => {
                 match guard::guarded("cleanup.run", || Ok(cleanup_job(cleanup::finish_step(self, done)))) {

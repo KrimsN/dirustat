@@ -1,6 +1,6 @@
 # Parity with WinDirStat and WizTree
 
-> Status: 2026-10-23 · revision 15 · WinDirStat done 12/34 (partial 18), WizTree done 3/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
+> Status: 2026-10-23 · revision 15 · WinDirStat done 12/34 (partial 18), WizTree done 5/12 (partial 5). Behaviour was determined from user documentation and use of the programs as black boxes (`docs/clean-room.md`).
 
 Statuses: `missing` · `partial` · `done`. When you change a row, update the date, recount the totals in the header and in `ROADMAP.md`, and extend the revision history. Identifiers are command ids (`docs/control-protocol.md`).
 
@@ -54,8 +54,8 @@ Statuses: `missing` · `partial` · `done`. When you change a row, update the da
 | 5 | Search with wildcard/regex | `search.find` (mode) | M4 | done 2026-10-18 (search bar with substring/wildcard/regex, case and path toggles, size and extension filters, result list, tree and treemap highlight, inline errors; screenshots `docs/qa/evidence/ui-m44-search-dark.png`, `ui-m44-search-light.png`) |
 | 6 | CSV export | `export.csv` | M5 | done 2026-10-23 (CSV and JSON, streamed, limits, formula-safe cells, atomic write, File > Export; native save dialog not exercised by agents) |
 | 7 | Treemap image export | `export.png` | M5 | partial 2026-10-23 (cushion-shaded PNG of a subtree at a chosen size, desktop app only; default cushion look, checked on synthetic data only) |
-| 8 | Save/load scan snapshots | `snapshot.save` / `snapshot.load` | M5 | missing |
-| 9 | Compare snapshots | `snapshot.compare` | M5 | missing |
+| 8 | Save/load scan snapshots | `snapshot.save` / `snapshot.load` | M5 | done 2026-10-23 (versioned checksummed `.dirsnap` file, atomic write, hostile-input-safe loader, read-only flagged view that refuses destructive commands; File > Snapshot; native dialogs not exercised by agents) |
+| 9 | Compare snapshots | `snapshot.compare` | M5 | done 2026-10-23 (added/removed/grown/shrunk by path with top-N, subtree prefix and folder lines; Tools > Compare with snapshot; window not screenshotted) |
 | 10 | Drive picker with fill bars | `list.drives` | M2 | done 2026-10-18 (start-screen picker and Drives menu with fill bars from `list.drives`, click starts `scan.start`; free space of the scanned volume in the status bar via `platform.free_space`; screenshots `docs/qa/evidence/ui-m44-start-dark.png`, `ui-m44-start-light.png`) |
 | 11 | Scan non-NTFS / network paths | `scan.start` (backend `portable`) | M1 | partial (portable scan shown in the window, `scan.start` is a command; no network-path check) |
 | 12 | Portable mode (no install, settings alongside) | `settings.portable` | M6 | missing |
@@ -68,8 +68,8 @@ Duplicate file finder (`duplicates.find`; size → partial hash → full hash �
 
 | Metric | Value |
 |---|---|
-| WinDirStat, `done` | 11 / 34 (partial 18) |
-| WizTree, `done` | 3 / 12 (partial 5) |
+| WinDirStat, `done` | 12 / 34 (partial 18) |
+| WizTree, `done` | 5 / 12 (partial 5) |
 | MFT scan speed (1M files) | 0.31 / 0.74 / 3.26 s over 3 elevated release runs on a VHDX (budget ≤ 3 s, one outlier: G-052; devlog 2026-10-15) |
 
 ## Revision history
@@ -90,3 +90,4 @@ Duplicate file finder (`duplicates.find`; size → partial hash → full hash �
 - 2026-10-23 · r12: M5.1 (G-018 first half). Row 14 (cushion shading) moved `missing` -> `partial`: implemented and tested, but checked visually on the synthetic demo only, budget not enforced, 1M nodes not re-measured. Row 15 stays `missing` (note added). The G-064, G-065, G-053, G-054 fixes do not change any row. Recounted from rows: WinDirStat done 11/34 (unchanged), partial 17 (A4-A9, A14, A17, A18, A20, A22, A23, A25, A28, A30, A32, A34); WizTree unchanged (done 2, partial 4). Metrics: the MFT scan speed row now quotes the 2026-10-15 measurement, as `ROADMAP.md` already did.
 - 2026-10-23 · r13: M5.2 (G-018 second half). Row 15 moved `missing` -> `partial` (look constants and grid user-settable, UI and tests, demo screenshots only). Recounted: WinDirStat done 11/34, partial 18. G-066 and G-067 closed (no parity row).
 - 2026-10-23 · r13: M5.3 (G-019 first half). B6 (CSV export) `missing` -> `done`, B7 (treemap image export) `missing` -> `partial`. Recounted: WizTree done 3, partial 5.
+- 2026-10-23 · r14: M5.4 (G-019 second half). B8 (scan snapshots) and B9 (snapshot comparison) `missing` -> `done`. Recounted: WizTree done 5, partial 5; WinDirStat unchanged. `ROADMAP.md` summary not updated by this change.
